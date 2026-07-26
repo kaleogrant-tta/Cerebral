@@ -53,10 +53,10 @@ def resolve_service_account() -> str | None:
     resolved so `customer-origin-*.json` works on Windows too, where the shell
     does not expand globs.
     """
-    val = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    val = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip().strip('"''')
     if not val:
         return None
-    if val.startswith("{"):
+    if val.lstrip().startswith("{") or '"private_key"' in val:
         return val
 
     p = Path(val).expanduser()
@@ -86,3 +86,4 @@ def bootstrap() -> None:
     """Call at the top of any entry point."""
     load_env()
     resolve_service_account()
+

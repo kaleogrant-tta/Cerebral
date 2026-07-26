@@ -22,6 +22,7 @@ from pathlib import Path
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 SCOPES = [
@@ -97,12 +98,25 @@ class DriveClient:
                                 chunksize=8 * 1024 * 1024)
         existing = self.find(folder_id, name) if replace else None
         if existing:
-            f = self.svc.files().update(fileId=existing["id"], media_body=media).execute()
-        else:
+            # Update in place. This works for a service account; create does
+            # not, because service accounts have no storage quota of their own.
+            f = self.svc.files().update(fileId=existing["id"],
+                                        media_body=media).execute()
+            return f["id"]
+        try:
             f = self.svc.files().create(
                 body={"name": name, "parents": [folder_id]},
                 media_body=media, fields="id").execute()
-        return f["id"]
+            return f["id"]
+        except HttpError as e:
+            if "storageQuotaExceeded" in str(e):
+                raise RuntimeError(
+                    f"Cannot create '{name}' in Drive: service accounts have "
+                    f"no storage quota. Upload the file once from your own "
+                    f"Google account into that folder; every run after that "
+                    f"updates it in place."
+                ) from e
+            raise
 
     def move(self, file_id: str, to_folder: str) -> None:
         meta = self.svc.files().get(fileId=file_id, fields="parents").execute()

@@ -31,7 +31,7 @@ import gspread
 import pandas as pd
 
 from tta_config import CONFIG_VERSION, DRIVE, REPROCESS_PERIODS, SHEETS
-from tta_drive import DriveClient, DriveLock, credentials, pull_inbox
+from tta_drive import DriveClient, credentials, pull_inbox
 from tta_etl import Pipeline, discover, read_export
 
 from tta_env import bootstrap
@@ -113,7 +113,10 @@ def main() -> int:
 
     print(f"TTA scheduled refresh — config {CONFIG_VERSION}")
 
-    with DriveLock(drive, state_id, DRIVE["lock_filename"]):
+    # No Drive lock: a service account has no storage quota and cannot CREATE
+    # files, only update ones you own. The workflow's `concurrency` group
+    # already guarantees one run at a time, which is the real protection.
+    if True:
         # --- state -------------------------------------------------------
         print("  [1/6] pulling database")
         existing = drive.find(state_id, DRIVE["db_filename"])

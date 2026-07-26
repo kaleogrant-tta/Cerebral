@@ -1,0 +1,40 @@
+name: TTA scheduled refresh
+
+on:
+  schedule:
+    # 06:00 America/New_York. GitHub cron is UTC and does not observe DST,
+    # so this runs 06:00 EDT / 05:00 EST. Adjust if that matters.
+    - cron: '0 10 * * 1'
+  workflow_dispatch:          # manual trigger from the Actions tab
+
+concurrency:
+  group: tta-refresh          # never two runs at once
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run refresh
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TTA_DRIVE_INBOX:   ${{ secrets.TTA_DRIVE_INBOX }}
+          TTA_DRIVE_ARCHIVE: ${{ secrets.TTA_DRIVE_ARCHIVE }}
+          TTA_DRIVE_STATE:   ${{ secrets.TTA_DRIVE_STATE }}
+          TTA_SHEET_ID:      ${{ secrets.TTA_SHEET_ID }}
+        run: python tta_refresh.py
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::error::TTA refresh failed — Drive state unchanged, safe to re-run"

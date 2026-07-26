@@ -16,17 +16,18 @@ HERE = Path(__file__).parent
 ENV = HERE / ".env"
 
 # Already known from the Cerebral project — offered as defaults.
+# Verified against the folder names in Drive by tta_preflight.py.
 DEFAULTS = {
-    "TTA_DRIVE_STATE":   "150fo2U9wWQfncc-yB_p7hYKjl1I9ah3q",
-    "TTA_DRIVE_ARCHIVE": "13zOVT87rC8760St4IJITvPfw4b-CNs1p",
-    "TTA_DRIVE_INBOX":   "17GL1j3sAO1fexQb4RG5LTANGPO_TBbnj",
+    "TTA_DRIVE_ARCHIVE": "150fo2U9wWQfncc-yB_p7hYKjl1I9ah3q",   # TTA/archive
+    "TTA_DRIVE_INBOX":   "13zOVT87rC8760St4IJITvPfw4b-CNs1p",   # TTA/inbox
+    "TTA_DRIVE_STATE":   "17GL1j3sAO1fexQb4RG5LTANGPO_TBbnj",   # TTA/state
     "TTA_SHEET_ID":      "1lX_Ri1G3fh5wMCV-PHZ_Uu4apzQimzydK15ij7AYkKE",
 }
 
 LABELS = {
-    "TTA_DRIVE_STATE":   "Drive folder: state",
     "TTA_DRIVE_ARCHIVE": "Drive folder: archive",
     "TTA_DRIVE_INBOX":   "Drive folder: inbox",
+    "TTA_DRIVE_STATE":   "Drive folder: state",
     "TTA_SHEET_ID":      "Google Sheet: Cerebral",
 }
 

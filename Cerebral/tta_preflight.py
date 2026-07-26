@@ -117,7 +117,19 @@ def main() -> int:
         if meta.get("mimeType") != "application/vnd.google-apps.folder":
             record(f"folder_{role}", False, f"not a folder ({meta.get('mimeType')})")
             continue
-        record(f"folder_{role}", True, f"{meta['name']!r}")
+
+        # The folder's own name is the most reliable signal that an ID has been
+        # assigned to the wrong role. Empty folders defeat the contents-based
+        # check below, but the name is always there.
+        drive_name = meta["name"].strip().lower()
+        if role in drive_name:
+            record(f"folder_{role}", True, f"{meta['name']!r}")
+        else:
+            other = next((r for r in ("inbox", "archive", "state")
+                          if r in drive_name and r != role), None)
+            record(f"folder_{role}", False,
+                   f"{meta['name']!r} — this ID looks like your {other or 'other'} "
+                   f"folder, not {role}. Swap the values in .env.")
 
         # writability probe
         try:
@@ -149,17 +161,31 @@ def main() -> int:
             title = meta["properties"]["title"]
             tabs = [s["properties"]["title"] for s in meta["sheets"]]
             record("sheet", True, f"{title!r} — tabs: {tabs}")
+            # Write into a throwaway tab rather than a far-off cell: the grid
+            # is only as big as the sheet, and probing outside it fails even
+            # when permissions are fine. A temp tab also cannot clobber data.
+            probe_id = None
             try:
-                sheets.spreadsheets().values().update(
-                    spreadsheetId=sheet_id, range=f"{tabs[0]}!ZZ1000",
-                    valueInputOption="RAW", body={"values": [["preflight"]]}).execute()
-                sheets.spreadsheets().values().clear(
-                    spreadsheetId=sheet_id, range=f"{tabs[0]}!ZZ1000", body={}).execute()
-                record("sheet_writable", True, "write + clear OK")
+                resp = sheets.spreadsheets().batchUpdate(
+                    spreadsheetId=sheet_id,
+                    body={"requests": [{"addSheet": {"properties": {
+                        "title": "_preflight_probe"}}}]}).execute()
+                probe_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+                record("sheet_writable", True, "created + removed a temp tab")
             except HttpError as e:
                 record("sheet_writable", False,
-                       "share the Sheet with the service account as Editor"
-                       if e.resp.status == 403 else str(e))
+                       f"share the Sheet with {email} as Editor"
+                       if e.resp.status == 403 else str(e)[:100])
+            finally:
+                if probe_id is not None:
+                    try:
+                        sheets.spreadsheets().batchUpdate(
+                            spreadsheetId=sheet_id,
+                            body={"requests": [{"deleteSheet": {
+                                "sheetId": probe_id}}]}).execute()
+                    except HttpError:
+                        print("      ! left a '_preflight_probe' tab behind — "
+                              "delete it manually")
         except HttpError as e:
             if "SERVICE_DISABLED" in str(e) or e.resp.status == 403:
                 record("sheet", False, _api_hint(e, "Google Sheets API"))

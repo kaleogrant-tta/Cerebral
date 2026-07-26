@@ -131,42 +131,86 @@ def main() -> int:
             return 0
 
         found = discover(local_inbox)
+
+        # Inventory is daily and append-only. Transactions are weekly. A run
+        # may legitimately find only one of them — most days it is inventory
+        # alone — so each is handled independently and neither is required.
+        did_something = False
+
         if "inventory" in found:
+            print("  [3/6] inventory snapshot(s)")
             pipe = Pipeline(str(DB_LOCAL))
             for p in found["inventory"]:
-                # Snapshot date comes from the export header, not the filename.
-                stamp = _export_date(p)
+                stamp = _export_date(p)          # from the export header
                 counts = pipe.load_inventory(read_export(p, "inventory"), stamp)
-                print(f"    inventory {stamp}: {counts}")
+                print(f"    {stamp}: {counts}")
             pipe.close()
+            did_something = True
+        else:
+            print("  [3/6] no inventory export today")
 
-        # --- transform ---------------------------------------------------
-        print("  [3/6] running ETL")
-        rc = os.system(
-            f"python3 tta_etl.py --inbox {local_inbox} --db {DB_LOCAL} "
-            f"--period scheduled"
-        )
-        if rc != 0:
-            print("  ETL reported failures — Drive left untouched")
+        have_txn = all(k in found for k in
+                       ("dispensations", "breakdown", "pos_register"))
+        if have_txn:
+            print("  [4/6] running ETL")
+            period = _infer_period(found["dispensations"][0])
+            rc = os.system(
+                f'python3 tta_etl.py --inbox "{local_inbox}" '
+                f'--db "{DB_LOCAL}" --period {period}'
+            )
+            if rc != 0:
+                print("  ETL reported failures — Drive left untouched")
+                return 1
+            did_something = True
+        elif any(k in found for k in ("dispensations", "breakdown", "pos_register")):
+            # A partial set is a mistake, not a valid state.
+            missing = [k for k in ("dispensations", "breakdown", "pos_register")
+                       if k not in found]
+            print(f"  [4/6] INCOMPLETE transaction export set — missing "
+                  f"{missing}. Nothing processed; files left in the inbox.")
             return 1
+        else:
+            print("  [4/6] no transaction exports today")
+
+        if not did_something:
+            print("    inbox had nothing loadable — stopping")
+            return 0
 
         # --- publish -----------------------------------------------------
-        print("  [4/6] publishing to Sheets")
+        print("  [5/6] publishing to Sheets")
         con = duckdb.connect(str(DB_LOCAL))
         publish(con, sheet_id)
         con.close()
 
         # --- persist -----------------------------------------------------
-        print("  [5/6] pushing database back")
+        print("  [6/6] pushing database back")
         drive.upload(DB_LOCAL, state_id, DRIVE["db_filename"])
 
-        print("  [6/6] archiving processed exports")
+        print("        archiving processed exports")
         for _, file_id in pulled:
             drive.move(file_id, archive_id)
         print(f"    archived {len(pulled)} file(s)")
 
     print("done")
     return 0
+
+
+def _infer_period(path: Path) -> str:
+    """Label the load by the month its data covers.
+
+    Reading the From Date header rather than the run date, so a Monday upload
+    of last week's exports is labelled with last week's month.
+    """
+    head = pd.read_excel(path, header=None, nrows=4)
+    for _, row in head.iterrows():
+        cells = [str(v) for v in row.tolist()]
+        if any("From Date" in c for c in cells):
+            for c in cells:
+                try:
+                    return pd.to_datetime(c).strftime("%Y-%m")
+                except Exception:
+                    continue
+    return pd.Timestamp.now().strftime("%Y-%m")
 
 
 def _export_date(path: Path) -> str:

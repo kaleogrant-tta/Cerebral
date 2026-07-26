@@ -233,6 +233,23 @@ class Pipeline:
                 ext_cost          DOUBLE,
                 ext_retail        DOUBLE
             );
+            -- Accumulating name -> Alpine ID map.
+            --
+            -- Alpine only names a customer on baskets that carried a
+            -- redemption. Without this table the same person holds an Alpine
+            -- ID on those baskets and a name hash on all others, so they
+            -- count as two customers: new-customer counts inflate and repeat
+            -- rates deflate. The map persists across loads so an ID learned
+            -- in one period is applied to every other period on rebuild.
+            CREATE TABLE IF NOT EXISTS customer_xwalk (
+                name_hash         VARCHAR PRIMARY KEY,
+                alpine_id         VARCHAR,
+                display_name      VARCHAR,
+                first_seen        DATE,
+                last_seen         DATE,
+                sightings         INTEGER,
+                ambiguous         BOOLEAN
+            );
         """)
         # Basket category flag columns are configuration-driven.
         existing = {r[1] for r in self.con.execute("PRAGMA table_info('fact_basket')").fetchall()}
@@ -350,10 +367,31 @@ class Pipeline:
         # measures genuine orphans rather than deliberate exclusions.
         fl = fl.merge(pos_all[["PosId", "channel", "is_return", "PatientName"]],
                       left_on="ReceiptNo", right_on="PosId", how="left")
-        rmatch = fl["channel"].notna().mean()
-        orphans = int(fl["channel"].isna().sum())
+
+        # Measure the join by RECEIPT, not by line.
+        #
+        # Daily Dispensations is a state-reporting export: it records all product
+        # movement for OCM, including inventory adjustments, destructions and
+        # retroactive corrections. Those have no POS transaction because no
+        # register was involved, and they carry 30-100+ lines each. Counting
+        # orphan lines makes a single adjustment look like 100 failures.
+        orphan_receipts = fl.loc[fl["channel"].isna(), "ReceiptNo"].nunique()
+        total_receipts = fl["ReceiptNo"].nunique()
+        rmatch = 1 - (orphan_receipts / max(total_receipts, 1))
+        orphan_lines = int(fl["channel"].isna().sum())
         check("receipt_join_rate", rmatch >= THRESHOLDS["receipt_join_rate"],
-              f"{rmatch*100:.2f}% matched ({orphans:,} orphan lines with no POS transaction)")
+              f"{rmatch*100:.2f}% of {total_receipts:,} receipts matched "
+              f"({orphan_receipts:,} orphan receipts, {orphan_lines:,} lines)")
+
+        # Bulk non-POS events are expected and informative, not errors.
+        if orphan_receipts:
+            per = orphan_lines / orphan_receipts
+            bulk = fl[fl["channel"].isna()].groupby("ReceiptNo").size()
+            n_bulk = int((bulk >= THRESHOLDS["bulk_event_min_lines"]).sum())
+            check("non_pos_events", True,
+                  f"{orphan_receipts:,} receipt(s) with no POS transaction, "
+                  f"{per:.0f} lines each avg; {n_bulk} look like bulk "
+                  f"adjustments (>={THRESHOLDS['bulk_event_min_lines']} lines). Excluded.")
 
         # Now drop deliberate exclusions and account for them separately.
         excl_units = float(fl.loc[fl["channel"] == "EXCLUDE", "Qty"].sum())
@@ -395,11 +433,36 @@ class Pipeline:
         excluded_cat_lines = int(excluded_cat_mask.sum())
         line = line[~excluded_cat_mask].copy()
 
-        # customer identity: Alpine ID where available, hashed name otherwise
+        # --- customer identity -------------------------------------------
+        # Alpine names a customer only on redemption baskets. Learn the
+        # name -> Alpine ID mapping from those, persist it, and apply it to
+        # ALL of that customer's baskets — otherwise one person counts as two.
         alpine_id = line["basket_id"].map(cust)
-        hashed = fl.loc[line.index, "Patient"].map(customer_hash)
-        line["customer_key"] = alpine_id.fillna(hashed)
-        line["customer_source"] = alpine_id.notna().map({True: "alpine", False: "name_hash"})
+        names = fl.loc[line.index, "Patient"]
+        hashed = names.map(customer_hash)
+
+        # what this period teaches us
+        learn = pd.DataFrame({
+            "name_hash": hashed,
+            "display_name": names,
+            "alpine_id": alpine_id,
+            "date": line["txn_ts"].dt.date,
+        }).dropna(subset=["name_hash", "alpine_id"])
+        self._learn_identities(learn)
+
+        # apply the full accumulated map, not just this period's
+        known = self._identity_map()
+        mapped = hashed.map(known)
+        line["customer_key"] = alpine_id.fillna(mapped).fillna(hashed)
+        line["customer_source"] = (
+            alpine_id.notna().map({True: "alpine", False: ""})
+            .where(alpine_id.notna(),
+                   mapped.notna().map({True: "alpine_xwalk", False: "name_hash"})))
+
+        resolved = int((line["customer_source"] != "name_hash").sum())
+        check("identity_resolution", True,
+              f"{resolved:,}/{len(line):,} lines ({resolved/max(len(line),1)*100:.1f}%) "
+              f"resolved to a real Alpine ID; {len(known):,} names in crosswalk")
 
         # --- reconciliation ----------------------------------------------
         # The Breakdown includes sample-register and Non-Sale volume, so compare
@@ -455,6 +518,90 @@ class Pipeline:
 
         return LoadResult(store_key, store_code, period, line, basket, checks)
 
+    def _learn_identities(self, learn: pd.DataFrame) -> None:
+        """Record name -> Alpine ID sightings.
+
+        Two guards, both erring toward leaving identities split:
+
+        1. A name mapping to more than one Alpine ID means two real people
+           share it. Marked ambiguous, never applied. Merging them would
+           fabricate one high-frequency customer from two ordinary ones.
+
+        2. Degenerate names — initials like "P M", single tokens, anything
+           under 6 characters — are excluded outright. Observed in real data
+           at 38 sightings for "P M", which is certainly several people.
+           Splitting one customer in two understates repeat rates; merging
+           several customers into one invents a loyal regular who does not
+           exist. The second error is far worse.
+        """
+        if learn.empty:
+            return
+
+        def usable(n) -> bool:
+            if not isinstance(n, str):
+                return False
+            s = " ".join(n.split())
+            if len(s) < 6:
+                return False
+            parts = [p for p in s.split(" ") if p]
+            if len(parts) < 2:
+                return False
+            # every part a single letter -> initials, not a name
+            return not all(len(p.strip(".")) <= 1 for p in parts)
+
+        learn = learn[learn["display_name"].map(usable)]
+        if learn.empty:
+            return
+
+        agg = (learn.groupby("name_hash")
+                    .agg(alpine_id=("alpine_id", "first"),
+                         display_name=("display_name", "first"),
+                         first_seen=("date", "min"),
+                         last_seen=("date", "max"),
+                         sightings=("alpine_id", "size"),
+                         n_ids=("alpine_id", "nunique"))
+                    .reset_index())
+        agg["ambiguous"] = agg["n_ids"] > 1
+        agg = agg.drop(columns=["n_ids"])
+
+        self.con.register("xw_new", agg)
+        self.con.execute("""
+            INSERT INTO customer_xwalk
+            SELECT n.name_hash, n.alpine_id, n.display_name,
+                   n.first_seen, n.last_seen, n.sightings, n.ambiguous
+            FROM xw_new n
+            LEFT JOIN customer_xwalk c USING (name_hash)
+            WHERE c.name_hash IS NULL
+        """)
+        # existing rows: extend the window, accumulate sightings, and latch
+        # ambiguity on if a conflicting ID has now appeared
+        self.con.execute("""
+            UPDATE customer_xwalk AS c
+            SET last_seen  = GREATEST(c.last_seen, n.last_seen),
+                first_seen = LEAST(c.first_seen, n.first_seen),
+                sightings  = c.sightings + n.sightings,
+                ambiguous  = c.ambiguous OR n.ambiguous
+                             OR c.alpine_id <> n.alpine_id
+            FROM xw_new n WHERE n.name_hash = c.name_hash
+        """)
+        self.con.unregister("xw_new")
+
+    def _identity_map(self) -> dict[str, str]:
+        rows = self.con.execute("""
+            SELECT name_hash, alpine_id FROM customer_xwalk
+            WHERE NOT ambiguous AND alpine_id IS NOT NULL
+        """).fetchall()
+        return dict(rows)
+
+    def crosswalk_stats(self) -> dict:
+        r = self.con.execute("""
+            SELECT COUNT(*) total,
+                   SUM(CASE WHEN ambiguous THEN 1 ELSE 0 END) ambiguous,
+                   SUM(sightings) sightings
+            FROM customer_xwalk
+        """).fetchone()
+        return {"names": r[0], "ambiguous": r[1] or 0, "sightings": r[2] or 0}
+
     # -- persist -----------------------------------------------------------
 
     def write(self, res: LoadResult) -> None:
@@ -478,6 +625,11 @@ class Pipeline:
         self.con.execute("INSERT INTO fact_line SELECT * FROM ldf")
         self.con.execute("INSERT INTO fact_basket SELECT * FROM bdf")
         warns = sum(1 for c in res.checks if c.get("status") == "WARN")
+        # Replace rather than append: re-loading a period must not leave a
+        # stale row behind, or the log double-counts.
+        self.con.execute(
+            "DELETE FROM load_log WHERE store_key = ? AND period = ?",
+            [res.store_key, res.period])
         self.con.execute(
             "INSERT INTO load_log VALUES (now(), ?, ?, ?, ?, ?, ?, ?, ?)",
             [res.store_key, res.period, len(res.fact_line), len(res.fact_basket),
@@ -625,19 +777,29 @@ def main() -> int:
     alpine = read_export(files["alpine"][0], "alpine") if "alpine" in files else None
     breakdown = read_export(files["breakdown"][0], "breakdown")
 
+    # Combine every POS export in the folder and de-duplicate on PosId.
+    # A period may legitimately need more than one file per store -- e.g. a
+    # supplemental re-pull covering days the original export missed. Picking a
+    # single "best matching" file would silently discard the rest.
+    pos_frames = []
+    for pp in files["pos_register"]:
+        pos_frames.append(read_export(pp, "pos_register"))
+    pos_all = pd.concat(pos_frames, ignore_index=True)
+    before = len(pos_all)
+    pos_all = pos_all.drop_duplicates(subset=["PosId"], keep="last")
+    print(f"  combined {len(files['pos_register'])} POS export(s): "
+          f"{before:,} rows -> {len(pos_all):,} unique transactions")
+
     failed = 0
     for disp_path in files["dispensations"]:
         disp = read_export(disp_path, "dispensations")
         loc = disp["Location"].dropna().iloc[0]
-        pos_df = None
-        for pp in files["pos_register"]:
-            cand = read_export(pp, "pos_register")
-            ids = set(cand["PosId"])
-            if disp["ReceiptNo"].isin(ids).mean() > 0.9:
-                pos_df = cand
-                break
-        if pos_df is None:
-            print(f"\nERROR: no POS register export matches {loc}")
+
+        # Keep only the transactions belonging to this store. PosId is globally
+        # unique chain-wide, so an inner match on the store's receipts is exact.
+        pos_df = pos_all[pos_all["PosId"].isin(set(disp["ReceiptNo"]))].copy()
+        if pos_df.empty:
+            print(f"\nERROR: no POS transactions match {loc}")
             failed += 1
             continue
 

@@ -181,8 +181,13 @@ MAX_HEADER_SCAN_ROWS = 12
 # VALIDATION THRESHOLDS
 # ---------------------------------------------------------------------------
 THRESHOLDS = {
-    "product_join_rate":   0.995,   # dispensation lines matched to breakdown
-    "receipt_join_rate":   0.995,   # receipts matched to POS register
+    "product_join_rate":   0.990,   # dispensation lines matched to breakdown
+    # Measured by RECEIPT, not by line. Daily Dispensations includes non-POS
+    # events (inventory adjustments, destructions, retroactive corrections)
+    # that carry 30-100+ lines each; counting lines makes one adjustment look
+    # like 100 failures.
+    "receipt_join_rate":   0.990,   # receipts matched to POS register
+    "bulk_event_min_lines": 20,     # lines/receipt above which it is an adjustment
     "unmapped_category":   0,       # raw category strings not in CATEGORY_MAP
     "unknown_channel":     0,       # registers the rules could not classify
     # Reconciliation is banded. Dispensations and the Breakdown are produced by

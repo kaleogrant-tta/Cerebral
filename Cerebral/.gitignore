@@ -6,3 +6,6 @@
 
 history/
 inbox/
+
+__pycache__/
+*.pyc

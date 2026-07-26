@@ -16,6 +16,9 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Cerebral
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -40,3 +43,4 @@ jobs:
       - name: Note failure
         if: failure()
         run: echo "::error::Refresh failed. Drive state unchanged — safe to re-run from the Actions tab."
+

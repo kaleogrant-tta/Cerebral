@@ -48,16 +48,28 @@ def load_env(path: Path | None = None, override: bool = False) -> dict[str, str]
 def resolve_service_account() -> str | None:
     """Return the service-account JSON as a string.
 
-    GOOGLE_SERVICE_ACCOUNT_JSON may hold either the JSON itself (Actions) or a
-    path to the key file (local). Paths are expanded, and a `*` glob is
-    resolved so `customer-origin-*.json` works on Windows too, where the shell
-    does not expand globs.
+    GOOGLE_SERVICE_ACCOUNT_JSON holds either the JSON itself (GitHub Actions
+    secret) or a path to the key file (local .env). Distinguishing them has to
+    be robust: a secret can arrive with leading whitespace or newlines, so a
+    bare startswith("{") check is not enough.
     """
-    val = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip().strip('"''')
-    if not val:
+    val = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not val or not val.strip():
         return None
-    if val.lstrip().startswith("{") or '"private_key"' in val:
-        return val
+    val = val.strip().strip('"').strip("'")
+
+    # Content, not a path: either it parses as JSON, or it carries a field no
+    # filesystem path ever would.
+    if val.lstrip().startswith("{") or '"private_key"' in val or \
+            '"client_email"' in val:
+        try:
+            json.loads(val)
+            return val
+        except Exception as e:
+            raise ValueError(
+                f"GOOGLE_SERVICE_ACCOUNT_JSON looks like JSON but will not "
+                f"parse ({e}). Re-copy the whole key file, braces included."
+            ) from e
 
     p = Path(val).expanduser()
     if "*" in p.name:
@@ -86,4 +98,3 @@ def bootstrap() -> None:
     """Call at the top of any entry point."""
     load_env()
     resolve_service_account()
-

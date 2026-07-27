@@ -118,12 +118,31 @@ class DriveClient:
                 ) from e
             raise
 
-    def move(self, file_id: str, to_folder: str) -> None:
-        meta = self.svc.files().get(fileId=file_id, fields="parents").execute()
+    def move(self, file_id: str, to_folder: str,
+             from_folder: str | None = None) -> None:
+        """Move a file between folders.
+
+        `from_folder` should be supplied by the caller. Looking the current
+        parent up via files().get(fields="parents") returns an empty list when
+        the service account is not the file's owner, and Drive then rejects the
+        update as "increasing the number of parents" — it sees an add with no
+        matching remove.
+        """
+        parents = [from_folder] if from_folder else []
+        if not parents:
+            meta = self.svc.files().get(fileId=file_id,
+                                        fields="parents").execute()
+            parents = meta.get("parents", [])
+        if not parents:
+            raise RuntimeError(
+                f"Cannot determine the current folder of {file_id}. Pass "
+                f"from_folder explicitly — the service account cannot read the "
+                f"parent of a file it does not own."
+            )
         self.svc.files().update(
             fileId=file_id,
             addParents=to_folder,
-            removeParents=",".join(meta.get("parents", [])),
+            removeParents=",".join(parents),
             fields="id, parents",
         ).execute()
 

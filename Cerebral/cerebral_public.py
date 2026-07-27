@@ -335,12 +335,23 @@ def q(sql: str) -> pd.DataFrame:
 def pct_change(late, early):
     """Percentage change, returning float NaN where there is no baseline.
 
-    Products and brands that did not exist in the first half have zero early
-    sales. Dividing by pd.NA yields NAType, which has no __round__ and breaks
-    every downstream format call — numpy NaN behaves correctly and renders as
-    an empty cell.
+    Products and brands absent from the first half have zero early sales.
+    Dividing by pd.NA yields NAType, which has no __round__ and breaks every
+    downstream format call — numpy NaN renders as an empty cell instead.
+
+    Both arguments must be Series. Passing a bound method — which is what
+    `frame.ne` or `frame.count` silently gives you — raises here with a clear
+    message rather than a dimension error from deep inside pandas.
     """
     import numpy as np
+    for label, v in (("late", late), ("early", early)):
+        if not isinstance(v, pd.Series):
+            raise TypeError(
+                f"pct_change({label}=...) expected a Series, got "
+                f"{type(v).__name__}. If you used frame.colname, the column "
+                f"name collides with a DataFrame method — use "
+                f"frame['colname'] instead."
+            )
     e = pd.to_numeric(early, errors="coerce").astype("float64")
     l = pd.to_numeric(late, errors="coerce").astype("float64")
     return np.where(e > 0, (l / e.replace(0, np.nan) - 1) * 100, np.nan)
@@ -478,7 +489,8 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_gloss = st.tabs(["Charts", "Insights", "What the terms mean"])
+t_charts, t_insights, t_brands, t_gloss = st.tabs(
+    ["Charts", "Insights", "Brands", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -628,18 +640,38 @@ with t_charts:
                 ch.iso_week.astype(str).str.zfill(2) + "-1",
                 format="%G-W%V-%u", errors="coerce")
             ch = ch.sort_values(["channel", "wk_date"])
-            fig = px.area(ch, x="wk_date", y="share", color="channel",
-                          color_discrete_map={"In-Store": ACCENT,
-                                              "Non-Stop": ACCENT_SOFT,
-                                              "Delivery": WARN})
-            fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
-                              yaxis_title="% of baskets", xaxis_title="",
-                              hovermode="x unified",
-                              legend=dict(orientation="h", y=1.12, x=0,
-                                          title_text=""),
-                              plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_yaxes(ticksuffix="%", gridcolor="rgba(0,0,0,.07)")
+
+            # One panel per channel with its own y-axis. In-Store runs near 90%
+            # and the others near 5%, so a stacked or shared-axis chart flattens
+            # exactly the movement worth seeing.
+            share_of = (ch.groupby("channel").baskets.sum()
+                          / ch.baskets.sum() * 100).to_dict()
+            order_ch = [c for c in ["In-Store", "Non-Stop", "Delivery"]
+                        if c in share_of]
+            cmap = {"In-Store": ACCENT, "Non-Stop": ACCENT_SOFT,
+                    "Delivery": WARN}
+
+            fig = px.line(ch, x="wk_date", y="share", color="channel",
+                          facet_row="channel",
+                          category_orders={"channel": order_ch},
+                          color_discrete_map=cmap)
+            fig.update_yaxes(matches=None, showticklabels=True,
+                             ticksuffix="%", gridcolor="rgba(0,0,0,.07)",
+                             title_text="")
+            fig.update_xaxes(gridcolor="rgba(0,0,0,.04)", title_text="")
+            fig.update_traces(line=dict(width=2.4))
+            fig.for_each_annotation(lambda a: a.update(
+                text=a.text.split("=")[-1]
+                     + f"  ·  {share_of.get(a.text.split('=')[-1], 0):.0f}% of baskets",
+                font=dict(size=12)))
+            fig.update_layout(height=420, margin=dict(l=0, r=0, t=24, b=0),
+                              showlegend=False, plot_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig, use_container_width=True)
+            st.markdown('<p class="note">Each channel has its own scale, so a '
+                        'small channel\'s movement is visible rather than '
+                        'flattened by the large one. The label shows how much '
+                        'of total volume each carries.</p>',
+                        unsafe_allow_html=True)
 
     with B:
         heading("Category by channel — index", "channel index")
@@ -830,51 +862,130 @@ with t_insights:
                           ("declining" if pd.notna(v) and v < -10 else "flat"))
 
             # --- the recommendation ---------------------------------------
+            # Built from this pair's own brands and figures rather than a
+            # template with names substituted in. Every claim below names the
+            # brand and the number behind it, so it can be checked.
             a_side = bt[bt.category == ca].sort_values("net_total", ascending=False)
             b_side = bt[bt.category == cb].sort_values("net_total", ascending=False)
-            a_chg = a_side.change.median()
-            b_chg = b_side.change.median()
+
+            def movers(side, n=2):
+                v = side.dropna(subset=["change"])
+                up = v[v.change > 10].sort_values("change", ascending=False).head(n)
+                dn = v[v.change < -10].sort_values("change").head(n)
+                return up, dn
+
+            def name_list(frame, with_cat=False):
+                """Brand names with their trend. Include the category when the
+                list mixes both sides — a brand can sell in two categories with
+                different trajectories, and unlabelled it reads as a
+                contradiction."""
+                parts = []
+                for _, r in frame.iterrows():
+                    tag = f" in {r.category}" if with_cat else ""
+                    gone = " — now at zero" if r.change <= -99 else ""
+                    parts.append(f"**{r.brand}**{tag} ({r.change:+.0f}%{gone})")
+                return ", ".join(parts)
+
+            a_up, a_dn = movers(a_side)
+            b_up, b_dn = movers(b_side)
+            a_chg, b_chg = a_side.change.median(), b_side.change.median()
+            a_top = a_side.iloc[0] if len(a_side) else None
+            b_top = b_side.iloc[0] if len(b_side) else None
+
+            # strongest co-purchased brand combination, for affinity reads
+            bp_top = q(f"""
+                SELECT brand_a, brand_b, SUM(joint_baskets) AS baskets
+                FROM dash_brand_pairs
+                WHERE cat_a = '{ca}' AND cat_b = '{cb}' {af}
+                GROUP BY 1,2 ORDER BY baskets DESC LIMIT 1
+            """)
 
             lines = []
+
             if read == "substitutes":
+                strength = ("strongly" if lv < 0.5 else
+                            "moderately" if lv < 0.62 else "mildly")
                 lines.append(
-                    f"**Customers choose between {ca} and {cb}** rather than "
-                    f"buying both (lift {lv:.2f}). Demand is likely to move "
-                    f"between them rather than disappear.")
+                    f"Customers {strength} choose between **{ca}** and "
+                    f"**{cb}** rather than buying both (lift {lv:.2f}). Demand "
+                    f"is more likely to move between them than to disappear if "
+                    f"you cut one.")
+
                 if pd.notna(a_chg) and pd.notna(b_chg) and abs(a_chg - b_chg) > 15:
-                    up, dn = (cb, ca) if b_chg > a_chg else (ca, cb)
+                    up_cat, dn_cat = (cb, ca) if b_chg > a_chg else (ca, cb)
+                    up_side = b_up if b_chg > a_chg else a_up
+                    dn_side = a_dn if b_chg > a_chg else b_dn
+                    detail = ""
+                    if len(up_side):
+                        detail += (f" The movement is concentrated in "
+                                   f"{name_list(up_side)} within {up_cat}.")
+                    if len(dn_side):
+                        detail += (f" On the {dn_cat} side, {name_list(dn_side)} "
+                                   f"{'are' if len(dn_side) > 1 else 'is'} "
+                                   f"giving ground.")
                     lines.append(
-                        f"Demand is moving toward **{up}**. Weight the buy that "
-                        f"way rather than carrying full depth in both — you are "
-                        f"funding two ranges to serve one decision.")
+                        f"Demand is shifting toward **{up_cat}**.{detail} Weight "
+                        f"the buy that way rather than carrying full depth in "
+                        f"both — you are currently funding two ranges to serve "
+                        f"one customer decision.")
                 else:
                     lines.append(
-                        "Neither side is clearly winning, so both are earning "
-                        "their place. Avoid promoting them against each other "
-                        "in the same week — you would be discounting a sale "
-                        "you were getting anyway.")
-                lines.append(
-                    f"Before cutting depth in either, check the brand table "
-                    f"below: a category-level substitution often comes down to "
-                    f"a handful of brands, and the rest are unaffected.")
+                        f"Neither side is clearly winning — {ca} is moving "
+                        f"{a_chg:+.0f}% and {cb} {b_chg:+.0f}%. Both are earning "
+                        f"their place, so avoid promoting them against each "
+                        f"other in the same week: you would be discounting a "
+                        f"sale you were already getting.")
+
+                if a_top is not None and b_top is not None:
+                    lines.append(
+                        f"Before cutting depth, check the brand table. "
+                        f"**{a_top.brand}** carries ${a_top.net_total:,.0f} of "
+                        f"{ca} and **{b_top.brand}** ${b_top.net_total:,.0f} of "
+                        f"{cb} — a category-level signal usually comes down to "
+                        f"a handful of brands while the rest are unaffected.")
+
             elif read == "affinity":
                 lines.append(
-                    f"**{ca} and {cb} get bought together** more than chance "
-                    f"predicts (lift {lv:.2f}).")
+                    f"**{ca}** and **{cb}** get bought together "
+                    f"{'far ' if lv > 1.8 else ''}more than chance predicts "
+                    f"(lift {lv:.2f}).")
+                if len(bp_top):
+                    r0 = bp_top.iloc[0]
+                    lines.append(
+                        f"The strongest combination is **{r0.brand_a}** with "
+                        f"**{r0.brand_b}** — {int(r0.baskets):,} transactions "
+                        f"contained both. That is the obvious bundle: it "
+                        f"formalises what customers already do rather than "
+                        f"trying to create a new habit.")
                 lines.append(
-                    "Place them near each other and prompt the attachment at "
-                    "the counter. A stockout in one now costs you sales in "
-                    "both, so treat their par levels as linked rather than "
-                    "independent.")
-                lines.append(
-                    "Bundle candidates are the top brand pairs below — they "
-                    "already co-occur, so a bundle formalises existing "
-                    "behaviour rather than trying to create it.")
+                    f"Treat par levels as linked. A stockout in {ca} now costs "
+                    f"you {cb} sales as well, so they should not be ordered "
+                    f"independently.")
+                growing = pd.concat([a_up.head(1), b_up.head(1)])
+                if len(growing):
+                    lines.append(
+                        f"{name_list(growing, with_cat=True)} "
+                        f"{'are' if len(growing) > 1 else 'is'} growing — the "
+                        f"strongest candidates to feature in the pairing.")
+
             else:
                 lines.append(
-                    f"**No real relationship** between {ca} and {cb} "
-                    f"(lift {lv:.2f}). Buying and merchandising decisions on "
-                    f"one should be made without reference to the other.")
+                    f"**{ca}** and **{cb}** have no meaningful relationship "
+                    f"(lift {lv:.2f}). Buying, pricing and merchandising "
+                    f"decisions on one carry no implication for the other.")
+                interesting = pd.concat([a_up.head(1), a_dn.head(1),
+                                         b_up.head(1), b_dn.head(1)])
+                if len(interesting):
+                    lines.append(
+                        f"Within them, though, "
+                        f"{name_list(interesting, with_cat=True)} "
+                        f"{'are' if len(interesting) > 1 else 'is'} moving "
+                        f"enough to be worth a separate look.")
+
+            n_bask = int(row.baskets)
+            lines.append(
+                f"*Based on {n_bask:,} transactions containing both categories.*"
+                + ("  Confidence is limited at this volume." if n_bask < 300 else ""))
 
             st.markdown('<div class="howto"><b>What this suggests.</b> '
                         + "<br><br>".join(lines) + "</div>",
@@ -989,6 +1100,215 @@ with t_insights:
         st.markdown(f'<p class="note">Stock position as at {inv.snap.max()}. '
                     f'Sellable stock only — sales floor, vault and day vault.'
                     f'</p>', unsafe_allow_html=True)
+
+
+# ------------------------------------------------------------------- brands
+with t_brands:
+    st.markdown("#### Brand scorecard")
+    st.markdown('<div class="howto"><b>How to read this.</b> Revenue tells you '
+                'what a brand sells. It does not tell you whether the brand '
+                '<i>brought the customer in</i> or was simply bought by '
+                'someone already coming.<br><br>'
+                'That distinction is what this table adds. A brand appearing '
+                'in many first-ever baskets is doing acquisition work — it is '
+                'worth more to the business than its sales line suggests. A '
+                'brand bought mostly by established customers is riding '
+                'traffic you already had.</div>', unsafe_allow_html=True)
+
+    bs = q(f"""
+        SELECT brand,
+               MIN(primary_category)            AS category,
+               SUM(net)                         AS net,
+               SUM(gm)                          AS gm,
+               SUM(units)                       AS units,
+               SUM(skus)                        AS skus,
+               SUM(first_basket_customers)      AS first_basket,
+               SUM(established_customers)       AS established
+        FROM dash_brand_scorecard {wf}
+        GROUP BY 1
+    """)
+
+    if bs.empty:
+        st.info("No brand data in the published file.")
+    else:
+        bt_all = q(f"""
+            SELECT brand, SUM(net_early) AS net_early,
+                   SUM(net_late) AS net_late
+            FROM dash_brand_trend {wf} GROUP BY 1
+        """)
+        # Bracket access, not attribute access: a column named `ne` would
+        # resolve to DataFrame.ne (the not-equal method) and silently pass a
+        # bound method into pct_change.
+        bt_all["trend"] = pct_change(bt_all["net_late"], bt_all["net_early"])
+        bs = bs.merge(bt_all[["brand", "trend"]], on="brand", how="left")
+
+        min_net = st.slider("Minimum revenue to include", 1000, 100000, 5000,
+                            step=1000, format="$%d",
+                            help="Small brands produce unstable ratios. Raise "
+                                 "this to focus on brands with enough volume "
+                                 "to rank meaningfully.")
+        bs = bs[bs.net >= min_net].copy()
+
+        if bs.empty:
+            st.info("No brands above that revenue threshold.")
+        else:
+            bs["margin"] = pd.to_numeric(bs.gm, errors="coerce") / \
+                pd.to_numeric(bs.net, errors="coerce").replace(0, float("nan")) * 100
+            bs["acq_share"] = bs.first_basket / max(bs.first_basket.sum(), 1) * 100
+
+            est_total = bs.established.sum()
+            has_tenure = est_total > 0
+            if has_tenure:
+                bs["acq_ratio"] = (bs.first_basket /
+                                   bs.established.replace(0, float("nan")))
+            else:
+                bs["acq_ratio"] = float("nan")
+                st.warning(
+                    "The loaded window is too short to tell new customers from "
+                    "established ones — nobody in it is yet 90 days past their "
+                    "first purchase. Acquisition ratio is hidden until there is "
+                    "more history. Everything else below is valid.")
+
+            def z(col):
+                x = pd.to_numeric(bs[col], errors="coerce").fillna(0)
+                sd = x.std(ddof=0)
+                return (x - x.mean()) / sd if sd else x * 0
+
+            weights = {"net": .30, "acq_share": .25, "acq_ratio": .20,
+                       "margin": .15, "trend": .10}
+            if not has_tenure:                     # redistribute acq_ratio
+                weights["net"] += .10
+                weights["acq_share"] += .10
+                weights["acq_ratio"] = 0.0
+            bs["score"] = sum(w * z(c) for c, w in weights.items() if w > 0)
+            bs = bs.sort_values("score", ascending=False).reset_index(drop=True)
+
+            cut_first = bs.score.quantile(.80)
+            cut_biz = bs.score.quantile(.50)
+            bs["tier"] = bs.score.apply(
+                lambda v: "First" if v >= cut_first else
+                          ("Business" if v >= cut_biz else "Economy"))
+
+            k = st.columns(4)
+            k[0].metric("Brands ranked", f"{len(bs):,}")
+            k[1].metric("First tier", f"{(bs.tier == 'First').sum()}",
+                        help="Top quintile by composite score.")
+            k[2].metric("Business tier", f"{(bs.tier == 'Business').sum()}")
+            k[3].metric("Economy tier", f"{(bs.tier == 'Economy').sum()}")
+
+            cols = {
+                "Brand": bs.brand,
+                "Category": bs.category,
+                "Suggested tier": bs.tier,
+                "Net $": bs.net.round(0),
+                "Margin %": bs.margin.round(1),
+                "Trend %": pd.to_numeric(bs.trend, errors="coerce").round(1),
+                "First-basket customers": bs.first_basket,
+                "% of all first baskets": bs.acq_share.round(2),
+            }
+            if has_tenure:
+                cols["Acquisition ratio"] = bs.acq_ratio.round(2)
+            cols["Score"] = bs.score.round(2)
+
+            st.dataframe(pd.DataFrame(cols), use_container_width=True,
+                         hide_index=True, column_config={
+                "Suggested tier": st.column_config.TextColumn(
+                    help="First is the top 20% by score, Business the next 30%, "
+                         "Economy the rest. A starting point for the tier "
+                         "conversation, not a decision."),
+                "Net $": st.column_config.NumberColumn(
+                    help="Net sales across the loaded period.", format="$%d"),
+                "Margin %": st.column_config.NumberColumn(
+                    help=tip("gross margin"), format="%.1f%%"),
+                "Trend %": st.column_config.NumberColumn(
+                    help="Second half of the period versus the first half.",
+                    format="%.1f%%"),
+                "First-basket customers": st.column_config.NumberColumn(
+                    help="Customers whose first-ever purchase here included "
+                         "this brand. The clearest evidence a brand pulls "
+                         "people in rather than being picked up by regulars.",
+                    format="%d"),
+                "% of all first baskets": st.column_config.NumberColumn(
+                    help="This brand's share of all first-basket appearances. "
+                         "Compare against its share of revenue — a brand well "
+                         "above its revenue share is punching up on "
+                         "acquisition.", format="%.2f%%"),
+                "Acquisition ratio": st.column_config.NumberColumn(
+                    help="First-basket customers divided by customers who are "
+                         "90+ days established. Above 1.0 means the brand "
+                         "over-indexes on new customers; below 0.75 means it "
+                         "is bought mainly by regulars.", format="%.2f"),
+                "Score": st.column_config.NumberColumn(
+                    help="Composite: 30% revenue, 25% share of first baskets, "
+                         "20% acquisition ratio, 15% margin, 10% trend. "
+                         "Standardised, so 0 is average and ±1 is one standard "
+                         "deviation.", format="%.2f"),
+            })
+
+            st.divider()
+            st.markdown("##### Acquisition against revenue")
+            st.markdown('<p class="note">Brands above the diagonal contribute '
+                        'more to acquisition than their revenue would predict. '
+                        'Those are the ones worth protecting on shelf and '
+                        'pricing keenly, whatever their sales rank.</p>',
+                        unsafe_allow_html=True)
+            plot = bs.copy()
+            plot["rev_share"] = plot.net / plot.net.sum() * 100
+            fig = px.scatter(plot, x="rev_share", y="acq_share",
+                             size="net", color="tier", hover_name="brand",
+                             color_discrete_map={"First": ACCENT,
+                                                 "Business": ACCENT_SOFT,
+                                                 "Economy": MUTED},
+                             size_max=34)
+            lim = max(plot.rev_share.max(), plot.acq_share.max()) * 1.05
+            fig.add_shape(type="line", x0=0, y0=0, x1=lim, y1=lim,
+                          line=dict(color=MUTED, dash="dot", width=1))
+            fig.update_layout(height=440, margin=dict(l=0, r=0, t=10, b=0),
+                              xaxis_title="% of revenue",
+                              yaxis_title="% of first-basket appearances",
+                              legend=dict(orientation="h", y=1.1, x=0,
+                                          title_text=""),
+                              plot_bgcolor="rgba(0,0,0,0)")
+            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%")
+            fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%")
+            st.plotly_chart(fig, use_container_width=True)
+
+            over = plot[plot.acq_share > plot.rev_share * 1.25].nlargest(
+                5, "acq_share")
+            under = plot[plot.rev_share > plot.acq_share * 1.25].nlargest(
+                5, "rev_share")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Punching above their weight on acquisition**")
+                if len(over):
+                    for _, r in over.iterrows():
+                        st.markdown(
+                            f'<div class="alert a-ok"><b>{r.brand}</b> — '
+                            f'{r.acq_share:.1f}% of first baskets on '
+                            f'{r.rev_share:.1f}% of revenue</div>',
+                            unsafe_allow_html=True)
+                else:
+                    st.markdown('<p class="note">None stand out.</p>',
+                                unsafe_allow_html=True)
+            with c2:
+                st.markdown("**Selling well, acquiring little**")
+                if len(under):
+                    for _, r in under.iterrows():
+                        st.markdown(
+                            f'<div class="alert a-warn"><b>{r.brand}</b> — '
+                            f'{r.rev_share:.1f}% of revenue on '
+                            f'{r.acq_share:.1f}% of first baskets</div>',
+                            unsafe_allow_html=True)
+                else:
+                    st.markdown('<p class="note">None stand out.</p>',
+                                unsafe_allow_html=True)
+
+            st.markdown('<p class="note">Neither list is a verdict. A brand '
+                        'bought mainly by regulars may be exactly why those '
+                        'regulars keep coming — that is retention value, and '
+                        'it is real. The point is that the two roles are '
+                        'different and should not be priced identically.</p>',
+                        unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------- glossary

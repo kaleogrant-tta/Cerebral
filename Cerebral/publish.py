@@ -190,6 +190,60 @@ def build(src: str, dest: str) -> dict:
         ) WHERE rk <= 25 AND net_total >= 1000
     """)
 
+    # --- brand scorecard --------------------------------------------------
+    # Which brands bring customers IN versus which are bought by people who
+    # were coming anyway. That distinction is what the 3P tier conversation
+    # needs and what a sales ranking cannot show.
+    con.execute("""
+        CREATE TABLE dash_brand_scorecard AS
+        WITH firsts AS (
+            SELECT customer_key, MIN(txn_ts) AS first_ts
+            FROM src.fact_basket
+            WHERE NOT is_return AND customer_key IS NOT NULL
+            GROUP BY 1
+        ),
+        tagged AS (
+            SELECT l.store_key, l.category, l.brand, l.customer_key,
+                   l.basket_id, l.net_sales, l.gross_margin, l.units,
+                   l.product,
+                   date_diff('day', f.first_ts, l.txn_ts) AS age_days
+            FROM src.fact_line l
+            LEFT JOIN firsts f USING (customer_key)
+            WHERE NOT l.is_return AND l.brand IS NOT NULL
+        )
+        SELECT store_key, brand,
+               MIN(category)                        AS primary_category,
+               COUNT(DISTINCT category)             AS categories,
+               COUNT(DISTINCT product)              AS skus,
+               SUM(net_sales)                       AS net,
+               SUM(gross_margin)                    AS gm,
+               SUM(units)                           AS units,
+               COUNT(DISTINCT basket_id)            AS baskets,
+               COUNT(DISTINCT customer_key)         AS customers,
+               COUNT(DISTINCT CASE WHEN age_days = 0 THEN customer_key END)
+                                                    AS first_basket_customers,
+               COUNT(DISTINCT CASE WHEN age_days > 90 THEN customer_key END)
+                                                    AS established_customers
+        FROM tagged
+        GROUP BY 1,2
+        HAVING SUM(net_sales) >= 1000
+    """)
+
+    # Chain totals, so a brand's share of new customers can be computed.
+    con.execute("""
+        CREATE TABLE dash_customer_totals AS
+        WITH f AS (
+            SELECT customer_key, MIN(txn_ts) AS first_ts
+            FROM src.fact_basket WHERE NOT is_return AND customer_key IS NOT NULL
+            GROUP BY 1
+        )
+        SELECT COUNT(*) AS total_customers,
+               COUNT(*) FILTER (WHERE first_ts >=
+                   (SELECT MAX(txn_ts) - INTERVAL 180 DAY FROM src.fact_line))
+                   AS new_last_180d
+        FROM f
+    """)
+
     # --- inventory, most recent snapshot only ----------------------------
     con.execute("""
         CREATE TABLE dash_inventory AS
@@ -225,17 +279,33 @@ def build(src: str, dest: str) -> dict:
     con.execute("DETACH src")
 
     # --- confirm no identifiers survived ---------------------------------
+    # Checks what a column HOLDS, not what it is called. A count of customers
+    # is fine; a customer key is not. Name-substring matching flagged
+    # "first_basket_customers" and would keep doing so as tables are added,
+    # which trains you to ignore the check.
+    ALLOWED_TEXT = {"category", "raw_category", "brand", "product", "channel",
+                    "cat_a", "cat_b", "brand_a", "brand_b", "period",
+                    "config_version", "room", "primary_category"}
     leaked = []
     for (t,) in con.execute("SHOW TABLES").fetchall():
-        cols = [r[1] for r in con.execute(f"PRAGMA table_info('{t}')").fetchall()]
-        for c in cols:
-            # brand and product are commercial, not personal — allowed.
-            if any(k in c.lower() for k in
-                   ("customer", "patient", "address", "phone", "basket_id")) \
-                    or c.lower() in ("name", "display_name", "patientname"):
-                leaked.append(f"{t}.{c}")
+        info = con.execute(f"PRAGMA table_info('{t}')").fetchall()
+        for row in info:
+            col, typ = row[1], str(row[2]).upper()
+            if col in ALLOWED_TEXT:
+                continue
+            if col.lower() in ("basket_id", "customer_key", "patient",
+                               "patientname", "display_name", "name_hash",
+                               "alpine_id", "address", "phone"):
+                leaked.append(f"{t}.{col}  (identifier column)")
+                continue
+            # Any other free-text column is suspect: numeric aggregates are
+            # safe by construction, text columns could carry a person.
+            if "VARCHAR" in typ or "TEXT" in typ:
+                leaked.append(f"{t}.{col}  (unrecognised text column — add it "
+                              f"to ALLOWED_TEXT if it is not personal data)")
     if leaked:
-        raise RuntimeError(f"Identifier columns present in published file: {leaked}")
+        raise RuntimeError("Published file may contain personal data:\n  "
+                           + "\n  ".join(leaked))
 
     stats = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for (t,) in con.execute("SHOW TABLES").fetchall()}

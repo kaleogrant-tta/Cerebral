@@ -237,10 +237,25 @@ def main() -> int:
         print(f"        {SLIM}: {stats.pop('_size_mb')} MB")
         drive.upload(slim, state_id, SLIM)
 
+        # Archiving is housekeeping, not data integrity. Everything that
+        # matters — the database, the published dashboard file, the Sheets
+        # tables — is already written by this point, so a failure here must
+        # not fail the run. Files simply stay in the inbox and get reprocessed
+        # next time, which is harmless: loading a period replaces it.
         print("        archiving processed exports")
+        moved, failed = 0, []
         for _, file_id in pulled:
-            drive.move(file_id, archive_id)
-        print(f"    archived {len(pulled)} file(s)")
+            try:
+                drive.move(file_id, archive_id, from_folder=inbox_id)
+                moved += 1
+            except Exception as e:
+                failed.append(f"{file_id}: {type(e).__name__}")
+        print(f"    archived {moved}/{len(pulled)} file(s)")
+        if failed:
+            print(f"    ! {len(failed)} could not be archived — they remain in "
+                  f"the inbox and will be reprocessed next run (harmless).")
+            for f in failed[:3]:
+                print(f"      {f}")
 
     print("done")
     return 0

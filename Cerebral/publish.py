@@ -244,6 +244,52 @@ def build(src: str, dest: str) -> dict:
         FROM f
     """)
 
+    # --- brand redemption --------------------------------------------------
+    # What the loyalty programme actually spends per brand, and on whom. This
+    # is the 3P Reward Program conversation: a brand can be shown what its
+    # offers cost, who redeemed them, and whether those were new customers.
+    con.execute("""
+        CREATE TABLE dash_brand_redemption AS
+        WITH f AS (
+            SELECT customer_key, MIN(txn_ts) AS first_ts
+            FROM src.fact_basket WHERE NOT is_return AND customer_key IS NOT NULL
+            GROUP BY 1
+        )
+        SELECT r.store_key,
+               r.matched_brand           AS brand,
+               r.matched_category        AS category,
+               r.match_method,
+               COUNT(*)                              AS redemptions,
+               SUM(r.redeem_amt)                     AS redeem_value,
+               AVG(r.redeem_amt)                     AS avg_redeem,
+               AVG(r.basket_net)                     AS avg_basket,
+               COUNT(DISTINCT r.customer_key)        AS redeemers,
+               COUNT(DISTINCT CASE
+                     WHEN date_diff('day', f.first_ts, r.txn_ts) = 0
+                     THEN r.customer_key END)        AS first_visit_redeemers,
+               COUNT(DISTINCT CASE
+                     WHEN date_diff('day', f.first_ts, r.txn_ts) > 90
+                     THEN r.customer_key END)        AS established_redeemers
+        FROM src.fact_redemption r
+        LEFT JOIN f USING (customer_key)
+        GROUP BY 1,2,3,4
+    """)
+
+    # Offer-level detail, so a specific campaign can be looked up.
+    con.execute("""
+        CREATE TABLE dash_offer_performance AS
+        SELECT store_key, offer_name, matched_brand AS brand,
+               matched_category AS category, match_method,
+               COUNT(*)                        AS redemptions,
+               SUM(redeem_amt)                 AS redeem_value,
+               AVG(basket_net)                 AS avg_basket,
+               MIN(txn_ts)                     AS first_seen,
+               MAX(txn_ts)                     AS last_seen
+        FROM src.fact_redemption
+        GROUP BY 1,2,3,4,5
+        HAVING COUNT(*) >= 5
+    """)
+
     # --- inventory, most recent snapshot only ----------------------------
     con.execute("""
         CREATE TABLE dash_inventory AS
@@ -285,7 +331,8 @@ def build(src: str, dest: str) -> dict:
     # which trains you to ignore the check.
     ALLOWED_TEXT = {"category", "raw_category", "brand", "product", "channel",
                     "cat_a", "cat_b", "brand_a", "brand_b", "period",
-                    "config_version", "room", "primary_category"}
+                    "config_version", "room", "primary_category",
+                    "match_method", "offer_name"}
     leaked = []
     for (t,) in con.execute("SHOW TABLES").fetchall():
         info = con.execute(f"PRAGMA table_info('{t}')").fetchall()

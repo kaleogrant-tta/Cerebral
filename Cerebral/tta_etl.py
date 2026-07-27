@@ -122,6 +122,79 @@ def strip_totals(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+STOPWORDS = {"travel", "club", "tta", "the", "and", "for", "with", "free",
+             "off", "deal", "offer", "promo", "special", "pack", "pk"}
+
+
+def _tokens(text: str) -> set[str]:
+    """Comparable words from an offer or product name."""
+    if not isinstance(text, str):
+        return set()
+    words = re.split(r"[^a-z0-9]+", text.lower())
+    return {w for w in words if len(w) > 2 and w not in STOPWORDS}
+
+
+def attribute_offer(offer: str, lines: pd.DataFrame,
+                    known_brands: dict | None = None) -> tuple:
+    """Work out which line of a basket an Alpine offer was spent on.
+
+    Offers are named after the product they discount ("Travel Club Rythm
+    Flower 3.5g"), so the brand and often the product can be recovered by
+    matching the name against the basket's contents.
+
+    Returns (brand, category, product, method). Method is one of:
+      brand+product  the brand matched AND product words overlapped
+      brand          only the brand matched
+      product        product words overlapped but no brand match
+      unmatched      no confident match; caller should not attribute value
+
+    Deliberately conservative. A wrong attribution silently credits the wrong
+    brand, which is worse than leaving a redemption unattributed and visible.
+    """
+    otok = _tokens(offer)
+    if not otok or lines.empty:
+        return (None, None, None, "unmatched")
+
+    # If the offer names a brand from the catalogue, only that brand's lines
+    # can match. Without this, "Wana Gummies" attributes to a Camino gummy in
+    # the same basket because "gummies" overlaps — crediting the wrong brand,
+    # which is worse than not attributing at all.
+    named_brands = set()
+    if known_brands:
+        for btoks, bname in known_brands.items():
+            if btoks and set(btoks) <= otok:
+                named_brands.add(bname)
+
+    best, best_score, best_method = None, 0.0, "unmatched"
+    for _, ln in lines.iterrows():
+        brand = str(ln.get("brand") or "")
+        btok = _tokens(brand)
+        ptok = _tokens(str(ln.get("product") or ""))
+
+        brand_hit = bool(btok) and btok <= otok          # every brand word present
+        if named_brands and brand not in named_brands:
+            continue                                     # offer names someone else
+        prod_overlap = len(ptok & otok)
+        prod_score = prod_overlap / max(len(ptok), 1)
+
+        if brand_hit and prod_overlap:
+            score, method = 2.0 + prod_score, "brand+product"
+        elif brand_hit:
+            score, method = 1.5, "brand"
+        elif prod_score >= 0.5:
+            score, method = 1.0 + prod_score, "product"
+        else:
+            continue
+
+        if score > best_score:
+            best, best_score, best_method = ln, score, method
+
+    if best is None:
+        return (None, None, None, "unmatched")
+    return (best.get("brand"), best.get("category"),
+            best.get("product"), best_method)
+
+
 def customer_hash(name: str) -> str | None:
     """Stable surrogate key for customers lacking an Alpine ID.
 
@@ -150,6 +223,7 @@ class LoadResult:
     fact_basket: pd.DataFrame
     checks: list[dict] = field(default_factory=list)
     source_files: str = ""
+    redemption: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def ok(self) -> bool:
@@ -233,6 +307,33 @@ class Pipeline:
                 ext_cost          DOUBLE,
                 ext_retail        DOUBLE
             );
+            -- Redemptions attributed to the product they were spent on.
+            --
+            -- Alpine records a redemption against a BASKET, but its offers are
+            -- product-specific ("Travel Club Rythm Flower 3.5g"). Attributing
+            -- the value to a brand needs the offer name matched against the
+            -- lines in that basket. match_method records how confident that
+            -- match is, so a weak one can be excluded from analysis rather
+            -- than quietly counted.
+            CREATE TABLE IF NOT EXISTS fact_redemption (
+                basket_id         BIGINT,
+                store_key         INTEGER,
+                txn_ts            TIMESTAMP,
+                date_key          INTEGER,
+                iso_year          INTEGER,
+                iso_week          INTEGER,
+                channel           VARCHAR,
+                customer_key      VARCHAR,
+                offer_id          VARCHAR,
+                offer_name        VARCHAR,
+                redeem_amt        DOUBLE,
+                matched_brand     VARCHAR,
+                matched_category  VARCHAR,
+                matched_product   VARCHAR,
+                match_method      VARCHAR,
+                basket_net        DOUBLE
+            );
+
             -- Accumulating name -> Alpine ID map.
             --
             -- Alpine only names a customer on baskets that carried a
@@ -346,11 +447,13 @@ class Pipeline:
         # --- Alpine: chain-scoped, filter to store -----------------------
         redeem = pd.Series(dtype=float)
         cust = pd.Series(dtype=object)
+        al_rows = pd.DataFrame()
         if alpine is not None and len(alpine):
             al = alpine.copy()
             al["Location"] = al["Location"].astype(str).str.strip()
             al = al[al["Location"] == location_str]
             if len(al):
+                al_rows = al                      # retained for offer attribution
                 redeem = al.groupby("Order Number")["Alpine Discount Amount"].sum()
                 cust = (al.sort_values("Order Date")
                           .groupby("Order Number")["Customer ID"].last().astype(str))
@@ -516,7 +619,69 @@ class Pipeline:
             basket[f"has_{slug}"] = (series > 0) if cat in cat_net.columns else False
             basket[f"net_ex_{slug}"] = basket["basket_net"] - (series if cat in cat_net.columns else 0.0)
 
-        return LoadResult(store_key, store_code, period, line, basket, checks)
+        # --- fact_redemption ---------------------------------------------
+        redemption = self._attribute_redemptions(al_rows, line, basket, check)
+
+        return LoadResult(store_key, store_code, period, line, basket, checks,
+                          redemption=redemption)
+
+    def _attribute_redemptions(self, al_rows: pd.DataFrame, line: pd.DataFrame,
+                               basket: pd.DataFrame, check) -> pd.DataFrame:
+        """Match each Alpine offer to the product it was spent on."""
+        if al_rows.empty or line.empty:
+            return pd.DataFrame()
+
+        catalogue = {frozenset(_tokens(b)): b
+                     for b in line["brand"].dropna().unique() if _tokens(b)}
+        by_basket = {bid: g[["brand", "category", "product"]]
+                     for bid, g in line.groupby("basket_id")}
+        bmeta = basket.set_index("basket_id")
+
+        out = []
+        for _, r in al_rows.iterrows():
+            try:
+                bid = int(r["Order Number"])
+            except (TypeError, ValueError):
+                continue
+            if bid not in by_basket or bid not in bmeta.index:
+                continue
+            b = bmeta.loc[bid]
+            brand, cat, prod, method = attribute_offer(
+                r.get("Discount Description"), by_basket[bid], catalogue)
+            out.append({
+                "basket_id": bid,
+                "store_key": int(b["store_key"]),
+                "txn_ts": b["txn_ts"],
+                "date_key": int(b["date_key"]),
+                "iso_year": int(b["iso_year"]),
+                "iso_week": int(b["iso_week"]),
+                "channel": b["channel"],
+                "customer_key": b["customer_key"],
+                "offer_id": str(r.get("AlpineIQ Discount ID", "")),
+                "offer_name": r.get("Discount Description"),
+                "redeem_amt": float(r.get("Alpine Discount Amount") or 0),
+                "matched_brand": brand,
+                "matched_category": cat,
+                "matched_product": prod,
+                "match_method": method,
+                "basket_net": float(b["basket_net"]),
+            })
+
+        df = pd.DataFrame(out)
+        if df.empty:
+            check("redemption_attribution", True, "no redemptions in period")
+            return df
+
+        matched = (df.match_method != "unmatched")
+        val_matched = df.loc[matched, "redeem_amt"].sum()
+        val_all = df["redeem_amt"].sum()
+        rate = val_matched / val_all if val_all else 0
+        strong = (df.match_method == "brand+product").sum()
+        check("redemption_attribution", True,
+              f"{len(df):,} redemptions, {matched.sum():,} attributed to a brand "
+              f"({rate*100:.1f}% of value; {strong:,} brand+product matches). "
+              f"Unattributed rows are kept and flagged, never guessed.")
+        return df
 
     def _learn_identities(self, learn: pd.DataFrame) -> None:
         """Record name -> Alpine ID sightings.
@@ -624,6 +789,15 @@ class Pipeline:
         bdf = res.fact_basket.reindex(columns=bask_cols)        # noqa: F841
         self.con.execute("INSERT INTO fact_line SELECT * FROM ldf")
         self.con.execute("INSERT INTO fact_basket SELECT * FROM bdf")
+
+        self.con.execute(
+            f"DELETE FROM fact_redemption WHERE store_key = {res.store_key} "
+            f"AND date_key IN ({','.join(map(str, dates))})")
+        if len(res.redemption):
+            rcols = [r[1] for r in
+                     self.con.execute("PRAGMA table_info('fact_redemption')").fetchall()]
+            rdf = res.redemption.reindex(columns=rcols)     # noqa: F841
+            self.con.execute("INSERT INTO fact_redemption SELECT * FROM rdf")
         warns = sum(1 for c in res.checks if c.get("status") == "WARN")
         # Replace rather than append: re-loading a period must not leave a
         # stale row behind, or the log double-counts.

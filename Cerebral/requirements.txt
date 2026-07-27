@@ -1,4 +1,8 @@
 streamlit
-duckdb
-pandas
+duckdb>=1.1
+pandas>=2.2
 plotly
+openpyxl>=3.1
+google-api-python-client>=2.140
+google-auth>=2.33
+gspread>=6.1

@@ -354,12 +354,42 @@ def load_db() -> str | None:
 
 @st.cache_data(ttl=CACHE_MINUTES * 60)
 def q(sql: str) -> pd.DataFrame:
+    """Run a query, returning an empty frame if the table is not there.
+
+    The app and the published data file are versioned independently: the code
+    deploys from git the moment it is pushed, while the data file only changes
+    when the scheduled run rebuilds it. So a new tab can go live hours before
+    the table it reads exists.
+
+    A missing table should degrade that one section, not take down the whole
+    dashboard. Every caller already handles an empty frame, because a store
+    filter can legitimately return nothing.
+    """
     path = load_db()
     if not path:
         return pd.DataFrame()
     con = duckdb.connect(path, read_only=True)
     try:
         return con.execute(sql).df()
+    except duckdb.CatalogException:
+        return pd.DataFrame()
+    except Exception:
+        raise
+    finally:
+        con.close()
+
+
+def table_exists(name: str) -> bool:
+    path = load_db()
+    if not path:
+        return False
+    con = duckdb.connect(path, read_only=True)
+    try:
+        return con.execute(
+            "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = ?",
+            [name]).fetchone()[0] > 0
+    except Exception:
+        return False
     finally:
         con.close()
 
@@ -1374,10 +1404,13 @@ with t_redeem:
         GROUP BY 1,2
     """)
 
-    if rd.empty or rd.spend.sum() == 0:
-        st.info("No redemption data in the published file. Reload history — "
-                "periods loaded before redemption attribution existed do not "
-                "have it.")
+    if not table_exists("dash_brand_redemption"):
+        st.info("The published data file predates this tab. It will populate "
+                "after the next scheduled refresh rebuilds it.")
+    elif rd.empty or rd.spend.sum() == 0:
+        st.info("No redemption data yet. Redemption attribution runs during "
+                "the ETL, so periods loaded before it existed do not have it "
+                "— a full reload populates them.")
     else:
         attributed = rd[rd.brand.notna()]
         unattributed = rd[rd.brand.isna()]

@@ -1797,7 +1797,7 @@ with t_redeem:
 
 
 # -------------------------------------------------------------- redemptions
-with t_redemptions:
+with t_redeem:
     st.markdown("#### Loyalty Redemptions")
     st.markdown('<div class="howto"><b>How to read this tab.</b> '
                 'Redemptions are discounts given back to loyalty members. '

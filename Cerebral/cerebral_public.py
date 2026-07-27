@@ -35,6 +35,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import numpy as np
 
 from glossary import GLOSSARY, SECTIONS, marker, section_note, tip
 
@@ -489,8 +490,8 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "What the terms mean"])
+t_charts, t_insights, t_brands, t_redemptions, t_projections, t_gloss = st.tabs(
+    ["Charts", "Insights", "Brands", "Redemptions", "Projections", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -1311,6 +1312,129 @@ with t_brands:
                         unsafe_allow_html=True)
 
 
+
+# -------------------------------------------------------------- redemptions
+with t_redemptions:
+    st.markdown("#### Loyalty Redemptions")
+
+    red = q(f"""SELECT iso_year, iso_week, SUM(baskets) AS baskets, SUM(redeem_baskets) AS redeem_baskets, SUM(redeem_value) AS redeem_value, SUM(net) AS net FROM dash_basket_week {wf} GROUP BY 1,2 ORDER BY 1,2""")
+    if red.empty or red.redeem_baskets.sum() == 0:
+        st.info("No redemption data in the published file.")
+    else:
+        red["wk_date"] = pd.to_datetime(red.iso_year.astype(str) + "-W" + red.iso_week.astype(str).str.zfill(2) + "-1", format="%G-W%V-%u", errors="coerce")
+        red = red.sort_values("wk_date").reset_index(drop=True)
+        red["redeem_rate"] = red.redeem_baskets / red.baskets.replace(0, float("nan"))
+        red["redeem_per_basket"] = red.redeem_value / red.baskets.replace(0, float("nan"))
+        red["redeem_pct_of_net"] = red.redeem_value / red.net.replace(0, float("nan"))
+        cur = red.iloc[-1]
+        prev = red.iloc[-2] if len(red) > 1 else None
+        c = st.columns(4)
+        c[0].metric("Redemption Rate", f"{cur.redeem_rate*100:.1f}%", f"{(cur.redeem_rate/prev.redeem_rate-1)*100:+.1f}%" if prev is not None else None)
+        c[1].metric("Redemption Value", f"${cur.redeem_value:,.0f}", f"{(cur.redeem_value/prev.redeem_value-1)*100:+.1f}%" if prev is not None else None)
+        c[2].metric("Avg Redemption / Basket", f"${cur.redeem_per_basket:.2f}", f"{(cur.redeem_per_basket/prev.redeem_per_basket-1)*100:+.1f}%" if prev is not None else None)
+        c[3].metric("Redemptions as % of Net", f"{cur.redeem_pct_of_net*100:.1f}%", f"{(cur.redeem_pct_of_net/prev.redeem_pct_of_net-1)*100:+.1f}%" if prev is not None else None)
+
+        st.divider()
+        L, R = st.columns([3, 2])
+        with L:
+            heading("Redemption value and rate by week")
+            fig = go.Figure()
+            fig.add_bar(x=red.wk_date, y=red.redeem_value, name="Redemption $", marker_color=ACCENT, opacity=.75)
+            fig.add_scatter(x=red.wk_date, y=red.redeem_rate*100, name="Redemption rate %", yaxis="y2", line=dict(color=WARN, width=2))
+            fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0), yaxis=dict(title="Redemption $", tickformat="$,.0s", gridcolor="rgba(0,0,0,.07)"), yaxis2=dict(title="Rate %", overlaying="y", side="right", showgrid=False, tickformat=".1f", ticksuffix="%"), hovermode="x unified", legend=dict(orientation="h", y=1.12, x=0, title_text=""), plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
+        with R:
+            st.markdown("##### Redemption by store")
+            if len(keys) > 1:
+                red_store = q(f"""SELECT store_key, SUM(baskets) AS baskets, SUM(redeem_baskets) AS redeem_baskets, SUM(redeem_value) AS redeem_value, SUM(net) AS net FROM dash_basket_week {wf} GROUP BY 1""")
+                red_store["store"] = red_store.store_key.map(STORES)
+                red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
+                red_store = red_store.sort_values("redeem_value", ascending=False)
+                fig = px.bar(red_store, x="store", y="redeem_value", color="redeem_rate", color_continuous_scale="RdYlGn", text=red_store.redeem_rate.apply(lambda x: f"{x*100:.1f}%"))
+                fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="Redemption $", xaxis_title="", coloraxis_colorbar=dict(title="Rate"), plot_bgcolor="rgba(0,0,0,0)")
+                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.markdown('<p class="note">Select multiple stores in the sidebar to compare redemption performance.</p>', unsafe_allow_html=True)
+
+        st.divider()
+        heading("Redemptions as % of net sales")
+        fig = px.line(red, x="wk_date", y=red.redeem_pct_of_net*100, markers=True, color_discrete_sequence=[WARN])
+        fig.update_traces(line=dict(width=2.5), marker=dict(size=6), hovertemplate="%{y:.1f}%<extra></extra>")
+        fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="% of net sales", xaxis_title="", hovermode="x unified", showlegend=False, plot_bgcolor="rgba(0,0,0,0)")
+        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%", zeroline=False)
+        fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown('<p class="note">A rising line means the loyalty program is taking a larger share of revenue. Watch this against basket count.</p>', unsafe_allow_html=True)
+
+# -------------------------------------------------------------- projections
+with t_projections:
+    st.markdown("#### Next Quarter Projection")
+    st.markdown('<p class="note">Simple linear projections from the last 26 weeks, extended 13 weeks forward. Use as a baseline, not a forecast.</p>', unsafe_allow_html=True)
+
+    proj_bw = q(f"""SELECT iso_year, iso_week, SUM(baskets) AS baskets, SUM(net) AS net FROM dash_basket_week {wf} GROUP BY 1,2 ORDER BY 1,2""")
+    if len(proj_bw) < 8:
+        st.info("Not enough weekly history to build a projection.")
+    else:
+        proj_bw["wk_date"] = pd.to_datetime(proj_bw.iso_year.astype(str) + "-W" + proj_bw.iso_week.astype(str).str.zfill(2) + "-1", format="%G-W%V-%u", errors="coerce")
+        proj_bw = proj_bw.sort_values("wk_date").reset_index(drop=True)
+        trend_n = min(26, len(proj_bw))
+        trend_bw = proj_bw.tail(trend_n).copy().reset_index(drop=True)
+        trend_bw["x"] = range(len(trend_bw))
+        z_b = np.polyfit(trend_bw.x, trend_bw.baskets, 1)
+        z_n = np.polyfit(trend_bw.x, trend_bw.net, 1)
+        last_date = proj_bw.wk_date.iloc[-1]
+        future_dates = pd.date_range(start=last_date + pd.Timedelta(weeks=1), periods=13, freq="W-MON")
+        future_x = range(len(trend_bw), len(trend_bw) + 13)
+        proj_baskets = np.maximum(np.polyval(z_b, future_x), 0)
+        proj_net = np.maximum(np.polyval(z_n, future_x), 0)
+        proj_df = pd.DataFrame({"wk_date": future_dates, "projected_baskets": proj_baskets, "projected_net": proj_net})
+        total_proj_net = proj_df.projected_net.sum()
+        total_proj_baskets = proj_df.projected_baskets.sum()
+        cur_quarter = proj_bw.tail(13).net.sum()
+        cur_baskets = proj_bw.tail(13).baskets.sum()
+        c = st.columns(4)
+        c[0].metric("Projected Quarter Net", f"${total_proj_net:,.0f}", f"{(total_proj_net/cur_quarter-1)*100:+.1f}% vs last 13 wks")
+        c[1].metric("Projected Baskets", f"{total_proj_baskets:,.0f}", f"{(total_proj_baskets/cur_baskets-1)*100:+.1f}% vs last 13 wks")
+        c[2].metric("Projected ATV", f"${total_proj_net/total_proj_baskets:.2f}")
+        c[3].metric("Trend weeks used", f"{trend_n}")
+
+        st.divider()
+        heading("Projected net sales by week")
+        fig = go.Figure()
+        fig.add_scatter(x=proj_bw.wk_date, y=proj_bw.net, name="Historical", mode="lines+markers", line=dict(color=ACCENT, width=2), marker=dict(size=5))
+        fig.add_scatter(x=proj_df.wk_date, y=proj_df.projected_net, name="Projected", mode="lines+markers", line=dict(color=WARN, width=2, dash="dash"), marker=dict(size=5))
+        fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0), yaxis=dict(title="Net $", tickformat="$,.0s", gridcolor="rgba(0,0,0,.07)"), xaxis_title="", hovermode="x unified", legend=dict(orientation="h", y=1.12, x=0, title_text=""), plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+        heading("Category projections")
+        proj_cat = q(f"""SELECT iso_year, iso_week, category, SUM(net) AS net FROM dash_category_week {wf} GROUP BY 1,2,3 ORDER BY 1,2,3""")
+        if not proj_cat.empty:
+            proj_cat["wk_date"] = pd.to_datetime(proj_cat.iso_year.astype(str) + "-W" + proj_cat.iso_week.astype(str).str.zfill(2) + "-1", format="%G-W%V-%u", errors="coerce")
+            proj_cat = proj_cat.sort_values(["category", "wk_date"])
+            cat_rows = []
+            for cat, g in proj_cat.groupby("category"):
+                g = g.tail(min(26, len(g))).copy().reset_index(drop=True)
+                if len(g) >= 4:
+                    g["x"] = range(len(g))
+                    try:
+                        z = np.polyfit(g.x, g.net, 1)
+                        future = np.maximum(np.polyval(z, range(len(g), len(g) + 13)), 0)
+                        cat_rows.append({"category": cat, "projected_quarter": future.sum(), "trend_weekly": z[0], "latest_13wk": g.net.tail(13).sum()})
+                    except Exception:
+                        pass
+            if cat_rows:
+                cat_proj = pd.DataFrame(cat_rows).sort_values("projected_quarter", ascending=False)
+                cat_proj["vs_last_quarter"] = (cat_proj.projected_quarter / cat_proj.latest_13wk - 1) * 100
+                st.dataframe(pd.DataFrame({"Category": cat_proj.category, "Projected Quarter $": cat_proj.projected_quarter.round(0), "vs Last 13 Wks %": cat_proj.vs_last_quarter.round(1), "Weekly Trend $": cat_proj.trend_weekly.round(0)}), use_container_width=True, hide_index=True, column_config={"Projected Quarter $": st.column_config.NumberColumn(format="$%d"), "vs Last 13 Wks %": st.column_config.NumberColumn(format="%.1f%%"), "Weekly Trend $": st.column_config.NumberColumn(format="$%d")})
+                fig = go.Figure()
+                fig.add_bar(x=cat_proj.category, y=cat_proj.latest_13wk, name="Last 13 wks", marker_color=ACCENT, opacity=.7)
+                fig.add_bar(x=cat_proj.category, y=cat_proj.projected_quarter, name="Projected 13 wks", marker_color=WARN, opacity=.7)
+                fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0), yaxis=dict(title="Net $", tickformat="$,.0s", gridcolor="rgba(0,0,0,.07)"), xaxis_title="", barmode="group", hovermode="x unified", legend=dict(orientation="h", y=1.12, x=0, title_text=""), plot_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Not enough category history to project.")
 # ----------------------------------------------------------------- glossary
 with t_gloss:
     st.markdown("#### What the terms mean")

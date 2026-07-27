@@ -1316,9 +1316,14 @@ with t_brands:
 # -------------------------------------------------------------- redemptions
 with t_redemptions:
     st.markdown("#### Loyalty Redemptions")
-    st.markdown('<p class="note">Redemption data is reported weekly. If the '
-                'latest week shows zero, the store may not have processed '
-                'redemptions yet — look at the trailing trend instead.</p>',
+    st.markdown('<div class="howto"><b>How to read this tab.</b> '
+                'Redemptions are discounts given back to loyalty members. '
+                'A high redemption rate means many customers are using their '
+                'points — usually good, because engaged members buy more often. '
+                'But watch the cost: if redemption dollars grow faster than '
+                'net sales, the program is eating margin. The sweet spot is '
+                'high redemption rate with low redemption cost as a percent '
+                'of revenue, and high sales per redeeming basket.</div>',
                 unsafe_allow_html=True)
 
     red = q(f"""
@@ -1374,25 +1379,39 @@ with t_redemptions:
         c[0].metric("Redemption Rate",
                     f"{cur.redeem_rate*100:.1f}%" if pd.notna(cur.redeem_rate) and cur.redeem_rate > 0 else "—",
                     fmt_delta(cur.redeem_rate, prev.redeem_rate) if prev is not None else None,
-                    help="Share of baskets that included a loyalty redemption.")
+                    help="Share of baskets that included a loyalty redemption. "
+                         "5-10% is typical for cannabis; above 15% suggests "
+                         "very engaged membership or overly generous rewards.")
         c[1].metric("Redemption Value",
                     f"${cur.redeem_value:,.0f}" if pd.notna(cur.redeem_value) and cur.redeem_value > 0 else "—",
                     fmt_delta(cur.redeem_value, prev.redeem_value) if prev is not None else None,
-                    help="Total value redeemed in the latest active week.")
+                    help="Total dollars given back as discounts this week.")
         c[2].metric("Avg Redemption / Basket",
                     f"${cur.redeem_per_basket:.2f}" if pd.notna(cur.redeem_per_basket) and cur.redeem_per_basket > 0 else "—",
                     fmt_delta(cur.redeem_per_basket, prev.redeem_per_basket) if prev is not None else None,
-                    help="Average redemption value per total basket.")
+                    help="Average discount per total basket (redeeming or not). "
+                         "This is your blended loyalty cost — keep it under "
+                         "3-4% of average basket value.")
         c[3].metric("Redemptions as % of Net",
                     f"{cur.redeem_pct_of_net*100:.1f}%" if pd.notna(cur.redeem_pct_of_net) and cur.redeem_pct_of_net > 0 else "—",
                     fmt_delta(cur.redeem_pct_of_net, prev.redeem_pct_of_net) if prev is not None else None,
-                    help="Redemption value divided by net sales.")
+                    help="Redemption value divided by net sales. This is the "
+                         "true cost of the program. If it is rising while basket "
+                         "count is flat, you are giving away margin without "
+                         "growing traffic.")
 
         st.divider()
         L, R = st.columns([3, 2])
 
         with L:
             heading("Redemption value and rate by week")
+            st.markdown('<p class="note">The bars show total dollars redeemed; '
+                        'the line shows what share of baskets included a '
+                        'redemption. When both rise together, the program is '
+                        'growing in reach and value. When the line falls but '
+                        'bars rise, a smaller group of customers is redeeming '
+                        'larger amounts — often a sign of point hoarding or '
+                        'high-threshold rewards.</p>', unsafe_allow_html=True)
             fig = go.Figure()
             fig.add_bar(x=red.wk_date, y=red.redeem_value, name="Redemption $",
                         marker_color=ACCENT, opacity=.75)
@@ -1425,6 +1444,11 @@ with t_redemptions:
                                   plot_bgcolor="rgba(0,0,0,0)")
                 fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
                 st.plotly_chart(fig, use_container_width=True)
+                st.markdown('<p class="note">Color shows redemption rate, not '
+                            'just volume. A store with low bars but dark green '
+                            'has fewer total redemptions but higher engagement — '
+                            'the program is working, just at smaller scale.</p>',
+                            unsafe_allow_html=True)
             else:
                 st.markdown('<p class="note">Select multiple stores in the '
                             'sidebar to compare redemption performance.</p>',
@@ -1432,9 +1456,20 @@ with t_redemptions:
 
         st.divider()
 
-        # --- Granular store scorecard ------------------------------------
+        # --- Store scorecard ---------------------------------------------
         if not red_store.empty and len(keys) > 1:
             st.markdown("#### Store redemption scorecard")
+            st.markdown('<div class="howto"><b>How to read the scorecard.</b> '
+                        '<b>Redemption Rate</b> is engagement — how many baskets '
+                        'include a redemption. <b>Redemption Cost %</b> is the '
+                        'true price of the program — keep it under 5-8% of net '
+                        'sales. <b>Sales / Redeem Bkt</b> is the ROI proxy: '
+                        'how much revenue each redeeming basket generates. '
+                        'Higher is better — it means the discount is pulling '
+                        'incremental spend, not just subsidizing purchases that '
+                        'would have happened anyway.</div>',
+                        unsafe_allow_html=True)
+
             red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
             red_store["redeem_pct_of_net"] = red_store.redeem_value / red_store.net.replace(0, float("nan"))
             red_store["net_per_basket"] = red_store.net / red_store.baskets.replace(0, float("nan"))
@@ -1448,31 +1483,37 @@ with t_redemptions:
                 top = by_rate.iloc[0]
                 st.markdown(f'<div class="alert a-ok"><b>Most redeemed</b><br>'
                             f'{STORES.get(top.store_key, top.store_key)} — '
-                            f'{top.redeem_rate*100:.1f}%</div>',
+                            f'{top.redeem_rate*100:.1f}%<br>'
+                            f'<span style="font-size:.8em;color:var(--muted)">'
+                            f'High engagement</span></div>',
                             unsafe_allow_html=True)
             with h2:
                 bot = by_rate.iloc[-1]
                 st.markdown(f'<div class="alert a-warn"><b>Least redeemed</b><br>'
                             f'{STORES.get(bot.store_key, bot.store_key)} — '
-                            f'{bot.redeem_rate*100:.1f}%</div>',
+                            f'{bot.redeem_rate*100:.1f}%<br>'
+                            f'<span style="font-size:.8em;color:var(--muted)">'
+                            f'Check staff training / signage</span></div>',
                             unsafe_allow_html=True)
             with h3:
                 top_roi = by_roi.iloc[0]
                 st.markdown(f'<div class="alert a-ok"><b>Best ROI</b><br>'
                             f'{STORES.get(top_roi.store_key, top_roi.store_key)} — '
-                            f'${top_roi.sales_per_redeem_basket:.0f} sales / '
-                            f'redeem basket</div>',
+                            f'${top_roi.sales_per_redeem_basket:.0f} / redeem bkt<br>'
+                            f'<span style="font-size:.8em;color:var(--muted)">'
+                            f'Discount drives volume</span></div>',
                             unsafe_allow_html=True)
             with h4:
                 bot_roi = by_roi.iloc[-1]
                 st.markdown(f'<div class="alert a-bad"><b>Worst ROI</b><br>'
                             f'{STORES.get(bot_roi.store_key, bot_roi.store_key)} — '
-                            f'${bot_roi.sales_per_redeem_basket:.0f} sales / '
-                            f'redeem basket</div>',
+                            f'${bot_roi.sales_per_redeem_basket:.0f} / redeem bkt<br>'
+                            f'<span style="font-size:.8em;color:var(--muted)">'
+                            f'Margin erosion risk</span></div>',
                             unsafe_allow_html=True)
 
             st.dataframe(pd.DataFrame({
-                "Store": red_store.store.map(STORES),
+                "Store": red_store.store_key.map(STORES),
                 "Baskets": red_store.baskets,
                 "Redeem Baskets": red_store.redeem_baskets,
                 "Redemption $": red_store.redeem_value.round(0),
@@ -1483,7 +1524,8 @@ with t_redemptions:
             }), use_container_width=True, hide_index=True, column_config={
                 "Redemption $": st.column_config.NumberColumn(format="$%d"),
                 "Net $": st.column_config.NumberColumn(format="$%d"),
-                "Redemption Rate %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Redemption Rate %": st.column_config.NumberColumn(
+                    help="% of baskets that include a redemption.", format="%.1f%%"),
                 "Redemption Cost %": st.column_config.NumberColumn(
                     help="Redemption value as % of net sales. Lower is better.",
                     format="%.1f%%"),
@@ -1493,8 +1535,90 @@ with t_redemptions:
                     format="$%d"),
             })
 
+        # --- Brand redemption section ------------------------------------
+        st.divider()
+        st.markdown("#### Brand performance in redeeming baskets")
+        st.markdown('<div class="howto"><b>How to read this.</b> This section '
+                    'shows which brands appear most often in baskets that '
+                    'include a redemption. A brand with high share in redeeming '
+                    'baskets but low share overall is being <b>subsidised</b> '
+                    'by the loyalty program — customers only buy it when they '
+                    'have points to spend. A brand with high share in both '
+                    'redeeming and non-redeeming baskets is genuinely popular '
+                    'and should be stocked deep.</div>',
+                    unsafe_allow_html=True)
+
+        # Try to query brand redemption data if available
+        brand_red = q(f"""
+            SELECT brand,
+                   SUM(redeem_baskets) AS redeem_baskets,
+                   SUM(redeem_value) AS redeem_value,
+                   SUM(baskets) AS baskets,
+                   SUM(net) AS net
+            FROM dash_brand_scorecard {wf}
+            GROUP BY 1
+            HAVING SUM(redeem_baskets) > 0
+            ORDER BY SUM(redeem_value) DESC
+            LIMIT 20
+        """)
+
+        if not brand_red.empty and brand_red.redeem_baskets.sum() > 0:
+            brand_red["redeem_rate"] = brand_red.redeem_baskets / brand_red.baskets.replace(0, float("nan"))
+            brand_red["redeem_pct_of_net"] = brand_red.redeem_value / brand_red.net.replace(0, float("nan"))
+            brand_red["sales_per_redeem_basket"] = brand_red.net / brand_red.redeem_baskets.replace(0, float("nan"))
+
+            top_brands = brand_red.nlargest(5, "redeem_rate")
+            bot_brands = brand_red.nsmallest(5, "redeem_rate")
+            top_roi_brands = brand_red.nlargest(5, "sales_per_redeem_basket")
+
+            b1, b2 = st.columns(2)
+            with b1:
+                st.markdown("**Most redeemed brands**")
+                for _, r in top_brands.iterrows():
+                    st.markdown(f'<div class="alert a-ok"><b>{r.brand}</b> — '
+                                f'{r.redeem_rate*100:.1f}% of baskets<br>'
+                                f'${r.redeem_value:,.0f} redeemed</div>',
+                                unsafe_allow_html=True)
+            with b2:
+                st.markdown("**Best ROI brands (sales per redeem basket)**")
+                for _, r in top_roi_brands.iterrows():
+                    st.markdown(f'<div class="alert a-ok"><b>{r.brand}</b> — '
+                                f'${r.sales_per_redeem_basket:.0f} / redeem bkt<br>'
+                                f'{r.redeem_rate*100:.1f}% redemption rate</div>',
+                                unsafe_allow_html=True)
+
+            st.dataframe(pd.DataFrame({
+                "Brand": brand_red.brand,
+                "Redeem Baskets": brand_red.redeem_baskets,
+                "Redemption $": brand_red.redeem_value.round(0),
+                "Net $": brand_red.net.round(0),
+                "Redemption Rate %": (brand_red.redeem_rate * 100).round(1),
+                "Redemption Cost %": (brand_red.redeem_pct_of_net * 100).round(1),
+                "Sales / Redeem Bkt": brand_red.sales_per_redeem_basket.round(0),
+            }), use_container_width=True, hide_index=True, column_config={
+                "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                "Net $": st.column_config.NumberColumn(format="$%d"),
+                "Redemption Rate %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Redemption Cost %": st.column_config.NumberColumn(
+                    help="Redemption value as % of net sales.", format="%.1f%%"),
+                "Sales / Redeem Bkt": st.column_config.NumberColumn(
+                    help="Net sales per redeeming basket.", format="$%d"),
+            })
+        else:
+            st.info("Brand-level redemption data is not yet available in the "
+                    "published dashboard. To enable this, the ETL needs to "
+                    "join Alpine IQ redemption records to product-level sales "
+                    "data and publish a brand redemption table.")
+
         st.divider()
         heading("Redemptions as % of net sales")
+        st.markdown('<p class="note">This line shows the program\'s total '
+                    'cost as a share of revenue. A steady 3-5% is healthy. '
+                    'A spike to 8-10% means either a major promotion (expected) '
+                    'or runaway point accumulation (investigate). A steady '
+                    'decline below 2% means customers are not engaging — '
+                    'the program may need better communication or more '
+                    'attainable rewards.</p>', unsafe_allow_html=True)
         fig = px.line(red, x="wk_date", y=red.redeem_pct_of_net*100,
                       markers=True, color_discrete_sequence=[WARN])
         fig.update_traces(line=dict(width=2.5),
@@ -1508,12 +1632,6 @@ with t_redemptions:
                          zeroline=False)
         fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
         st.plotly_chart(fig, use_container_width=True)
-        st.markdown('<p class="note">A rising line means the loyalty program '
-                    'is taking a larger share of revenue. Watch this against '
-                    'basket count — if both rise, the program is pulling '
-                    'traffic; if only this rises while baskets fall, the '
-                    'discount is eroding margin without growing the top line.'
-                    '</p>', unsafe_allow_html=True)
 
 # -------------------------------------------------------------- projections
 with t_projections:

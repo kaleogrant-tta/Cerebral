@@ -1435,8 +1435,9 @@ with t_redemptions:
                 red_store["store"] = red_store.store_key.map(STORES)
                 red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
                 red_store = red_store.sort_values("redeem_value", ascending=False)
+                # Use Greens scale so higher rate = darker green, no confusing yellow middle
                 fig = px.bar(red_store, x="store", y="redeem_value",
-                             color="redeem_rate", color_continuous_scale="RdYlGn",
+                             color="redeem_rate", color_continuous_scale="Greens",
                              text=red_store.redeem_rate.apply(lambda x: f"{x*100:.1f}%"))
                 fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
                                   yaxis_title="Redemption $", xaxis_title="",
@@ -1444,10 +1445,9 @@ with t_redemptions:
                                   plot_bgcolor="rgba(0,0,0,0)")
                 fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
                 st.plotly_chart(fig, use_container_width=True)
-                st.markdown('<p class="note">Color shows redemption rate, not '
-                            'just volume. A store with low bars but dark green '
-                            'has fewer total redemptions but higher engagement — '
-                            'the program is working, just at smaller scale.</p>',
+                st.markdown('<p class="note">Darker green = higher redemption '
+                            'rate. The bar height is total redemption dollars; '
+                            'color shows engagement intensity.</p>',
                             unsafe_allow_html=True)
             else:
                 st.markdown('<p class="note">Select multiple stores in the '
@@ -1548,27 +1548,30 @@ with t_redemptions:
                     'and should be stocked deep.</div>',
                     unsafe_allow_html=True)
 
-        # Try to query brand redemption data if available
-        brand_red = q(f"""
-            SELECT brand,
-                   SUM(redeem_baskets) AS redeem_baskets,
-                   SUM(redeem_value) AS redeem_value,
-                   SUM(baskets) AS baskets,
-                   SUM(net) AS net
-            FROM dash_brand_scorecard {wf}
-            GROUP BY 1
-            HAVING SUM(redeem_baskets) > 0
-            ORDER BY SUM(redeem_value) DESC
-            LIMIT 20
-        """)
+        # Try to query brand redemption data — columns may not exist yet
+        brand_red = None
+        try:
+            brand_red = q(f"""
+                SELECT brand,
+                       SUM(redeem_baskets) AS redeem_baskets,
+                       SUM(redeem_value) AS redeem_value,
+                       SUM(baskets) AS baskets,
+                       SUM(net) AS net
+                FROM dash_brand_scorecard {wf}
+                GROUP BY 1
+                HAVING SUM(redeem_baskets) > 0
+                ORDER BY SUM(redeem_value) DESC
+                LIMIT 20
+            """)
+        except Exception:
+            pass  # Table doesn't have redemption columns yet
 
-        if not brand_red.empty and brand_red.redeem_baskets.sum() > 0:
+        if brand_red is not None and not brand_red.empty and brand_red.redeem_baskets.sum() > 0:
             brand_red["redeem_rate"] = brand_red.redeem_baskets / brand_red.baskets.replace(0, float("nan"))
             brand_red["redeem_pct_of_net"] = brand_red.redeem_value / brand_red.net.replace(0, float("nan"))
             brand_red["sales_per_redeem_basket"] = brand_red.net / brand_red.redeem_baskets.replace(0, float("nan"))
 
             top_brands = brand_red.nlargest(5, "redeem_rate")
-            bot_brands = brand_red.nsmallest(5, "redeem_rate")
             top_roi_brands = brand_red.nlargest(5, "sales_per_redeem_basket")
 
             b1, b2 = st.columns(2)

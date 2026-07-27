@@ -523,7 +523,8 @@ if cw.empty or bw.empty:
     st.error("No data for the selected stores.")
     st.stop()
 
-df = cw.merge(bw[["iso_year", "iso_week", "baskets"]], on=["iso_year", "iso_week"])
+df = cw.merge(bw[["iso_year", "iso_week", "baskets", "days_open"]],
+              on=["iso_year", "iso_week"])
 df["penetration"] = df.baskets_with / df.baskets
 df["per100"] = df.net / df.baskets * 100
 df["margin_pct"] = pd.to_numeric(df.gm, errors="coerce") / \
@@ -536,6 +537,20 @@ df = df.sort_values(["category", "wk_date"]).reset_index(drop=True)
 
 weeks = (df[["iso_year", "iso_week"]].drop_duplicates()
            .sort_values(["iso_year", "iso_week"]).reset_index(drop=True))
+
+# A trailing partial week is the single most misleading thing a dashboard can
+# show: two days against seven reads as a 70% collapse. The week is kept and
+# compared PER TRADING DAY, and labelled, rather than dropped — three days of
+# data is still information.
+_wk_days = (df.groupby(["iso_year", "iso_week"])["days_open"].max()
+              .rename("days_open").reset_index())
+_last = weeks.iloc[-1]
+_last_days = int(_wk_days[(_wk_days.iso_year == _last.iso_year)
+                          & (_wk_days.iso_week == _last.iso_week)]
+                 ["days_open"].iloc[0])
+_typical = int(_wk_days["days_open"].median())
+PARTIAL_WEEK = _last_days < _typical
+PARTIAL_DAYS = _last_days
 n_wk = st.sidebar.slider("Weeks shown", 4, max(len(weeks), 4), min(26, len(weeks)))
 keep = set(zip(weeks.iso_year.tail(n_wk), weeks.iso_week.tail(n_wk)))
 dfv = df[df.apply(lambda r: (r.iso_year, r.iso_week) in keep, axis=1)]
@@ -557,22 +572,49 @@ t_charts, t_insights, t_brands, t_redeem, t_gloss = st.tabs(
 # ---------------------------------------------------------------- charts
 with t_charts:
     wk = (dfv.groupby(["iso_year", "iso_week", "wk_date"])
-             .agg(net=("net", "sum"), baskets=("baskets", "first"))
+             .agg(net=("net", "sum"), baskets=("baskets", "first"),
+                  days=("days_open", "max"))
              .reset_index().sort_values("wk_date"))
     wk["atv"] = wk.net / wk.baskets
+    wk["net_pd"] = wk.net / wk.days
+    wk["bkt_pd"] = wk.baskets / wk.days
     cur = wk.iloc[-1]
     prev = wk.iloc[-2] if len(wk) > 1 else None
 
+    is_partial = PARTIAL_WEEK and len(wk) and cur.days < wk.days.median()
+
+    if is_partial:
+        st.markdown(
+            f'<div class="alert a-warn">The latest week is still in progress '
+            f'— <b>{int(cur.days)} of {int(wk.days.median())} trading days</b>. '
+            f'Its totals are therefore lower than a full week, so the headline '
+            f'figures below are shown <b>per trading day</b> to stay '
+            f'comparable. Charts show actual totals.</div>',
+            unsafe_allow_html=True)
+
     c = st.columns(4)
-    c[0].metric("Net sales, latest week", f"${cur.net:,.0f}",
-                f"{(cur.net/prev.net-1)*100:+.1f}%" if prev is not None else None,
-                help=tip("net sales"))
-    c[1].metric("Baskets", f"{int(cur.baskets):,}",
-                f"{(cur.baskets/prev.baskets-1)*100:+.1f}%" if prev is not None else None,
-                help=tip("basket"))
+    if is_partial:
+        d_net = (cur.net_pd / prev.net_pd - 1) * 100 if prev is not None else None
+        d_bkt = (cur.bkt_pd / prev.bkt_pd - 1) * 100 if prev is not None else None
+        c[0].metric("Net sales per day", f"${cur.net_pd:,.0f}",
+                    f"{d_net:+.1f}%" if d_net is not None else None,
+                    help="Net sales divided by trading days, so a part-finished "
+                         "week compares fairly with a complete one. "
+                         + tip("net sales"))
+        c[1].metric("Baskets per day", f"{cur.bkt_pd:,.0f}",
+                    f"{d_bkt:+.1f}%" if d_bkt is not None else None,
+                    help="Transactions per trading day. " + tip("basket"))
+    else:
+        c[0].metric("Net sales, latest week", f"${cur.net:,.0f}",
+                    f"{(cur.net/prev.net-1)*100:+.1f}%" if prev is not None else None,
+                    help=tip("net sales"))
+        c[1].metric("Baskets", f"{int(cur.baskets):,}",
+                    f"{(cur.baskets/prev.baskets-1)*100:+.1f}%" if prev is not None else None,
+                    help=tip("basket"))
     c[2].metric("Average basket", f"${cur.atv:,.2f}",
                 f"{(cur.atv/prev.atv-1)*100:+.1f}%" if prev is not None else None,
-                help=tip("average basket"))
+                help="Unaffected by a partial week — it is already a per-basket "
+                     "figure. " + tip("average basket"))
     c[3].metric("Weeks shown", f"{len(wk)}",
                 help="How many weeks of history the charts below cover. "
                      "Change it with the slider in the sidebar.")
@@ -769,10 +811,25 @@ with t_charts:
 with t_insights:
     st.markdown("#### Alerts")
     howto("alerts")
+
+    # Alerts run on the last COMPLETE week. Penetration is a ratio so it is
+    # not distorted by a short week, but basket counts are, and the control
+    # limits are built from those — a two-day week has wide limits and noisy
+    # penetration, which produces alarming alerts about nothing.
+    alert_weeks = weeks.iloc[:-1] if PARTIAL_WEEK else weeks
+    if PARTIAL_WEEK and len(weeks) >= 2:
+        _aw = alert_weeks.iloc[-1]
+        st.markdown(
+            f'<p class="note">Assessed on the last complete week '
+            f'({int(_aw.iso_year)}-W{int(_aw.iso_week):02d}). The week in '
+            f'progress has too few days for the control limits to mean '
+            f'anything.</p>', unsafe_allow_html=True)
+
     alerts = []
-    if len(weeks) >= 5:
-        cy, cwk = weeks.iloc[-1]
-        hist = weeks.iloc[max(0, len(weeks) - 1 - BASELINE_WEEKS):len(weeks) - 1]
+    if len(alert_weeks) >= 5:
+        cy, cwk = alert_weeks.iloc[-1]
+        hist = alert_weeks.iloc[max(0, len(alert_weeks) - 1 - BASELINE_WEEKS):
+                                len(alert_weeks) - 1]
         hk = set(zip(hist.iso_year, hist.iso_week))
         latest = df[(df.iso_year == cy) & (df.iso_week == cwk)]
         tot = latest.net.sum()
@@ -809,12 +866,14 @@ with t_insights:
 
 
     st.divider()
-    st.markdown("#### Category scorecard — latest week")
+    sc_weeks = weeks.iloc[:-1] if PARTIAL_WEEK else weeks
+    cy, cwk = sc_weeks.iloc[-1]
+    st.markdown(f"#### Category scorecard — {int(cy)}-W{int(cwk):02d}"
+                + ("  (last complete week)" if PARTIAL_WEEK else ""))
     howto("scorecard")
-    cy, cwk = weeks.iloc[-1]
     cur = df[(df.iso_year == cy) & (df.iso_week == cwk)].copy()
-    if len(weeks) > 1:
-        py, pw = weeks.iloc[-2]
+    if len(sc_weeks) > 1:
+        py, pw = sc_weeks.iloc[-2]
         pv = df[(df.iso_year == py) & (df.iso_week == pw)][
             ["category", "per100", "penetration"]].rename(
             columns={"per100": "pp", "penetration": "pn"})

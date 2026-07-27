@@ -640,7 +640,7 @@ with t_charts:
                           legend=dict(orientation="h", y=1.12, x=0,
                                       title_text=""),
                           plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pc1")
 
     with R:
         st.markdown("##### Category share of revenue")
@@ -655,7 +655,7 @@ with t_charts:
                                         "<extra></extra>")
         fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
                           showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pc2")
 
     st.divider()
     heading("Dollars per 100 baskets", "$/100 baskets")
@@ -693,7 +693,7 @@ with t_charts:
         fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", zeroline=False,
                          tickformat="$,.0f")
         fig.update_xaxes(gridcolor="rgba(0,0,0,.04)", showgrid=True)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pc3")
 
     st.divider()
     heading("Penetration with control limits", "penetration")
@@ -729,7 +729,7 @@ with t_charts:
         fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%",
                          zeroline=False)
         fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pc4")
 
     st.divider()
     A, B = st.columns(2)
@@ -775,7 +775,7 @@ with t_charts:
                 font=dict(size=12)))
             fig.update_layout(height=420, margin=dict(l=0, r=0, t=24, b=0),
                               showlegend=False, plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="pc5")
             st.markdown('<p class="note">Each channel has its own scale, so a '
                         'small channel\'s movement is visible rather than '
                         'flattened by the large one. The label shows how much '
@@ -804,7 +804,7 @@ with t_charts:
             fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
                               coloraxis_showscale=False, xaxis_title="",
                               yaxis_title="")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="pc6")
             howto("channel_grid")
 
 # -------------------------------------------------------------- insights
@@ -1397,7 +1397,7 @@ with t_brands:
                               plot_bgcolor="rgba(0,0,0,0)")
             fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%")
             fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="pc7")
 
             over = plot[plot.acq_share > plot.rev_share * 1.25].nlargest(
                 5, "acq_share")
@@ -1540,7 +1540,7 @@ with t_redeem:
                               legend=dict(orientation="h", y=1.12, x=0,
                                           title_text=""),
                               plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="pc8")
 
         with R:
             st.markdown("##### Redemption by store")
@@ -1561,7 +1561,7 @@ with t_redeem:
                                                           ticksuffix="%"),
                                   plot_bgcolor="rgba(0,0,0,0)")
                 fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="pc9")
                 st.markdown('<p class="note"><b>Bar height</b> = total redemption '
                             'dollars. <b>Color</b> = redemption rate (darker green '
                             '= higher engagement).</p>',
@@ -1649,7 +1649,7 @@ with t_redeem:
         fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%",
                          zeroline=False)
         fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pc10")
 
     # --- Brand redemption section (from original author, when table exists) ---
     st.divider()
@@ -1761,7 +1761,7 @@ with t_redeem:
                           plot_bgcolor="rgba(0,0,0,0)")
         fig.update_xaxes(gridcolor="rgba(0,0,0,.07)")
         fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0f")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pc11")
 
         off = q(f"""
             SELECT offer_name, brand, category,
@@ -1887,7 +1887,7 @@ with t_redeem:
                               legend=dict(orientation="h", y=1.12, x=0,
                                           title_text=""),
                               plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="pc12")
         with R:
             st.markdown("##### Redemption by store")
             if len(keys) > 1 and not red_store.empty:
@@ -1907,7 +1907,7 @@ with t_redeem:
                                                           ticksuffix="%"),
                                   plot_bgcolor="rgba(0,0,0,0)")
                 fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="pc13")
                 st.markdown('<p class="note"><b>Bar height</b> = total redemption '
                             'dollars. <b>Color</b> = redemption rate (darker green '
                             '= higher engagement).</p>',
@@ -1983,7 +1983,7 @@ with t_redeem:
         fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%",
                          zeroline=False)
         fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pc14")
         st.markdown('<p class="note">A rising line means the loyalty program '
                     'is taking a larger share of revenue.</p>',
                     unsafe_allow_html=True)
@@ -2052,7 +2052,7 @@ with t_projections:
                           legend=dict(orientation="h", y=1.12, x=0,
                                       title_text=""),
                           plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="pc15")
         st.divider()
         heading("Category projections")
         proj_cat = q(f"""
@@ -2116,7 +2116,7 @@ with t_projections:
                                   legend=dict(orientation="h", y=1.12, x=0,
                                               title_text=""),
                                   plot_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="pc16")
             else:
                 st.info("Not enough category history to project.")
 

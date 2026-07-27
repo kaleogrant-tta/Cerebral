@@ -566,8 +566,8 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_redeem, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Redemptions", "What the terms mean"])
+t_charts, t_insights, t_brands, t_redeem, t_projections, t_gloss = st.tabs(
+    ["Charts", "Insights", "Brands", "Redemptions", "Projections", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -1439,7 +1439,221 @@ with t_brands:
 
 # -------------------------------------------------------------- redemptions
 with t_redeem:
-    st.markdown("#### Loyalty redemptions by brand")
+    st.markdown("#### Loyalty Redemptions")
+    st.markdown('<div class="howto"><b>How to read this tab.</b> '
+                'Redemptions are discounts given back to loyalty members. '
+                'A high redemption rate means many customers are using their '
+                'points — usually good, because engaged members buy more often. '
+                'But watch the cost: if redemption dollars grow faster than '
+                'net sales, the program is eating margin. The sweet spot is '
+                'high redemption rate with low redemption cost as a percent '
+                'of revenue, and high sales per redeeming basket.</div>',
+                unsafe_allow_html=True)
+
+    # --- Store-level redemption analytics (from dash_basket_week) ---
+    red = q(f"""
+        SELECT iso_year, iso_week,
+               SUM(baskets) AS baskets,
+               SUM(redeem_baskets) AS redeem_baskets,
+               SUM(redeem_value) AS redeem_value,
+               SUM(net) AS net
+        FROM dash_basket_week {wf}
+        GROUP BY 1,2
+        ORDER BY 1,2
+    """)
+    red_store = q(f"""
+        SELECT store_key,
+               SUM(baskets) AS baskets,
+               SUM(redeem_baskets) AS redeem_baskets,
+               SUM(redeem_value) AS redeem_value,
+               SUM(net) AS net
+        FROM dash_basket_week {wf}
+        GROUP BY 1
+    """)
+
+    if red.empty or red.redeem_baskets.sum() == 0:
+        st.info("No redemption data in the published file.")
+    else:
+        red["wk_date"] = pd.to_datetime(
+            red.iso_year.astype(str) + "-W" + red.iso_week.astype(str).str.zfill(2) + "-1",
+            format="%G-W%V-%u", errors="coerce")
+        red = red.sort_values("wk_date").reset_index(drop=True)
+        red["redeem_rate"] = red.redeem_baskets / red.baskets.replace(0, float("nan"))
+        red["redeem_per_basket"] = red.redeem_value / red.baskets.replace(0, float("nan"))
+        red["redeem_pct_of_net"] = red.redeem_value / red.net.replace(0, float("nan"))
+
+        # Use latest week with actual redemption activity for metrics
+        red_active = red[red.redeem_baskets > 0].copy()
+        if len(red_active) >= 2:
+            cur = red_active.iloc[-1]
+            prev = red_active.iloc[-2]
+        elif len(red_active) == 1:
+            cur = red_active.iloc[-1]
+            prev = None
+        else:
+            cur = red.iloc[-1]
+            prev = red.iloc[-2] if len(red) > 1 else None
+
+        def fmt_delta(cur_val, prev_val):
+            if prev_val is None or pd.isna(prev_val) or prev_val == 0:
+                return None
+            return f"{(cur_val/prev_val-1)*100:+.1f}%"
+
+        c = st.columns(4)
+        c[0].metric("Redemption Rate",
+                    f"{cur.redeem_rate*100:.1f}%" if pd.notna(cur.redeem_rate) and cur.redeem_rate > 0 else "—",
+                    fmt_delta(cur.redeem_rate, prev.redeem_rate) if prev is not None else None,
+                    help="Share of baskets that included a loyalty redemption.")
+        c[1].metric("Redemption Value",
+                    f"${cur.redeem_value:,.0f}" if pd.notna(cur.redeem_value) and cur.redeem_value > 0 else "—",
+                    fmt_delta(cur.redeem_value, prev.redeem_value) if prev is not None else None,
+                    help="Total value redeemed in the latest active week.")
+        c[2].metric("Avg Redemption / Basket",
+                    f"${cur.redeem_per_basket:.2f}" if pd.notna(cur.redeem_per_basket) and cur.redeem_per_basket > 0 else "—",
+                    fmt_delta(cur.redeem_per_basket, prev.redeem_per_basket) if prev is not None else None,
+                    help="Average discount per total basket.")
+        c[3].metric("Redemptions as % of Net",
+                    f"{cur.redeem_pct_of_net*100:.1f}%" if pd.notna(cur.redeem_pct_of_net) and cur.redeem_pct_of_net > 0 else "—",
+                    fmt_delta(cur.redeem_pct_of_net, prev.redeem_pct_of_net) if prev is not None else None,
+                    help="Redemption value divided by net sales.")
+
+        st.divider()
+        L, R = st.columns([3, 2])
+
+        with L:
+            heading("Redemption value and rate by week")
+            st.markdown('<p class="note">The bars show total dollars redeemed; '
+                        'the line shows what share of baskets included a '
+                        'redemption.</p>', unsafe_allow_html=True)
+            fig = go.Figure()
+            fig.add_bar(x=red.wk_date, y=red.redeem_value, name="Redemption $",
+                        marker_color=ACCENT, opacity=.75)
+            fig.add_scatter(x=red.wk_date, y=red.redeem_rate*100, name="Redemption rate %",
+                            yaxis="y2", line=dict(color=WARN, width=2))
+            fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
+                              yaxis=dict(title="Redemption $", tickformat="$,.0s",
+                                         gridcolor="rgba(0,0,0,.07)"),
+                              yaxis2=dict(title="Rate %", overlaying="y", side="right",
+                                          showgrid=False, tickformat=".1f",
+                                          ticksuffix="%"),
+                              hovermode="x unified",
+                              legend=dict(orientation="h", y=1.12, x=0,
+                                          title_text=""),
+                              plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with R:
+            st.markdown("##### Redemption by store")
+            if len(keys) > 1 and not red_store.empty:
+                red_store["store"] = red_store.store_key.map(STORES)
+                red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
+                red_store = red_store.sort_values("redeem_value", ascending=False)
+                red_store["label"] = red_store.apply(
+                    lambda r: f"${r.redeem_value/1e3:.0f}k<br>({r.redeem_rate*100:.1f}%)", axis=1)
+                fig = px.bar(red_store, x="store", y="redeem_value",
+                             color="redeem_rate", color_continuous_scale="Greens",
+                             text="label")
+                fig.update_traces(textposition="outside", textfont_size=11,
+                                  cliponaxis=False)
+                fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0),
+                                  yaxis_title="Redemption $", xaxis_title="",
+                                  coloraxis_colorbar=dict(title="Rate %",
+                                                          ticksuffix="%"),
+                                  plot_bgcolor="rgba(0,0,0,0)")
+                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+                st.plotly_chart(fig, use_container_width=True)
+                st.markdown('<p class="note"><b>Bar height</b> = total redemption '
+                            'dollars. <b>Color</b> = redemption rate (darker green '
+                            '= higher engagement).</p>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown('<p class="note">Select multiple stores in the '
+                            'sidebar to compare redemption performance.</p>',
+                            unsafe_allow_html=True)
+
+        st.divider()
+
+        # --- Store scorecard ---------------------------------------------
+        if not red_store.empty and len(keys) > 1:
+            st.markdown("#### Store redemption scorecard")
+            st.markdown('<div class="howto"><b>How to read the scorecard.</b> '
+                        '<b>Redemption Rate</b> is engagement. '
+                        '<b>Redemption Cost %</b> is the true price of the program. '
+                        '<b>Sales / Redeem Bkt</b> is the ROI proxy.</div>',
+                        unsafe_allow_html=True)
+
+            red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
+            red_store["redeem_pct_of_net"] = red_store.redeem_value / red_store.net.replace(0, float("nan"))
+            red_store["sales_per_redeem_basket"] = red_store.net / red_store.redeem_baskets.replace(0, float("nan"))
+
+            by_rate = red_store.sort_values("redeem_rate", ascending=False)
+            by_roi = red_store.sort_values("sales_per_redeem_basket", ascending=False)
+
+            h1, h2, h3, h4 = st.columns(4)
+            with h1:
+                top = by_rate.iloc[0]
+                st.markdown(f'<div class="alert a-ok"><b>Most redeemed</b><br>'
+                            f'{STORES.get(top.store_key, top.store_key)} — '
+                            f'{top.redeem_rate*100:.1f}%</div>',
+                            unsafe_allow_html=True)
+            with h2:
+                bot = by_rate.iloc[-1]
+                st.markdown(f'<div class="alert a-warn"><b>Least redeemed</b><br>'
+                            f'{STORES.get(bot.store_key, bot.store_key)} — '
+                            f'{bot.redeem_rate*100:.1f}%</div>',
+                            unsafe_allow_html=True)
+            with h3:
+                top_roi = by_roi.iloc[0]
+                st.markdown(f'<div class="alert a-ok"><b>Best ROI</b><br>'
+                            f'{STORES.get(top_roi.store_key, top_roi.store_key)} — '
+                            f'${top_roi.sales_per_redeem_basket:.0f} / redeem bkt</div>',
+                            unsafe_allow_html=True)
+            with h4:
+                bot_roi = by_roi.iloc[-1]
+                st.markdown(f'<div class="alert a-bad"><b>Worst ROI</b><br>'
+                            f'{STORES.get(bot_roi.store_key, bot_roi.store_key)} — '
+                            f'${bot_roi.sales_per_redeem_basket:.0f} / redeem bkt</div>',
+                            unsafe_allow_html=True)
+
+            st.dataframe(pd.DataFrame({
+                "Store": red_store.store_key.map(STORES),
+                "Baskets": red_store.baskets,
+                "Redeem Baskets": red_store.redeem_baskets,
+                "Redemption $": red_store.redeem_value.round(0),
+                "Net $": red_store.net.round(0),
+                "Redemption Rate %": (red_store.redeem_rate * 100).round(1),
+                "Redemption Cost %": (red_store.redeem_pct_of_net * 100).round(1),
+                "Sales / Redeem Bkt": red_store.sales_per_redeem_basket.round(0),
+            }), use_container_width=True, hide_index=True, column_config={
+                "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                "Net $": st.column_config.NumberColumn(format="$%d"),
+                "Redemption Rate %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Redemption Cost %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Sales / Redeem Bkt": st.column_config.NumberColumn(format="$%d"),
+            })
+
+        st.divider()
+        heading("Redemptions as % of net sales")
+        st.markdown('<p class="note">A steady 3-5% is healthy. A spike to 8-10% '
+                    'means either a major promotion or runaway point accumulation. '
+                    'A decline below 2% means customers are not engaging.</p>',
+                    unsafe_allow_html=True)
+        fig = px.line(red, x="wk_date", y=red.redeem_pct_of_net*100,
+                      markers=True, color_discrete_sequence=[WARN])
+        fig.update_traces(line=dict(width=2.5), marker=dict(size=6),
+                          hovertemplate="%{y:.1f}%<extra></extra>")
+        fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
+                          yaxis_title="% of net sales", xaxis_title="",
+                          hovermode="x unified", showlegend=False,
+                          plot_bgcolor="rgba(0,0,0,0)")
+        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%",
+                         zeroline=False)
+        fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --- Brand redemption section (from original author, when table exists) ---
+    st.divider()
+    st.markdown("#### Brand performance in redeeming baskets")
     st.markdown('<div class="howto"><b>How to read this.</b> Alpine records a '
                 'redemption against a basket, but its offers are named after '
                 'the product they discount. Matching the offer name to the '
@@ -1477,14 +1691,11 @@ with t_redeem:
 
         k = st.columns(4)
         k[0].metric("Total redeemed", f"${total:,.0f}",
-                    help="Value of loyalty offers redeemed in the loaded "
-                         "period.")
+                    help="Value of loyalty offers redeemed in the loaded period.")
         k[1].metric("Redemptions", f"{int(rd.redemptions.sum()):,}")
         k[2].metric("Attributed to a brand",
                     f"{attributed.spend.sum()/total*100:.0f}%",
-                    help="The rest could not be matched to a product with "
-                         "confidence and is left unattributed rather than "
-                         "guessed.")
+                    help="The rest could not be matched to a product with confidence.")
         fv = attributed.first_visit.sum()
         est = attributed.established.sum()
         k[3].metric("First-visit redeemers", f"{int(fv):,}",
@@ -1507,8 +1718,7 @@ with t_redeem:
             spend=("spend", "sum"), redeemers=("redeemers", "sum"),
             first_visit=("first_visit", "sum"),
             established=("established", "sum"),
-            avg_basket=("avg_basket", "mean")).sort_values(
-            "spend", ascending=False)
+            avg_basket=("avg_basket", "mean")).sort_values("spend", ascending=False)
         a["cost_per_redeemer"] = a.spend / a.redeemers.replace(0, float("nan"))
 
         st.dataframe(pd.DataFrame({
@@ -1522,45 +1732,23 @@ with t_redeem:
             "Cost per redeemer": a.cost_per_redeemer.round(2),
             "Avg basket": a.avg_basket.round(2),
         }), use_container_width=True, hide_index=True, column_config={
-            "Redemptions": st.column_config.NumberColumn(
-                help="How many times this brand's offers were redeemed.",
-                format="%d"),
-            "Spend $": st.column_config.NumberColumn(
-                help="Total discount value given away on this brand.",
-                format="$%d"),
-            "Redeemers": st.column_config.NumberColumn(
-                help="Distinct customers who redeemed.", format="%d"),
-            "First-visit": st.column_config.NumberColumn(
-                help="Redeemed on their first-ever visit — the offer bought "
-                     "you a customer.", format="%d"),
-            "Established": st.column_config.NumberColumn(
-                help="Redeemed 90+ days after their first visit — the offer "
-                     "discounted a sale you were already getting.",
-                format="%d"),
-            "Cost per redeemer": st.column_config.NumberColumn(
-                help="Spend divided by distinct redeemers.", format="$%.2f"),
-            "Avg basket": st.column_config.NumberColumn(
-                help="Average value of the baskets these offers appeared in. "
-                     "A high figure means the offer travels with a large "
-                     "order.", format="$%.2f"),
+            "Redemptions": st.column_config.NumberColumn(format="%d"),
+            "Spend $": st.column_config.NumberColumn(format="$%d"),
+            "Redeemers": st.column_config.NumberColumn(format="%d"),
+            "First-visit": st.column_config.NumberColumn(format="%d"),
+            "Established": st.column_config.NumberColumn(format="%d"),
+            "Cost per redeemer": st.column_config.NumberColumn(format="$%.2f"),
+            "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
         })
 
         if len(unattributed) and unattributed.spend.sum() > 0:
             st.markdown(
                 f'<p class="note">${unattributed.spend.sum():,.0f} across '
                 f'{int(unattributed.redemptions.sum()):,} redemptions could '
-                f'not be matched to a brand. Usually the offer product was not '
-                f'in the basket, or the name did not match any line. Left out '
-                f'of the table above rather than assigned to a guess.</p>',
-                unsafe_allow_html=True)
+                f'not be matched to a brand.</p>', unsafe_allow_html=True)
 
         st.divider()
         st.markdown("##### Spend against basket size")
-        st.markdown('<p class="note">Offers differ in kind, not just size. A '
-                    'high-value offer redeemed by a few people alongside a '
-                    'large order is a different instrument from a small one '
-                    'redeemed broadly — both can be right, for different '
-                    'reasons.</p>', unsafe_allow_html=True)
         fig = px.scatter(a, x="redemptions", y="avg_basket", size="spend",
                          color="category", hover_name="brand", size_max=38,
                          color_discrete_map={c: cat_color(c)
@@ -1597,21 +1785,14 @@ with t_redeem:
                 "Avg basket": off.avg_basket.round(2),
             }), use_container_width=True, hide_index=True, column_config={
                 "Spend $": st.column_config.NumberColumn(format="$%d"),
-                "Cost each": st.column_config.NumberColumn(
-                    help="Average discount given per redemption.",
-                    format="$%.2f"),
-                "Avg basket": st.column_config.NumberColumn(
-                    help="Average basket value when this offer was used.",
-                    format="$%.2f"),
+                "Cost each": st.column_config.NumberColumn(format="$%.2f"),
+                "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
             })
 
         st.markdown('<p class="note">These figures describe what redemptions '
                     'cost and who used them. They do not show whether the '
                     'offer caused the visit — redeemers are your most engaged '
-                    'customers by construction, and would have bought more '
-                    'than average regardless. Establishing cause needs a '
-                    'holdout: withhold the offer from a random slice of the '
-                    'target list and compare.</p>', unsafe_allow_html=True)
+                    'customers by construction.</p>', unsafe_allow_html=True)
 
 
 

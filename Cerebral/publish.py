@@ -27,10 +27,19 @@ SLIM = "cerebral_dash.duckdb"
 
 
 def build(src: str, dest: str) -> dict:
-    if Path(dest).exists():
-        Path(dest).unlink()
+    """Build the published file atomically.
 
-    con = duckdb.connect(dest)
+    Writes to a temporary path and only replaces the destination once every
+    table exists. A crash midway used to leave a partial file where the
+    dashboard looks, which then failed with a confusing missing-table error
+    while the previous good copy was already gone.
+    """
+    dest_p = Path(dest)
+    tmp = dest_p.with_suffix(dest_p.suffix + ".building")
+    if tmp.exists():
+        tmp.unlink()
+
+    con = duckdb.connect(str(tmp))
     con.execute(f"ATTACH '{src}' AS src (READ_ONLY)")
 
     # --- category x store x channel x week -------------------------------
@@ -248,7 +257,33 @@ def build(src: str, dest: str) -> dict:
     # What the loyalty programme actually spends per brand, and on whom. This
     # is the 3P Reward Program conversation: a brand can be shown what its
     # offers cost, who redeemed them, and whether those were new customers.
-    con.execute("""
+    has_redemption = con.execute("""
+        SELECT COUNT(*) FROM duckdb_tables()
+        WHERE database_name = 'src' AND table_name = 'fact_redemption'
+    """).fetchone()[0] > 0
+
+    if not has_redemption:
+        # Periods loaded before redemption attribution existed have no such
+        # table. Create the shape so the dashboard finds it, and leave it
+        # empty rather than failing the whole build.
+        con.execute("""
+            CREATE TABLE dash_brand_redemption (
+                store_key INTEGER, brand VARCHAR, category VARCHAR,
+                match_method VARCHAR, redemptions BIGINT, redeem_value DOUBLE,
+                avg_redeem DOUBLE, avg_basket DOUBLE, redeemers BIGINT,
+                first_visit_redeemers BIGINT, established_redeemers BIGINT)
+        """)
+        con.execute("""
+            CREATE TABLE dash_offer_performance (
+                store_key INTEGER, offer_name VARCHAR, brand VARCHAR,
+                category VARCHAR, match_method VARCHAR, redemptions BIGINT,
+                redeem_value DOUBLE, avg_basket DOUBLE,
+                first_seen TIMESTAMP, last_seen TIMESTAMP)
+        """)
+        print("  ! source has no fact_redemption — reload history to populate "
+              "brand redemption. Empty tables created.")
+    else:
+      con.execute("""
         CREATE TABLE dash_brand_redemption AS
         WITH f AS (
             SELECT customer_key, MIN(txn_ts) AS first_ts
@@ -273,10 +308,10 @@ def build(src: str, dest: str) -> dict:
         FROM src.fact_redemption r
         LEFT JOIN f USING (customer_key)
         GROUP BY 1,2,3,4
-    """)
+      """)
 
-    # Offer-level detail, so a specific campaign can be looked up.
-    con.execute("""
+      # Offer-level detail, so a specific campaign can be looked up.
+      con.execute("""
         CREATE TABLE dash_offer_performance AS
         SELECT store_key, offer_name, matched_brand AS brand,
                matched_category AS category, match_method,
@@ -288,7 +323,7 @@ def build(src: str, dest: str) -> dict:
         FROM src.fact_redemption
         GROUP BY 1,2,3,4,5
         HAVING COUNT(*) >= 5
-    """)
+      """)
 
     # --- inventory, most recent snapshot only ----------------------------
     con.execute("""
@@ -356,8 +391,19 @@ def build(src: str, dest: str) -> dict:
 
     stats = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for (t,) in con.execute("SHOW TABLES").fetchall()}
+
+    required = {"dash_meta", "dash_category_week", "dash_basket_week"}
+    missing = required - set(stats)
     con.close()
-    stats["_size_mb"] = round(Path(dest).stat().st_size / 1e6, 2)
+    if missing:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"Build incomplete, missing {sorted(missing)}. "
+                           f"Destination left untouched.")
+
+    if dest_p.exists():
+        dest_p.unlink()
+    tmp.replace(dest_p)
+    stats["_size_mb"] = round(dest_p.stat().st_size / 1e6, 2)
     return stats
 
 
@@ -373,7 +419,13 @@ def main() -> int:
         return 1
 
     print(f"\nBuilding {args.out} from {args.db}")
-    stats = build(args.db, args.out)
+    try:
+        stats = build(args.db, args.out)
+    except Exception as e:
+        Path(args.out + ".building").unlink(missing_ok=True)
+        print(f"\n  BUILD FAILED: {type(e).__name__}: {e}")
+        print(f"  {args.out} was not modified.")
+        return 1
     size = stats.pop("_size_mb")
     for t, n in stats.items():
         print(f"  {t:<24}{n:>9,} rows")

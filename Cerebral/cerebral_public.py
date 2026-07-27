@@ -521,8 +521,8 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "What the terms mean"])
+t_charts, t_insights, t_brands, t_redeem, t_gloss = st.tabs(
+    ["Charts", "Insights", "Brands", "Redemptions", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -1346,6 +1346,180 @@ with t_brands:
                         'it is real. The point is that the two roles are '
                         'different and should not be priced identically.</p>',
                         unsafe_allow_html=True)
+
+
+# -------------------------------------------------------------- redemptions
+with t_redeem:
+    st.markdown("#### Loyalty redemptions by brand")
+    st.markdown('<div class="howto"><b>How to read this.</b> Alpine records a '
+                'redemption against a basket, but its offers are named after '
+                'the product they discount. Matching the offer name to the '
+                'basket contents recovers which brand the money was spent '
+                'on.<br><br>'
+                'The column that matters most is <b>first-visit redeemers</b>. '
+                'An offer redeemed by someone on their first-ever visit bought '
+                'you a customer. One redeemed by a regular discounted a sale '
+                'you were already getting. Both can be worth doing — but they '
+                'are different purchases.</div>', unsafe_allow_html=True)
+
+    rd = q(f"""
+        SELECT brand, category,
+               SUM(redemptions)            AS redemptions,
+               SUM(redeem_value)           AS spend,
+               SUM(redeemers)              AS redeemers,
+               SUM(first_visit_redeemers)  AS first_visit,
+               SUM(established_redeemers)  AS established,
+               AVG(avg_basket)             AS avg_basket
+        FROM dash_brand_redemption {wf}
+        GROUP BY 1,2
+    """)
+
+    if rd.empty or rd.spend.sum() == 0:
+        st.info("No redemption data in the published file. Reload history — "
+                "periods loaded before redemption attribution existed do not "
+                "have it.")
+    else:
+        attributed = rd[rd.brand.notna()]
+        unattributed = rd[rd.brand.isna()]
+        total = rd.spend.sum()
+
+        k = st.columns(4)
+        k[0].metric("Total redeemed", f"${total:,.0f}",
+                    help="Value of loyalty offers redeemed in the loaded "
+                         "period.")
+        k[1].metric("Redemptions", f"{int(rd.redemptions.sum()):,}")
+        k[2].metric("Attributed to a brand",
+                    f"{attributed.spend.sum()/total*100:.0f}%",
+                    help="The rest could not be matched to a product with "
+                         "confidence and is left unattributed rather than "
+                         "guessed.")
+        fv = attributed.first_visit.sum()
+        est = attributed.established.sum()
+        k[3].metric("First-visit redeemers", f"{int(fv):,}",
+                    help="Customers who redeemed on their first-ever visit.")
+
+        if est > 0:
+            share_new = fv / max(fv + est, 1) * 100
+            tone = "a-ok" if share_new > 40 else "a-warn"
+            st.markdown(
+                f'<div class="alert {tone}">Of redeemers whose tenure is '
+                f'known, <b>{share_new:.0f}%</b> were on their first visit and '
+                f'<b>{100-share_new:.0f}%</b> were established 90+ days. '
+                f'{"Weighted toward acquisition." if share_new > 40 else "Weighted toward customers who were already returning."}'
+                f'</div>', unsafe_allow_html=True)
+
+        st.divider()
+        st.markdown("##### By brand")
+        a = attributed.groupby("brand", as_index=False).agg(
+            category=("category", "first"), redemptions=("redemptions", "sum"),
+            spend=("spend", "sum"), redeemers=("redeemers", "sum"),
+            first_visit=("first_visit", "sum"),
+            established=("established", "sum"),
+            avg_basket=("avg_basket", "mean")).sort_values(
+            "spend", ascending=False)
+        a["cost_per_redeemer"] = a.spend / a.redeemers.replace(0, float("nan"))
+
+        st.dataframe(pd.DataFrame({
+            "Brand": a.brand,
+            "Category": a.category,
+            "Redemptions": a.redemptions,
+            "Spend $": a.spend.round(0),
+            "Redeemers": a.redeemers,
+            "First-visit": a.first_visit,
+            "Established": a.established,
+            "Cost per redeemer": a.cost_per_redeemer.round(2),
+            "Avg basket": a.avg_basket.round(2),
+        }), use_container_width=True, hide_index=True, column_config={
+            "Redemptions": st.column_config.NumberColumn(
+                help="How many times this brand's offers were redeemed.",
+                format="%d"),
+            "Spend $": st.column_config.NumberColumn(
+                help="Total discount value given away on this brand.",
+                format="$%d"),
+            "Redeemers": st.column_config.NumberColumn(
+                help="Distinct customers who redeemed.", format="%d"),
+            "First-visit": st.column_config.NumberColumn(
+                help="Redeemed on their first-ever visit — the offer bought "
+                     "you a customer.", format="%d"),
+            "Established": st.column_config.NumberColumn(
+                help="Redeemed 90+ days after their first visit — the offer "
+                     "discounted a sale you were already getting.",
+                format="%d"),
+            "Cost per redeemer": st.column_config.NumberColumn(
+                help="Spend divided by distinct redeemers.", format="$%.2f"),
+            "Avg basket": st.column_config.NumberColumn(
+                help="Average value of the baskets these offers appeared in. "
+                     "A high figure means the offer travels with a large "
+                     "order.", format="$%.2f"),
+        })
+
+        if len(unattributed) and unattributed.spend.sum() > 0:
+            st.markdown(
+                f'<p class="note">${unattributed.spend.sum():,.0f} across '
+                f'{int(unattributed.redemptions.sum()):,} redemptions could '
+                f'not be matched to a brand. Usually the offer product was not '
+                f'in the basket, or the name did not match any line. Left out '
+                f'of the table above rather than assigned to a guess.</p>',
+                unsafe_allow_html=True)
+
+        st.divider()
+        st.markdown("##### Spend against basket size")
+        st.markdown('<p class="note">Offers differ in kind, not just size. A '
+                    'high-value offer redeemed by a few people alongside a '
+                    'large order is a different instrument from a small one '
+                    'redeemed broadly — both can be right, for different '
+                    'reasons.</p>', unsafe_allow_html=True)
+        fig = px.scatter(a, x="redemptions", y="avg_basket", size="spend",
+                         color="category", hover_name="brand", size_max=38,
+                         color_discrete_map={c: cat_color(c)
+                                             for c in a.category.unique()})
+        fig.update_layout(height=420, margin=dict(l=0, r=0, t=10, b=0),
+                          xaxis_title="Redemptions",
+                          yaxis_title="Average basket $",
+                          legend=dict(orientation="h", y=1.1, x=0,
+                                      title_text=""),
+                          plot_bgcolor="rgba(0,0,0,0)")
+        fig.update_xaxes(gridcolor="rgba(0,0,0,.07)")
+        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0f")
+        st.plotly_chart(fig, use_container_width=True)
+
+        off = q(f"""
+            SELECT offer_name, brand, category,
+                   SUM(redemptions) AS redemptions,
+                   SUM(redeem_value) AS spend,
+                   AVG(avg_basket) AS avg_basket
+            FROM dash_offer_performance {wf}
+            GROUP BY 1,2,3 ORDER BY spend DESC
+        """)
+        if not off.empty:
+            st.divider()
+            st.markdown("##### Individual offers")
+            off["cost_per_redemption"] = off.spend / off.redemptions.replace(
+                0, float("nan"))
+            st.dataframe(pd.DataFrame({
+                "Offer": off.offer_name,
+                "Brand": off.brand,
+                "Redemptions": off.redemptions,
+                "Spend $": off.spend.round(0),
+                "Cost each": off.cost_per_redemption.round(2),
+                "Avg basket": off.avg_basket.round(2),
+            }), use_container_width=True, hide_index=True, column_config={
+                "Spend $": st.column_config.NumberColumn(format="$%d"),
+                "Cost each": st.column_config.NumberColumn(
+                    help="Average discount given per redemption.",
+                    format="$%.2f"),
+                "Avg basket": st.column_config.NumberColumn(
+                    help="Average basket value when this offer was used.",
+                    format="$%.2f"),
+            })
+
+        st.markdown('<p class="note">These figures describe what redemptions '
+                    'cost and who used them. They do not show whether the '
+                    'offer caused the visit — redeemers are your most engaged '
+                    'customers by construction, and would have bought more '
+                    'than average regardless. Establishing cause needs a '
+                    'holdout: withhold the offer from a random slice of the '
+                    'target list and compare.</p>', unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------- glossary

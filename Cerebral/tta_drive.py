@@ -22,7 +22,6 @@ from pathlib import Path
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 SCOPES = [
@@ -83,7 +82,7 @@ class DriveClient:
 
     def download(self, file_id: str, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        req = self.svc.files().get_media(fileId=file_id)
+        req = self.svc.files().get_media(fileId=file_id, supportsAllDrives=True)
         with open(dest, "wb") as fh:
             dl = MediaIoBaseDownload(fh, req, chunksize=8 * 1024 * 1024)
             done = False
@@ -98,56 +97,32 @@ class DriveClient:
                                 chunksize=8 * 1024 * 1024)
         existing = self.find(folder_id, name) if replace else None
         if existing:
-            # Update in place. This works for a service account; create does
-            # not, because service accounts have no storage quota of their own.
-            f = self.svc.files().update(fileId=existing["id"],
-                                        media_body=media).execute()
-            return f["id"]
-        try:
+            f = self.svc.files().update(fileId=existing["id"], media_body=media).execute()
+        else:
             f = self.svc.files().create(
                 body={"name": name, "parents": [folder_id]},
                 media_body=media, fields="id").execute()
-            return f["id"]
-        except HttpError as e:
-            if "storageQuotaExceeded" in str(e):
-                raise RuntimeError(
-                    f"Cannot create '{name}' in Drive: service accounts have "
-                    f"no storage quota. Upload the file once from your own "
-                    f"Google account into that folder; every run after that "
-                    f"updates it in place."
-                ) from e
-            raise
+        return f["id"]
 
-    def move(self, file_id: str, to_folder: str,
-             from_folder: str | None = None) -> None:
-        """Move a file between folders.
-
-        `from_folder` should be supplied by the caller. Looking the current
-        parent up via files().get(fields="parents") returns an empty list when
-        the service account is not the file's owner, and Drive then rejects the
-        update as "increasing the number of parents" — it sees an add with no
-        matching remove.
-        """
-        parents = [from_folder] if from_folder else []
-        if not parents:
-            meta = self.svc.files().get(fileId=file_id,
-                                        fields="parents").execute()
-            parents = meta.get("parents", [])
-        if not parents:
-            raise RuntimeError(
-                f"Cannot determine the current folder of {file_id}. Pass "
-                f"from_folder explicitly — the service account cannot read the "
-                f"parent of a file it does not own."
-            )
-        self.svc.files().update(
+    def move(self, file_id: str, to_folder: str) -> None:
+        meta = self.svc.files().get(
             fileId=file_id,
-            addParents=to_folder,
-            removeParents=",".join(parents),
-            fields="id, parents",
+            fields="parents",
+            supportsAllDrives=True,
         ).execute()
+        parents = meta.get("parents", [])
+        kwargs = {
+            "fileId": file_id,
+            "addParents": to_folder,
+            "fields": "id, parents",
+            "supportsAllDrives": True,
+        }
+        if parents:
+            kwargs["removeParents"] = ",".join(parents)
+        self.svc.files().update(**kwargs).execute()
 
     def delete(self, file_id: str) -> None:
-        self.svc.files().delete(fileId=file_id).execute()
+        self.svc.files().delete(fileId=file_id, supportsAllDrives=True).execute()
 
 
 class DriveLock:

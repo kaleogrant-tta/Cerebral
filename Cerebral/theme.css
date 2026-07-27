@@ -1,0 +1,142 @@
+/* ==========================================================================
+   Cerebral — stylesheet
+   ==========================================================================
+
+   Everything visual lives here. Edit freely and reload the page.
+
+   The :root block below is the single source of truth for colour: theme.py
+   parses these variables and hands them to Plotly, so changing --accent here
+   restyles both the page chrome and the charts.
+
+   What this file CANNOT reach: page background, sidebar background, the base
+   font, and Streamlit's own widget colours. Those come from Streamlit's
+   theming system — see .streamlit/config.toml.
+   ========================================================================== */
+
+:root {
+  /* Chart and accent colours. Read by theme.py for Plotly. */
+  --accent:        #2F6F4F;   /* primary — bars, lines, positive states     */
+  --accent-soft:   #7FA98F;   /* secondary series                           */
+  --warn:          #B4632B;   /* third series, cautionary states            */
+  --bad:           #9E3B32;   /* breaches, negative alerts                  */
+  --ink:           #101418;   /* headings, emphasised text                  */
+  --body:          #3C4650;   /* explanatory paragraphs                     */
+  --muted:         #7A8590;   /* captions, secondary lines, labels          */
+  --rule:          #9AA4AE;   /* hairlines, dotted underlines               */
+
+  /* Multi-series chart palette. Ordered by how well they separate — the
+     first four carry most charts, so they are the most distinct.          */
+  --series-1:      #2F6F4F;   /* green   */
+  --series-2:      #B4632B;   /* rust    */
+  --series-3:      #3B6E8F;   /* blue    */
+  --series-4:      #8A5A9E;   /* violet  */
+  --series-5:      #A8913C;   /* ochre   */
+  --series-6:      #6E7F8D;   /* slate   */
+  --series-7:      #9E3B32;   /* red     */
+  --series-8:      #4C8C7A;   /* teal    */
+  --series-9:      #7A6A55;   /* taupe   */
+
+  /* Surfaces */
+  --tint:          rgba(47, 111, 79, .06);   /* how-to callout background   */
+  --tint-band:     rgba(47, 111, 79, .10);   /* control-limit band fill     */
+  --alert-bg:      rgba(128, 128, 128, .06);
+
+  /* Layout */
+  --max-width:     1500px;
+  --pad-top:       2.2rem;
+}
+
+/* --- page ---------------------------------------------------------------- */
+
+.block-container {
+  padding-top: var(--pad-top);
+  max-width: var(--max-width);
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+}
+
+/* --- metrics ------------------------------------------------------------- */
+
+[data-testid="stMetricValue"] {
+  font-size: 1.55rem;
+}
+
+[data-testid="stMetricLabel"] {
+  font-size: .74rem;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--muted);
+}
+
+/* --- tabs ---------------------------------------------------------------- */
+
+.stTabs [data-baseweb="tab"] {
+  padding: 0 1.1rem;
+  font-weight: 500;
+}
+
+/* --- alerts -------------------------------------------------------------- */
+
+.alert {
+  border-left: 3px solid;
+  padding: .55rem .9rem;
+  margin: .35rem 0;
+  background: var(--alert-bg);
+  font-size: .9rem;
+}
+
+.a-bad  { border-color: var(--bad); }
+.a-warn { border-color: var(--warn); }
+.a-ok   { border-color: var(--accent); }
+
+/* --- explanatory text ---------------------------------------------------- */
+
+.note {
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.45;
+}
+
+/* "How to read this" callouts */
+.howto {
+  background: var(--tint);
+  border-left: 3px solid var(--accent);
+  padding: .7rem 1rem;
+  margin: .4rem 0 1rem 0;
+  font-size: .87rem;
+  line-height: 1.5;
+  color: var(--body);
+}
+
+.howto b { color: var(--ink); }
+
+/* --- glossary hover markers ---------------------------------------------- */
+
+.gloss {
+  border-bottom: 1px dotted var(--rule);
+  cursor: help;
+}
+
+.gloss-mark {
+  font-size: .62em;
+  vertical-align: super;
+  color: var(--muted);
+  margin-left: 1px;
+  font-weight: 600;
+}
+
+/* --- glossary entries ---------------------------------------------------- */
+
+.gloss-entry {
+  margin: .1rem 0 .9rem 0;
+}
+
+.gloss-entry b { color: var(--ink); }
+
+.gloss-body {
+  color: var(--body);
+  font-size: .9rem;
+  line-height: 1.55;
+}

@@ -46,6 +46,46 @@ DB_LOCAL = WORK / DRIVE["db_filename"]
 # Sheets
 # ---------------------------------------------------------------------------
 
+def _jsonable(df: pd.DataFrame) -> list[list]:
+    """Convert a frame to plain Python types gspread can serialise.
+
+    Timestamps, numpy scalars, Decimals and NaN/NaT all reach the Sheets API
+    as JSON and none of them survive the default encoder. Dates become ISO
+    strings; missing values become empty cells.
+    """
+    import datetime as _dt
+    import decimal as _dec
+
+    out = []
+    for row in df.itertuples(index=False, name=None):
+        cells = []
+        for v in row:
+            # NaT is a Timestamp subclass and has no strftime, so the null
+            # check has to come first and cover every scalar type.
+            try:
+                if v is None or (not isinstance(v, (list, tuple, dict))
+                                 and pd.isna(v)):
+                    cells.append("")
+                    continue
+            except (TypeError, ValueError):
+                pass
+            if isinstance(v, (pd.Timestamp, _dt.datetime)):
+                cells.append(v.strftime("%Y-%m-%d %H:%M:%S"))
+            elif isinstance(v, _dt.date):
+                cells.append(v.strftime("%Y-%m-%d"))
+            elif isinstance(v, _dec.Decimal):
+                cells.append(float(v))
+            elif hasattr(v, "item"):          # numpy scalar
+                try:
+                    cells.append(v.item())
+                except Exception:
+                    cells.append(str(v))
+            else:
+                cells.append(v)
+        out.append(cells)
+    return out
+
+
 def publish(con: duckdb.DuckDBPyConnection, sheet_id: str) -> None:
     """Push only small aggregate tables. Raw facts never leave DuckDB."""
     gc = gspread.authorize(credentials())
@@ -64,7 +104,8 @@ def publish(con: duckdb.DuckDBPyConnection, sheet_id: str) -> None:
             ORDER BY iso_year DESC, iso_week DESC, store_key, channel, category
         """,
         "load_log": """
-            SELECT loaded_at, store_key, period, lines, baskets,
+            SELECT strftime(loaded_at, '%Y-%m-%d %H:%M:%S') AS loaded_at,
+                   store_key, period, lines, baskets,
                    passed, warnings, config_version
             FROM load_log ORDER BY loaded_at DESC
         """,
@@ -84,8 +125,7 @@ def publish(con: duckdb.DuckDBPyConnection, sheet_id: str) -> None:
         except gspread.WorksheetNotFound:
             ws = wb.add_worksheet(tab, rows=len(df) + 10, cols=max(len(df.columns), 5))
 
-        df = df.astype(object).where(pd.notna(df), "")
-        ws.update([df.columns.tolist()] + df.values.tolist(),
+        ws.update([df.columns.tolist()] + _jsonable(df),
                   value_input_option="RAW")
         print(f"    published {tab}: {len(df):,} rows")
 
@@ -188,6 +228,14 @@ def main() -> int:
         # --- persist -----------------------------------------------------
         print("  [6/6] pushing database back")
         drive.upload(DB_LOCAL, state_id, DRIVE["db_filename"])
+
+        # Slim, PII-free copy for the shared dashboard.
+        print("        building published dashboard file")
+        from publish import build, SLIM
+        slim = WORK / SLIM
+        stats = build(str(DB_LOCAL), str(slim))
+        print(f"        {SLIM}: {stats.pop('_size_mb')} MB")
+        drive.upload(slim, state_id, SLIM)
 
         print("        archiving processed exports")
         for _, file_id in pulled:

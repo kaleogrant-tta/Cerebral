@@ -95,6 +95,20 @@ DEFAULT_CSS = r"""/* ===========================================================
   --series-8:      #4C8C7A;   /* teal    */
   --series-9:      #7A6A55;   /* taupe   */
 
+  /* Category colours, fixed by name. Plotly otherwise assigns colour by
+     order of appearance, so changing the store filter reorders categories
+     and silently reassigns every colour — the same category appears green
+     in one view and rust in the next. Bound by name, they never move.     */
+  --cat-flower:      #2F6F4F;
+  --cat-pre-roll:    #B4632B;
+  --cat-vape:        #3B6E8F;
+  --cat-edible:      #8A5A9E;
+  --cat-concentrate: #A8913C;
+  --cat-accessory:   #6E7F8D;
+  --cat-cbd:         #4C8C7A;
+  --cat-tincture:    #9E3B32;
+  --cat-topical:     #7A6A55;
+
   /* Surfaces */
   --tint:          rgba(47, 111, 79, .06);   /* how-to callout background   */
   --tint-band:     rgba(47, 111, 79, .10);   /* control-limit band fill     */
@@ -242,6 +256,24 @@ BAD         = PALETTE.get("bad", "#9E3B32")
 BAND        = PALETTE.get("tint-band", "rgba(47,111,79,.10)")
 SERIES      = [PALETTE[f"series-{i}"] for i in range(1, 10)
                if f"series-{i}" in PALETTE] or [ACCENT]
+
+# Category -> colour, bound by name so it is stable across store filters,
+# week windows and category selections.
+CATEGORY_ORDER = ["Flower", "Pre-Roll", "Vape", "Edible", "Concentrate",
+                  "Accessory", "CBD", "Tincture", "Topical"]
+CAT_COLORS = {}
+for _i, _c in enumerate(CATEGORY_ORDER):
+    _key = "cat-" + _c.lower().replace(" ", "-")
+    CAT_COLORS[_c] = PALETTE.get(_key, SERIES[_i % len(SERIES)])
+
+
+def cat_color(name: str) -> str:
+    """Colour for a category, falling back deterministically for anything
+    not in the canonical list — a hash, not position, so a new category
+    still gets the same colour every time."""
+    if name in CAT_COLORS:
+        return CAT_COLORS[name]
+    return SERIES[hash(str(name)) % len(SERIES)]
 
 
 # ===========================================================================
@@ -543,7 +575,9 @@ with t_charts:
         mix = dfv.groupby("category").net.sum().reset_index().sort_values(
             "net", ascending=False)
         fig = px.pie(mix, values="net", names="category", hole=.58,
-                     color_discrete_sequence=SERIES)
+                     color="category",
+                     color_discrete_map={c: cat_color(c)
+                                         for c in mix.category})
         fig.update_traces(textposition="outside", textinfo="percent+label",
                           hovertemplate="%{label}<br>%{value:$,.0f}"
                                         "<extra></extra>")
@@ -571,7 +605,10 @@ with t_charts:
                               .transform(lambda x: x.rolling(4, min_periods=2).mean()))
             ycol, ylab = "smoothed", "$ per 100 baskets (4-week average)"
         fig = px.line(d, x="wk_date", y=ycol, color="category",
-                      markers=not smooth, color_discrete_sequence=SERIES)
+                      markers=not smooth,
+                      category_orders={"category": [c for c in CATEGORY_ORDER
+                                                    if c in pick]},
+                      color_discrete_map={c: cat_color(c) for c in pick})
         fig.update_traces(line=dict(width=2.6),
                           marker=dict(size=6),
                           hovertemplate="%{y:$,.0f}<extra>%{fullData.name}</extra>")

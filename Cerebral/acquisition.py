@@ -107,6 +107,19 @@ def main() -> int:
         return 1
     valid = months[BURN_IN_MONTHS:]
 
+    # A trailing partial month is kept and compared per day rather than
+    # dropped — see acquire.py. Raw counts stay; only trend maths normalises.
+    _mx = pd.Timestamp(
+        con.execute("SELECT MAX(txn_ts) FROM fact_basket").fetchone()[0])
+    _end = (_mx.replace(day=1) + pd.offsets.MonthEnd(1))
+    partial_month = (_mx.strftime("%Y-%m")
+                     if _mx.date() < _end.date() else None)
+    days_in = con.execute(f"""
+        SELECT strftime(txn_ts, '%Y-%m') AS m,
+               COUNT(DISTINCT date_key)  AS days
+        FROM fact_basket WHERE NOT is_return {sf} GROUP BY 1
+    """).df().set_index("m")["days"].to_dict()
+
     # ---- 1. new customer volume ----------------------------------------
     header(f"1. NEW CUSTOMER VOLUME — {label}")
     vol = con.execute(f"""
@@ -126,20 +139,34 @@ def main() -> int:
         FROM a JOIN n USING (cohort) ORDER BY a.cohort
     """).df()
 
-    print(f"  {'Month':<10}{'Active':>10}{'New':>10}{'% new':>9}   burn-in")
+    vol["days"] = [days_in.get(m, 30) for m in vol.cohort]
+    vol["new_per_day"] = vol.new_cust / vol.days
+
+    print(f"  {'Month':<10}{'Active':>10}{'New':>10}{'Days':>6}"
+          f"{'New/day':>9}{'% new':>8}   note")
     hr()
     for _, r in vol.iterrows():
-        burn = "  <- excluded" if r.cohort not in valid else ""
+        note = ""
+        if r.cohort not in valid:
+            note = "  <- burn-in, excluded"
+        elif r.cohort == partial_month:
+            note = "  <- partial month"
         print(f"  {r.cohort:<10}{int(r.active):>10,}{int(r.new_cust):>10,}"
-              f"{r.new_share*100:>8.1f}%{burn}")
+              f"{int(r.days):>6}{r.new_per_day:>9,.0f}"
+              f"{r.new_share*100:>7.1f}%{note}")
+
     v = vol[vol.cohort.isin(valid)]
     if len(v) >= 6:
         f3, l3 = v.head(3), v.tail(3)
         print()
-        print(f"  Active base   {f3.active.mean():>9,.0f} -> {l3.active.mean():>9,.0f}"
-              f"   {(l3.active.mean()/f3.active.mean()-1)*100:+.1f}%")
-        print(f"  New per month {f3.new_cust.mean():>9,.0f} -> {l3.new_cust.mean():>9,.0f}"
-              f"   {(l3.new_cust.mean()/f3.new_cust.mean()-1)*100:+.1f}%")
+        print("  Compared per day, so a short month is not read as a decline:")
+        ab, al = f3.active.mean() / f3.days.mean(), l3.active.mean() / l3.days.mean()
+        nb, nl = f3.new_per_day.mean(), l3.new_per_day.mean()
+        print(f"  Active per day  {ab:>8,.0f} -> {al:>8,.0f}"
+              f"   {(al/ab-1)*100:+.1f}%")
+        print(f"  New per day     {nb:>8,.0f} -> {nl:>8,.0f}"
+              f"   {(nl/nb-1)*100:+.1f}%")
+        print(f"  New per 30 days {nb*30:>8,.0f} -> {nl*30:>8,.0f}")
 
     # ---- 2. first-basket category mix ----------------------------------
     header("2. FIRST-BASKET MIX — what new customers buy on day one")

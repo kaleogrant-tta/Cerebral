@@ -116,9 +116,27 @@ def main() -> int:
         print("Not enough history.")
         return 1
     valid = months.cohort.tolist()[BURN_IN_MONTHS:]
-    vstr = "','".join(valid)
 
-    # Cohorts need a full return window to be judged fairly.
+    # A trailing partial month is kept, not discarded — three weeks of data is
+    # worth having. It is compared on a PER-DAY basis instead, so 19 days does
+    # not read as a collapse against 31. Raw counts are still shown; only the
+    # trend arithmetic is normalised.
+    max_ts = pd.Timestamp(
+        con.execute("SELECT MAX(txn_ts) FROM fact_basket").fetchone()[0])
+    days_in = con.execute("""
+        SELECT strftime(txn_ts, '%Y-%m') AS m,
+               COUNT(DISTINCT date_key)  AS days
+        FROM fact_basket WHERE NOT is_return GROUP BY 1
+    """).df().set_index("m")["days"].to_dict()
+
+    partial_month, partial_days, partial_full = None, None, None
+    _end = (max_ts.replace(day=1) + pd.offsets.MonthEnd(1))
+    if max_ts.date() < _end.date():
+        partial_month = max_ts.strftime("%Y-%m")
+        partial_days = days_in.get(partial_month, max_ts.day)
+        partial_full = _end.day
+
+    vstr = "','".join(valid)
     max_ts = con.execute("SELECT MAX(txn_ts) FROM fact_basket").fetchone()[0]
     mature = [m for m in valid
               if (pd.Timestamp(max_ts) - pd.Timestamp(m + "-01")).days
@@ -139,27 +157,41 @@ def main() -> int:
     """).df()
     piv = src.pivot(index="cohort", columns="channel", values="new_cust").fillna(0)
     cols = [c for c in ["In-Store", "Non-Stop", "Delivery"] if c in piv.columns]
-    print(f"  {'Month':<10}{'Total':>9}" +
-          "".join(f"{c:>12}" for c in cols) + "     share of new")
+    piv["days"] = [days_in.get(m, 30) for m in piv.index]
+
+    print(f"  {'Month':<10}{'Total':>9}{'Days':>6}{'/day':>8}" +
+          "".join(f"{c:>11}" for c in cols))
     hr()
     for m, r in piv.iterrows():
         tot = r[cols].sum()
-        shares = "  ".join(f"{c[:3]} {r[c]/tot*100:.0f}%" for c in cols)
-        print(f"  {m:<10}{int(tot):>9,}" +
-              "".join(f"{int(r[c]):>12,}" for c in cols) + f"     {shares}")
-    if len(piv) >= 6:
-        f3, l3 = piv.head(3), piv.tail(3)
-        print()
-        for c in cols:
-            print(f"  {c:<12} {f3[c].mean():>8,.0f} -> {l3[c].mean():>8,.0f}"
-                  f"   {(l3[c].mean()/max(f3[c].mean(),1)-1)*100:>+7.1f}%")
+        mark = "*" if m == partial_month else " "
+        print(f"  {m:<9}{mark}{int(tot):>9,}{int(r['days']):>6}"
+              f"{tot/r['days']:>8,.0f}" +
+              "".join(f"{int(r[c]):>11,}" for c in cols))
+    if partial_month:
+        print(f"\n  * {partial_month} covers {partial_days} of "
+              f"{partial_full} days. Kept, and compared per day below so the "
+              f"short month does not read as a decline.")
 
     if len(piv) >= 6:
-        tot_f, tot_l = f3[cols].sum(axis=1).mean(), l3[cols].sum(axis=1).mean()
+        # Per-day rates make a partial month directly comparable.
+        rate = piv[cols].div(piv["days"], axis=0)
+        f3, l3 = rate.head(3), rate.tail(3)
         print()
-        print(f"  Total new customers {tot_f:,.0f} -> {tot_l:,.0f} "
-              f"({(tot_l/tot_f-1)*100:+.1f}%)")
-        worst = min(cols, key=lambda c: l3[c].mean() / max(f3[c].mean(), 1))
+        print(f"  {'Channel':<12}{'new/day, first 3':>20}{'last 3':>12}"
+              f"{'change':>10}")
+        hr()
+        for c in cols:
+            a, b = f3[c].mean(), l3[c].mean()
+            print(f"  {c:<12}{a:>20,.1f}{b:>12,.1f}"
+                  f"{(b/max(a, 0.01)-1)*100:>+9.1f}%")
+
+        ta, tb = f3.sum(axis=1).mean(), l3.sum(axis=1).mean()
+        print()
+        print(f"  Total new customers per day {ta:,.0f} -> {tb:,.0f} "
+              f"({(tb/ta-1)*100:+.1f}%)")
+        print(f"  Equivalent to {ta*30:,.0f} -> {tb*30:,.0f} per 30 days.")
+        worst = min(cols, key=lambda c: l3[c].mean() / max(f3[c].mean(), 0.01))
         print(f"  Steepest decline: {worst}.")
 
     # ---- 2. activation --------------------------------------------------
@@ -316,7 +348,9 @@ def main() -> int:
             GROUP BY 1
         ),
         rev AS (SELECT category, SUM(net_sales) net, SUM(gross_margin) gm
-                FROM fact_line WHERE NOT is_return {sf} GROUP BY 1)
+                FROM fact_line
+                WHERE NOT is_return AND category IS NOT NULL {sf}
+                GROUP BY 1)
         SELECT r.category, r.net, r.gm/NULLIF(r.net,0) AS margin,
                a.first_basket, e.estab,
                a.first_basket::DOUBLE / NULLIF(e.estab,0) AS acq_ratio

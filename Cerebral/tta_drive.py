@@ -72,7 +72,7 @@ class DriveClient:
         folders you think they do."""
         try:
             meta = self.svc.files().get(
-                fileId=folder_id, fields="name, driveId",
+                fileId=folder_id, fields="name,driveId",
                 supportsAllDrives=True,
             ).execute()
             where = "shared drive" if meta.get("driveId") else "My Drive"
@@ -175,38 +175,48 @@ class DriveClient:
         if it isn't exactly where it should be. A failed archive now fails
         the whole run (red X) instead of passing silently.
         """
-        meta = self.svc.files().get(
-            fileId=file_id, fields="name, parents",
-            supportsAllDrives=True,
-        ).execute()
-        parents = meta.get("parents", [])
-        # Prefer removing only the folder we pulled from; fall back to all.
-        remove = [from_folder] if (from_folder and from_folder in parents) else parents
+        # Drive often withholds the `parents` field from service accounts on
+        # files they don't own, so never trust it for the remove side: we
+        # KNOW the file came from from_folder (that's where it was listed).
+        # Only fall back to reading parents when no source folder was given.
+        if from_folder:
+            remove = from_folder
+            name = file_id
+        else:
+            meta = self.svc.files().get(
+                fileId=file_id, fields="name,parents",
+                supportsAllDrives=True,
+            ).execute()
+            name = meta.get("name", file_id)
+            parents = meta.get("parents") or []
+            if not parents:
+                raise RuntimeError(
+                    f"cannot move {name}: Drive won't reveal its current "
+                    f"folder to the service account and no source folder "
+                    f"was given."
+                )
+            remove = ",".join(parents)
 
         self.svc.files().update(
             fileId=file_id,
             addParents=to_folder,
-            removeParents=",".join(remove),
-            fields="id, parents",
+            removeParents=remove,
+            fields="id,parents",
             supportsAllDrives=True,
         ).execute()
 
+        # Best-effort verification. If Drive hides parents from us, skip
+        # this — tta_refresh re-lists the inbox afterwards as the real check.
         after = self.svc.files().get(
             fileId=file_id, fields="parents",
             supportsAllDrives=True,
         ).execute()
-        after_parents = after.get("parents", [])
-        name = meta.get("name", file_id)
-        if to_folder not in after_parents:
+        after_parents = after.get("parents")
+        if after_parents is not None and to_folder not in after_parents:
             raise RuntimeError(
                 f"archive move failed for {name}: not in archive folder "
                 f"(parents now {after_parents}). Check the TTA_DRIVE_ARCHIVE "
                 f"secret and the service account's access to that folder."
-            )
-        if any(p in after_parents for p in remove):
-            raise RuntimeError(
-                f"archive move failed for {name}: still in the inbox "
-                f"(parents now {after_parents})."
             )
 
     def delete(self, file_id: str) -> None:

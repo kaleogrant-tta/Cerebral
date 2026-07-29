@@ -186,6 +186,16 @@ def main() -> int:
         for path, file_id in pulled:
             drive.move(file_id, archive_id, from_folder=inbox_id)
             print(f"    archived {path.name}")
+        # The real verification: re-list the inbox. Drive hides the parents
+        # field from service accounts, but folder listings always tell the
+        # truth -- if anything we processed is still there, fail loudly.
+        remaining = {f["id"] for f in drive.list_files(inbox_id)}
+        leftovers = [p.name for p, fid in pulled if fid in remaining]
+        if leftovers:
+            raise RuntimeError(
+                f"still in the inbox after archiving: {leftovers}. "
+                f"Check the service account's access to TTA/archive."
+            )
         print(f"    archived {len(pulled)} file(s)")
 
     print("done")

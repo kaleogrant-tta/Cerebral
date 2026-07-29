@@ -10,6 +10,10 @@ Drive is a landing zone and a state store, never a processing layer.
 Auth: a service account JSON supplied via the GOOGLE_SERVICE_ACCOUNT_JSON
 environment variable (a GitHub Actions secret). The three Drive folders and
 the target Sheet must be shared with the service account's email address.
+
+NOTE: every API call passes supportsAllDrives=True. Without it, calls
+against folders that live in a Shared Drive silently misbehave (files not
+found, moves that no-op) instead of raising errors.
 """
 
 from __future__ import annotations
@@ -54,6 +58,21 @@ class DriveClient:
         self.svc = build("drive", "v3", credentials=creds or credentials(),
                          cache_discovery=False)
 
+    # -- diagnostics --------------------------------------------------------
+
+    def folder_label(self, folder_id: str) -> str:
+        """Human-readable label for logs: proves the secrets point at the
+        folders you think they do."""
+        try:
+            meta = self.svc.files().get(
+                fileId=folder_id, fields="name, driveId",
+                supportsAllDrives=True,
+            ).execute()
+            where = "shared drive" if meta.get("driveId") else "My Drive"
+            return f'"{meta["name"]}" ({where})'
+        except Exception as e:
+            return f"<UNREADABLE folder {folder_id}: {e}>"
+
     # -- listing ----------------------------------------------------------
 
     def list_files(self, folder_id: str, name_contains: str | None = None) -> list[dict]:
@@ -66,6 +85,8 @@ class DriveClient:
                 q=" and ".join(q),
                 fields="nextPageToken, files(id, name, size, modifiedTime)",
                 pageSize=1000, pageToken=token,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
             ).execute()
             out.extend(resp.get("files", []))
             token = resp.get("nextPageToken")
@@ -97,29 +118,60 @@ class DriveClient:
                                 chunksize=8 * 1024 * 1024)
         existing = self.find(folder_id, name) if replace else None
         if existing:
-            f = self.svc.files().update(fileId=existing["id"], media_body=media).execute()
+            f = self.svc.files().update(
+                fileId=existing["id"], media_body=media,
+                supportsAllDrives=True,
+            ).execute()
         else:
             f = self.svc.files().create(
                 body={"name": name, "parents": [folder_id]},
-                media_body=media, fields="id").execute()
+                media_body=media, fields="id",
+                supportsAllDrives=True,
+            ).execute()
         return f["id"]
 
-    def move(self, file_id: str, to_folder: str) -> None:
+    def move(self, file_id: str, to_folder: str,
+             from_folder: str | None = None) -> None:
+        """Move a file between folders and VERIFY it happened.
+
+        The Drive API returns success even when the parents didn't change
+        the way you expected, so we re-read the file afterwards and raise
+        if it isn't exactly where it should be. A failed archive now fails
+        the whole run (red X) instead of passing silently.
+        """
         meta = self.svc.files().get(
-            fileId=file_id,
-            fields="parents",
+            fileId=file_id, fields="name, parents",
             supportsAllDrives=True,
         ).execute()
         parents = meta.get("parents", [])
-        kwargs = {
-            "fileId": file_id,
-            "addParents": to_folder,
-            "fields": "id, parents",
-            "supportsAllDrives": True,
-        }
-        if parents:
-            kwargs["removeParents"] = ",".join(parents)
-        self.svc.files().update(**kwargs).execute()
+        # Prefer removing only the folder we pulled from; fall back to all.
+        remove = [from_folder] if (from_folder and from_folder in parents) else parents
+
+        self.svc.files().update(
+            fileId=file_id,
+            addParents=to_folder,
+            removeParents=",".join(remove),
+            fields="id, parents",
+            supportsAllDrives=True,
+        ).execute()
+
+        after = self.svc.files().get(
+            fileId=file_id, fields="parents",
+            supportsAllDrives=True,
+        ).execute()
+        after_parents = after.get("parents", [])
+        name = meta.get("name", file_id)
+        if to_folder not in after_parents:
+            raise RuntimeError(
+                f"archive move failed for {name}: not in archive folder "
+                f"(parents now {after_parents}). Check the TTA_DRIVE_ARCHIVE "
+                f"secret and the service account's access to that folder."
+            )
+        if any(p in after_parents for p in remove):
+            raise RuntimeError(
+                f"archive move failed for {name}: still in the inbox "
+                f"(parents now {after_parents})."
+            )
 
     def delete(self, file_id: str) -> None:
         self.svc.files().delete(fileId=file_id, supportsAllDrives=True).execute()

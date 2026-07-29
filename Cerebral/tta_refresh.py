@@ -131,7 +131,8 @@ def main() -> int:
     print(f"TTA scheduled refresh — config {CONFIG_VERSION}")
     # Prove the secrets point at the folders you think they do. If this shows
     # an old/duplicate folder name, the secret IDs are the real bug.
-    print(f"    service account: {credentials().client_email}")
+    print(f"    service account: "
+          f"{getattr(credentials(), 'service_account_email', '<unknown>')}")
     print(f"    inbox   -> {drive.folder_label(inbox_id)}")
     print(f"    archive -> {drive.folder_label(archive_id)}")
     print(f"    state   -> {drive.folder_label(state_id)}")

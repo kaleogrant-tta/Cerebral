@@ -184,7 +184,7 @@ def main() -> int:
 
         print("  [6/6] archiving processed exports")
         for path, file_id in pulled:
-            drive.move(file_id, archive_id, from_folder=inbox_id)
+            drive.archive(file_id, archive_id)
             print(f"    archived {path.name}")
         # The real verification: re-list the inbox. Drive hides the parents
         # field from service accounts, but folder listings always tell the

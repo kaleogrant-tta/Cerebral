@@ -219,6 +219,34 @@ class DriveClient:
                 f"secret and the service account's access to that folder."
             )
 
+    def archive(self, file_id: str, archive_folder: str) -> str:
+        """Archive = copy into the archive folder, then delete the original.
+
+        Shared-drive friendly: sidesteps addParents/removeParents entirely.
+        Drive rejected well-formed moves on these files four different ways
+        ('cannotAddParent', 'teamDrivesParentLimit', ...); copy+delete does
+        not care about the original's parent state. Prints the file's real
+        parents/driveId first, so if this ever fails the log shows the
+        ground truth. Returns the archived copy's file id.
+        """
+        meta = self.svc.files().get(
+            fileId=file_id, fields="id,name,parents,driveId",
+            supportsAllDrives=True,
+        ).execute()
+        name = meta.get("name", file_id)
+        print(f"      [diag] {name}: parents={meta.get('parents')} "
+              f"driveId={meta.get('driveId')}")
+
+        copy = self.svc.files().copy(
+            fileId=file_id,
+            body={"name": name, "parents": [archive_folder]},
+            fields="id,parents",
+            supportsAllDrives=True,
+        ).execute()
+
+        self.svc.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+        return copy["id"]
+
     def delete(self, file_id: str) -> None:
         self.svc.files().delete(fileId=file_id, supportsAllDrives=True).execute()
 

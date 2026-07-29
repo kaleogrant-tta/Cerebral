@@ -131,6 +131,7 @@ def main() -> int:
     print(f"TTA scheduled refresh — config {CONFIG_VERSION}")
     # Prove the secrets point at the folders you think they do. If this shows
     # an old/duplicate folder name, the secret IDs are the real bug.
+    print(f"    service account: {credentials().client_email}")
     print(f"    inbox   -> {drive.folder_label(inbox_id)}")
     print(f"    archive -> {drive.folder_label(archive_id)}")
     print(f"    state   -> {drive.folder_label(state_id)}")
@@ -183,9 +184,22 @@ def main() -> int:
         drive.upload(DB_LOCAL, state_id, DRIVE["db_filename"])
 
         print("  [6/6] archiving processed exports")
+        failures = []
         for path, file_id in pulled:
-            drive.archive(file_id, archive_id)
-            print(f"    archived {path.name}")
+            try:
+                drive.archive(file_id, archive_id)
+                print(f"    archived {path.name}")
+            except Exception as e:
+                failures.append(path.name)
+                print(f"    !! could not archive {path.name}: {e}")
+        if failures:
+            raise RuntimeError(
+                f"{len(failures)} file(s) could not be archived: {failures}. "
+                f"Copies may already be in TTA/archive; originals remain in "
+                f"the inbox. Check that the service account printed at the "
+                f"top of this log is a Content manager on the TTA shared "
+                f"drive."
+            )
         # The real verification: re-list the inbox. Drive hides the parents
         # field from service accounts, but folder listings always tell the
         # truth -- if anything we processed is still there, fail loudly.

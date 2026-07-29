@@ -188,7 +188,7 @@ def main() -> int:
         failures = []
         for path, file_id in pulled:
             try:
-                drive.archive(file_id, archive_id)
+                drive.archive(file_id, archive_id, from_folder=inbox_id)
                 print(f"    archived {path.name}")
             except Exception as e:
                 failures.append(path.name)

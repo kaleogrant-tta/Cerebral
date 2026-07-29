@@ -219,23 +219,41 @@ class DriveClient:
                 f"secret and the service account's access to that folder."
             )
 
-    def archive(self, file_id: str, archive_folder: str) -> str:
-        """Archive = copy into the archive folder, then delete the original.
+    def archive(self, file_id: str, archive_folder: str,
+                from_folder: str | None = None) -> str:
+        """Archive a processed export. Two strategies, in order:
 
-        Shared-drive friendly: sidesteps addParents/removeParents entirely.
-        Drive rejected well-formed moves on these files four different ways
-        ('cannotAddParent', 'teamDrivesParentLimit', ...); copy+delete does
-        not care about the original's parent state. Prints the file's real
-        parents/driveId first, so if this ever fails the log shows the
-        ground truth. Returns the archived copy's file id.
+        1. Atomic move (addParents + removeParents in one call). Needs only
+           EDIT rights -- deletes are restricted more tightly than edits in
+           some Workspace setups, which is exactly the wall copy+delete hit.
+        2. Copy into archive + delete original (fallback).
+
+        Prints the file's real parents/driveId first, so the log always
+        shows the ground truth. Returns the archived file's id.
         """
         meta = self.svc.files().get(
             fileId=file_id, fields="id,name,parents,driveId",
             supportsAllDrives=True,
         ).execute()
         name = meta.get("name", file_id)
-        print(f"      [diag] {name}: parents={meta.get('parents')} "
+        parents = meta.get("parents") or []
+        print(f"      [diag] {name}: parents={parents} "
               f"driveId={meta.get('driveId')}")
+
+        remove = from_folder or (",".join(parents) if parents else None)
+        if remove:
+            try:
+                self.svc.files().update(
+                    fileId=file_id,
+                    addParents=archive_folder,
+                    removeParents=remove,
+                    fields="id,parents",
+                    supportsAllDrives=True,
+                ).execute()
+                return file_id
+            except HttpError as e:
+                print(f"      [diag] move failed (HTTP {e.resp.status}), "
+                      f"falling back to copy+delete")
 
         copy = self.svc.files().copy(
             fileId=file_id,
@@ -243,7 +261,6 @@ class DriveClient:
             fields="id,parents",
             supportsAllDrives=True,
         ).execute()
-
         self.svc.files().delete(fileId=file_id, supportsAllDrives=True).execute()
         return copy["id"]
 

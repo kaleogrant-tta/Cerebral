@@ -11,9 +11,15 @@ Auth: a service account JSON supplied via the GOOGLE_SERVICE_ACCOUNT_JSON
 environment variable (a GitHub Actions secret). The three Drive folders and
 the target Sheet must be shared with the service account's email address.
 
-NOTE: every API call passes supportsAllDrives=True. Without it, calls
-against folders that live in a Shared Drive silently misbehave (files not
-found, moves that no-op) instead of raising errors.
+Two hard-won lessons baked into this file:
+
+1. Every API call passes supportsAllDrives=True. Without it, calls against
+   folders in a shared drive silently misbehave instead of raising errors.
+2. Service accounts have NO storage quota in My Drive, so files().create
+   fails there with a 403. Updates to existing files are fine, so the lock
+   is a persistent file whose CONTENT holds the lock state, and uploads
+   replace existing files whenever possible. Creating new files only works
+   if the folders live in a shared drive.
 """
 
 from __future__ import annotations
@@ -26,7 +32,8 @@ from pathlib import Path
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -111,6 +118,24 @@ class DriveClient:
                 _, done = dl.next_chunk()
         return dest
 
+    def read_text(self, file_id: str) -> str:
+        req = self.svc.files().get_media(fileId=file_id, supportsAllDrives=True)
+        buf = io.BytesIO()
+        dl = MediaIoBaseDownload(buf, req)
+        done = False
+        while not done:
+            _, done = dl.next_chunk()
+        return buf.getvalue().decode("utf-8", "replace")
+
+    def update_text(self, file_id: str, text: str) -> None:
+        """Rewrite a small file's contents in place. Works for service
+        accounts in My Drive because no new file is created."""
+        media = MediaIoBaseUpload(io.BytesIO(text.encode("utf-8")),
+                                  mimetype="text/plain", resumable=False)
+        self.svc.files().update(
+            fileId=file_id, media_body=media, supportsAllDrives=True,
+        ).execute()
+
     def upload(self, src: Path, folder_id: str, name: str | None = None,
                replace: bool = True) -> str:
         name = name or src.name
@@ -123,11 +148,22 @@ class DriveClient:
                 supportsAllDrives=True,
             ).execute()
         else:
-            f = self.svc.files().create(
-                body={"name": name, "parents": [folder_id]},
-                media_body=media, fields="id",
-                supportsAllDrives=True,
-            ).execute()
+            try:
+                f = self.svc.files().create(
+                    body={"name": name, "parents": [folder_id]},
+                    media_body=media, fields="id",
+                    supportsAllDrives=True,
+                ).execute()
+            except HttpError as e:
+                if e.resp.status == 403:
+                    raise RuntimeError(
+                        f'Cannot create "{name}" in the target folder: '
+                        f"service accounts have no storage quota in My Drive. "
+                        f"Either upload {name} to that folder once by hand in "
+                        f"Google Drive, or move the TTA folders into a "
+                        f"shared drive."
+                    ) from e
+                raise
         return f["id"]
 
     def move(self, file_id: str, to_folder: str,
@@ -180,9 +216,13 @@ class DriveClient:
 class DriveLock:
     """Advisory lock so two runs can never write the database at once.
 
-    Not bulletproof -- Drive has no atomic create-if-absent -- but the only
-    writer is a single scheduled job, so this exists to catch a manual run
-    overlapping the scheduled one, which is the realistic collision.
+    The lock is a PERSISTENT _etl.lock file whose contents hold the state
+    ({"status": "held"/"released", ...}). Service accounts cannot create
+    files in My Drive (no storage quota), so we never create or delete the
+    lock during normal operation -- we only rewrite its contents. If the
+    file doesn't exist yet we try to create it, which succeeds on shared
+    drives; on My Drive, upload() raises a clear error telling you to
+    upload an empty _etl.lock by hand, once.
     """
 
     def __init__(self, drive: DriveClient, folder_id: str, name: str = "_etl.lock"):
@@ -191,29 +231,44 @@ class DriveLock:
 
     def __enter__(self):
         existing = self.drive.find(self.folder_id, self.name)
-        if existing:
-            age = time.time() - _epoch(existing["modifiedTime"])
-            if age < LOCK_MAX_AGE_SECONDS:
-                raise RuntimeError(
-                    f"ETL lock held (age {age/60:.1f} min). Another run is in "
-                    f"progress. Delete {self.name} in the state folder to override."
-                )
-            print(f"  ! stale lock ({age/60:.0f} min old) — overriding")
-            self.drive.delete(existing["id"])
+        if existing is None:
+            tmp = Path("/tmp") / self.name
+            tmp.write_text("{}")
+            self.file_id = self.drive.upload(tmp, self.folder_id, self.name)
+        else:
+            self.file_id = existing["id"]
+            try:
+                state = json.loads(self.drive.read_text(self.file_id) or "{}")
+            except json.JSONDecodeError:
+                state = {}
+            if state.get("status") == "held":
+                age = time.time() - _epoch(
+                    state.get("acquired", "1970-01-01T00:00:00"))
+                if age < LOCK_MAX_AGE_SECONDS:
+                    raise RuntimeError(
+                        f"ETL lock held (age {age/60:.1f} min). Another run "
+                        f"is in progress. To override, open {self.name} in "
+                        f"the state folder in Google Drive and clear its "
+                        f"contents."
+                    )
+                print(f"  ! stale lock ({age/60:.0f} min old) — overriding")
 
-        tmp = Path("/tmp") / self.name
-        tmp.write_text(json.dumps({
+        self.drive.update_text(self.file_id, json.dumps({
+            "status": "held",
             "acquired": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "runner": os.environ.get("GITHUB_RUN_ID", "local"),
         }))
-        self.file_id = self.drive.upload(tmp, self.folder_id, self.name)
         return self
 
     def __exit__(self, *exc):
         if self.file_id:
             try:
-                self.drive.delete(self.file_id)
-            except Exception as e:                      # never mask the real error
+                self.drive.update_text(self.file_id, json.dumps({
+                    "status": "released",
+                    "released": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                              time.gmtime()),
+                }))
+            except Exception as e:                  # never mask the real error
                 print(f"  ! could not release lock: {e}")
         return False
 

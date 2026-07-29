@@ -2169,179 +2169,179 @@ with t_gloss:
 
 def render_promo_lab():
     """Promo Lab: churn by category/store/brand + ROI estimates.
-    Reads customer-level lines straight from the app's DuckDB."""
+    Uses fact_line locally, or the privacy-safe dash_promo_* tables online."""
+    import os
     import numpy as np
     import pandas as pd
 
     st.subheader("Promo Lab - Discount Intelligence & ROI")
     st.caption("Where churn concentrates, and the projected return on fixing it with discounts. "
                "Uses your real margins from the data, not a guess.")
+    st.markdown('<p class="note"><b>How to read this.</b> This tab answers one question: where is it worth spending discount dollars? A customer counts as <b>churned</b> when they have not bought anything within the lapse window you set below. Every table is ranked by <b>Net gain</b> - the money a win-back promo is projected to make after paying for the discount itself - not by churn rate. That way small, noisy segments can never outrank big, reliable ones. Set the assumptions to your own guesses; nothing here is final until a real campaign measures a real response rate.</p>', unsafe_allow_html=True)
 
-    import os, duckdb
-    st.markdown('<p class="note"><b>How to read this.</b> This tab answers one question: where is it worth spending discount dollars? A customer counts as <b>churned</b> when they have not bought anything within the lapse window you set below. Every table is ranked by <b>Net gain</b> - the money a win-back promo is projected to make after paying for the discount itself - not by churn rate. That way small, noisy segments can never outrank big, reliable ones. Set the sliders to your own assumptions; nothing here is final until a real campaign measures a real response rate.</p>', unsafe_allow_html=True)
-
+    # ---------- data: full detail locally, privacy-safe aggregates online ----------
+    pub_cat, pub_brand = pd.DataFrame(), pd.DataFrame()
     df = q("""SELECT customer_key, store_key, txn_ts, category, brand,
-                     net_sales, gross_margin
-              FROM fact_line
-              WHERE customer_key IS NOT NULL""")
+                     basket_id, net_sales, gross_margin
+              FROM fact_line WHERE customer_key IS NOT NULL""")
     if df.empty:
-        for cand in [os.path.join(os.path.dirname(os.path.abspath(__file__)), "tta.duckdb"),
-                     r"C:\Users\User\cerebral\Cerebral\tta.duckdb"]:
-            if os.path.exists(cand):
-                try:
-                    con = duckdb.connect(cand, read_only=True)
-                    df = con.execute("""SELECT customer_key, store_key, txn_ts, category, brand,
-                                               net_sales, gross_margin
-                                        FROM fact_line
-                                        WHERE customer_key IS NOT NULL""").df()
-                    con.close()
-                except Exception as e:
-                    st.warning(f'Fallback query failed on {cand}: {e}')
-            if not df.empty:
-                break
-    if df.empty:
-        st.warning("No customer-level data found (fact_line table is missing or empty).")
+        try:
+            import duckdb
+            for cand in [os.path.join(os.path.dirname(os.path.abspath(__file__)), "tta.duckdb"),
+                         r"C:\Users\User\cerebral\Cerebral\tta.duckdb"]:
+                if os.path.exists(cand):
+                    try:
+                        con = duckdb.connect(cand, read_only=True)
+                        df = con.execute("""SELECT customer_key, store_key, txn_ts, category, brand,
+                                                   basket_id, net_sales, gross_margin
+                                            FROM fact_line WHERE customer_key IS NOT NULL""").df()
+                        con.close()
+                    except Exception:
+                        pass
+                if not df.empty:
+                    break
+        except Exception:
+            pass
+
+    if not df.empty:
+        work = df.copy()
+        work["txn_ts"] = pd.to_datetime(work["txn_ts"], errors="coerce")
+        work = work.dropna(subset=["txn_ts", "customer_key"])
+        today = work["txn_ts"].max()
+
+        def build_pub(dim):
+            pc = (work.groupby(["store_key", dim, "customer_key"])
+                      .agg(last=("txn_ts", "max"), n=("basket_id", "nunique"),
+                           spend=("net_sales", "sum"), gm=("gross_margin", "sum"))
+                      .reset_index())
+            days = (today - pc["last"]).dt.days
+            pc["repeat"] = (pc["n"] > 1).astype(int)
+            for wdays in (30, 45, 60, 90):
+                pc[f"churned_{wdays}"] = (days > wdays).astype(int)
+                pc[f"lapsed_spend_{wdays}"] = pc["spend"] * pc[f"churned_{wdays}"]
+            return (pc.groupby(["store_key", dim])
+                      .agg(customers=("customer_key", "count"),
+                           repeat_buyers=("repeat", "sum"),
+                           spend_sum=("spend", "sum"), gm_sum=("gm", "sum"),
+                           **{f"churned_{w}": (f"churned_{w}", "sum") for w in (30, 45, 60, 90)},
+                           **{f"lapsed_spend_{w}": (f"lapsed_spend_{w}", "sum") for w in (30, 45, 60, 90)})
+                      .reset_index())
+
+        pub_cat = build_pub("category")
+        pub_brand = build_pub("brand") if work["brand"].notna().any() else pd.DataFrame()
+    else:
+        pub_cat = q("SELECT * FROM dash_promo_category")
+        pub_brand = q("SELECT * FROM dash_promo_brand")
+
+    if pub_cat.empty:
+        st.warning("No customer-level data found. The published file needs a rebuild "
+                   "(publish.py) that includes the dash_promo tables.")
         return
 
-    cust_col, date_col, cat_col = "customer_key", "txn_ts", "category"
-    store_col, brand_col, amt_col, gm_col = "store_key", "brand", "net_sales", "gross_margin"
-    meth_col = None
+    # ---------- assumptions ----------
+    a1, a2, a3, a4 = st.columns(4)
+    LAPSE = a1.selectbox("Lapse window (days)", [30, 45, 60, 90], index=0,
+                         help="No purchase within this window = churned")
+    WINBACK = a2.slider("Expected win-back rate", 1, 40, 10) / 100
+    DISCOUNT = a3.slider("Discount depth", 5, 50, 20) / 100
+    MIN_CUST = a4.slider("Min customers per segment", 5, 100, 30)
 
-    # ================= assumptions panel =================
-    with st.expander("ROI assumptions (click to adjust)", expanded=True):
-        a1, a2, a3, a4 = st.columns(4)
-        LAPSE_DAYS = a1.slider("Lapse window (days)", 14, 90, 30,
-                               help="No repeat purchase within this window = churned")
-        WINBACK = a2.slider("Expected win-back rate", 1, 40, 10,
-                            help="% of lapsed customers the promo brings back") / 100
-        DISCOUNT = a3.slider("Discount depth", 5, 50, 20,
-                             help="Average discount % given to win-back customers") / 100
-        MIN_CUST = a4.slider("Min customers per segment", 5, 100, 30,
-                             help="Segments below this are excluded as unreliable data")
+    CH, LS = f"churned_{LAPSE}", f"lapsed_spend_{LAPSE}"
 
-    work = df.copy()
-    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
-    work = work.dropna(subset=[date_col, cust_col])
-    today = work[date_col].max()
-    work["_seg"] = work[cat_col].astype(str)
-    work[store_col] = work[store_col].map(STORES).fillna(work[store_col].astype(str))
+    def roi_table(pub, group_cols):
+        g = pub.groupby(group_cols).agg(
+            customers=("customers", "sum"), repeat_buyers=("repeat_buyers", "sum"),
+            spend_sum=("spend_sum", "sum"), gm_sum=("gm_sum", "sum"),
+            churned=(CH, "sum"), lapsed_spend=(LS, "sum")).reset_index()
+        g["churn_rate"] = (g["churned"] / g["customers"].clip(lower=1) * 100).round(1)
+        g["repeat_rate"] = (g["repeat_buyers"] / g["customers"].clip(lower=1) * 100).round(1)
+        g["real_margin"] = np.where(g["spend_sum"] > 0, g["gm_sum"] / g["spend_sum"], 0.5)
+        g["avg_lapsed_spend"] = (g["lapsed_spend"] / g["churned"].clip(lower=1)).round(0)
+        g["reachable"] = g["churned"].astype(int)
+        g["expected_winbacks"] = (g["reachable"] * WINBACK).round(1)
+        g["incr_revenue"] = (g["expected_winbacks"] * g["avg_lapsed_spend"]).round(0)
+        g["promo_cost"] = (g["incr_revenue"] * DISCOUNT).round(0)
+        g["incr_profit"] = (g["incr_revenue"] * g["real_margin"]).round(0)
+        g["net_gain"] = (g["incr_profit"] - g["promo_cost"]).round(0)
+        g["roi_pct"] = np.where(g["promo_cost"] > 0,
+                                (g["net_gain"] / g["promo_cost"] * 100).round(0), np.nan)
+        g = g[(g["customers"] >= MIN_CUST) & (g["reachable"] >= 5)]
+        return g.sort_values("net_gain", ascending=False)
 
-    # --- helper: churn + ROI for any grouping ---
-    def churn_roi_table(group_cols):
-        per_cust = work.groupby(group_cols + [cust_col]).agg(
-            last=(date_col, "max"), n=(date_col, "count"),
-            spend=(amt_col, "sum"), gm=(gm_col, "sum")).reset_index()
-        per_cust["churned"] = (today - per_cust["last"]).dt.days > LAPSE_DAYS
-
-        out = per_cust.groupby(group_cols).agg(
-            customers=(cust_col, "count"),
-            churned=("churned", "sum"),
-            avg_spend=("spend", "mean"),
-            avg_lapsed_spend=("spend", lambda s: s[per_cust.loc[s.index, "churned"]].mean()),
-            revenue=("spend", "sum"),
-            margin_sum=("gm", "sum")).reset_index()
-        out["churn_rate"] = (out["churned"] / out["customers"] * 100).round(1)
-        out["repeat_rate"] = (per_cust.groupby(group_cols)["n"]
-                              .apply(lambda s: (s > 1).mean() * 100).round(1).values)
-        out["real_margin"] = np.where(out["revenue"] > 0,
-                                      out["margin_sum"] / out["revenue"], 0.5)
-
-        # ---- ROI model (uses each segment's REAL margin) ----
-        out["reachable"] = out["churned"].astype(int)
-        out["expected_winbacks"] = (out["reachable"] * WINBACK).round(1)
-        out["incr_revenue"] = (out["expected_winbacks"] *
-                               out["avg_lapsed_spend"].fillna(out["avg_spend"])).round(0)
-        out["promo_cost"] = (out["incr_revenue"] * DISCOUNT).round(0)
-        out["incr_profit"] = (out["incr_revenue"] * out["real_margin"]).round(0)
-        out["net_gain"] = (out["incr_profit"] - out["promo_cost"]).round(0)
-        out["roi_pct"] = np.where(out["promo_cost"] > 0,
-                                  (out["net_gain"] / out["promo_cost"] * 100).round(0), np.nan)
-
-        out = out[out["customers"] >= MIN_CUST]   # kills small-sample blips
-        out = out[out["reachable"] >= 5]
-        return out.sort_values("net_gain", ascending=False)
-
-    RENAME = {"_seg": "Segment", "customers": "Customers", "churned": "Lapsed",
+    RENAME = {"category": "Segment", "customers": "Customers", "churned": "Lapsed",
               "churn_rate": "Churn %", "repeat_rate": "Repeat %",
               "avg_lapsed_spend": "Avg lapsed spend $", "reachable": "Targetable",
               "expected_winbacks": "Expected win-backs", "incr_revenue": "Incr. revenue $",
               "promo_cost": "Promo cost $", "net_gain": "Net gain $", "roi_pct": "ROI %",
-              "real_margin": "Real margin", store_col: "Store", brand_col: "Brand"}
+              "real_margin": "Real margin", "store_key": "Store", "brand": "Brand"}
     MONEY_FMT = {"Avg lapsed spend $": "${:,.0f}", "Incr. revenue $": "${:,.0f}",
                  "Promo cost $": "${:,.0f}", "Net gain $": "${:,.0f}",
                  "ROI %": "{:,.0f}%", "Real margin": "{:.0%}"}
 
-    tab1, tab2, tab3 = st.tabs(["Churn Map (Categories)",
-                                "Store Opportunities", "Brand Promos"])
+    tab1, tab2, tab3 = st.tabs(["Churn Map (Categories)", "Store Opportunities", "Brand Promos"])
 
-    # ============ TAB 1: churn map ============
     with tab1:
-        seg = churn_roi_table(["_seg"])
         st.markdown('<p class="note"><b>What you are looking at.</b> Each row is a product category across all stores. <b>Churn %</b> is the share of that category customers who have not come back within the lapse window. <b>Real margin</b> comes straight from your sales data, not a guess. <b>Targetable</b> is how many lapsed customers you could actually send an offer to. The greener the Net gain column, the more sense a discount makes there.</p>', unsafe_allow_html=True)
-        st.markdown("**Segments ranked by net gain from a win-back promo**")
-        show = seg[["_seg", "customers", "churned", "churn_rate", "repeat_rate",
+        seg = roi_table(pub_cat, ["category"])
+        show = seg[["category", "customers", "churned", "churn_rate", "repeat_rate",
                     "real_margin", "avg_lapsed_spend", "expected_winbacks",
                     "incr_revenue", "promo_cost", "net_gain", "roi_pct"]].rename(columns=RENAME)
+        st.markdown("**Segments ranked by net gain from a win-back promo**")
         st.dataframe(show.style.format(MONEY_FMT)
                      .background_gradient(subset=["Net gain $"], cmap="Greens"),
                      use_container_width=True, hide_index=True)
-        st.info("Sorted by Net gain (incremental profit minus promo cost), not churn %. "
-                "A 70%-churn segment with 12 customers ranks below a 40%-churn segment "
-                "with 400 - that's the blip filter doing its job.")
 
-    # ============ TAB 2: store opportunities ============
     with tab2:
-        store_seg = churn_roi_table([store_col, "_seg"])
         st.markdown('<p class="note"><b>How to use this.</b> The first table picks the single best promo for each store - start there. The dropdown below it shows every category inside one store. The verdict table at the bottom tells you whether a store needs one targeted offer (churn concentrated in a few categories) or a store-wide event like a double-points week (churn spread across nearly everything).</p>', unsafe_allow_html=True)
+        store_seg = roi_table(pub_cat, ["store_key", "category"])
+        store_seg["store_key"] = store_seg["store_key"].map(STORES).fillna(store_seg["store_key"].astype(str))
         st.markdown("**Each store's single best promo (highest net gain)**")
         if not store_seg.empty:
-            idx = store_seg.groupby(store_col)["net_gain"].idxmax()
-            best = store_seg.loc[idx][[store_col, "_seg", "reachable", "churn_rate",
+            idx = store_seg.groupby("store_key")["net_gain"].idxmax()
+            best = store_seg.loc[idx][["store_key", "category", "reachable", "churn_rate",
                                        "expected_winbacks", "incr_revenue",
                                        "promo_cost", "net_gain", "roi_pct"]].rename(columns=RENAME)
-            st.dataframe(best.style.format(MONEY_FMT),
-                         use_container_width=True, hide_index=True)
+            st.dataframe(best.style.format(MONEY_FMT), use_container_width=True, hide_index=True)
 
         st.markdown("**Drill into a store**")
-        pick = st.selectbox("Store", sorted(work[store_col].unique()), key="promo_store_pick")
-        drill = store_seg[store_seg[store_col] == pick][
-            ["_seg", "customers", "churned", "churn_rate", "reachable",
+        pick = st.selectbox("Store", sorted(store_seg["store_key"].unique()), key="promo_store_pick")
+        drill = store_seg[store_seg["store_key"] == pick][
+            ["category", "customers", "churned", "churn_rate", "reachable",
              "expected_winbacks", "incr_revenue", "promo_cost", "net_gain", "roi_pct"]
         ].rename(columns=RENAME)
         st.dataframe(drill.style.format(MONEY_FMT), use_container_width=True, hide_index=True)
 
         st.markdown("**Store-wide promo signal**")
-        sw = store_seg.groupby(store_col).agg(
-            segments=("_seg", "count"),
+        sw = store_seg.groupby("store_key").agg(
+            segments=("category", "count"),
             high_churn_segs=("churn_rate", lambda s: (s > 50).sum()),
             total_net=("net_gain", "sum")).reset_index()
         sw["verdict"] = np.where(
             sw["high_churn_segs"] >= sw["segments"] * 0.6,
             "Store-wide event (e.g., double-points week)",
             "Targeted segment discounts")
-        st.dataframe(sw.rename(columns={store_col: "Store", "segments": "Segments",
+        st.dataframe(sw.rename(columns={"store_key": "Store", "segments": "Segments",
                                         "high_churn_segs": "High-churn segments",
                                         "total_net": "Total net gain $"})
                      .style.format({"Total net gain $": "${:,.0f}"}),
                      use_container_width=True, hide_index=True)
 
-    # ============ TAB 3: brand promos ============
     with tab3:
-        brand = churn_roi_table([brand_col])
         st.markdown('<p class="note"><b>What this means.</b> Brands ranked by the return on winning back their lapsed buyers. A <b>positive ROI</b> means the promo pays for itself under your assumptions. A negative one means the discount would cost more than it brings back - protect those brands and use them as traffic drivers in marketing instead of discounting them. High ROI with tiny dollar figures means interesting but not a priority.</p>', unsafe_allow_html=True)
         st.markdown("**Brands ranked by win-back ROI**")
-        show = brand[[brand_col, "customers", "churn_rate", "repeat_rate", "real_margin",
-                      "reachable", "expected_winbacks", "incr_revenue", "promo_cost",
-                      "net_gain", "roi_pct"]].rename(columns=RENAME)
-        st.dataframe(show.style.format(MONEY_FMT)
-                     .background_gradient(subset=["Net gain $"], cmap="Greens"),
-                     use_container_width=True, hide_index=True)
-        st.info("Positive ROI % = the promo pays for itself under your assumptions. "
-                "Negative = don't discount that brand.")
+        if pub_brand.empty:
+            st.warning("No brand data in this build.")
+        else:
+            brand = roi_table(pub_brand, ["brand"])
+            show = brand[["brand", "customers", "churn_rate", "repeat_rate", "real_margin",
+                          "reachable", "expected_winbacks", "incr_revenue", "promo_cost",
+                          "net_gain", "roi_pct"]].rename(columns=RENAME)
+            st.dataframe(show.style.format(MONEY_FMT)
+                         .background_gradient(subset=["Net gain $"], cmap="Greens"),
+                         use_container_width=True, hide_index=True)
 
-    # ---- summary + export ----
-    all_seg = churn_roi_table([store_col, "_seg"])
-    positive = all_seg[all_seg["net_gain"] > 0]
+    positive = roi_table(pub_cat, ["store_key", "category"])
+    positive = positive[positive["net_gain"] > 0]
     st.divider()
     m1, m2, m3 = st.columns(3)
     m1.metric("Promos with positive ROI", f"{len(positive):,}")
@@ -2349,7 +2349,7 @@ def render_promo_lab():
     m3.metric("Total projected net gain", f"${positive['net_gain'].sum():,.0f}")
 
     st.download_button("Download full ROI table (CSV)",
-                       all_seg.rename(columns=RENAME).to_csv(index=False),
+                       positive.rename(columns=RENAME).to_csv(index=False),
                        "promo_lab_roi.csv", "text/csv", key="promo_download")
 
 

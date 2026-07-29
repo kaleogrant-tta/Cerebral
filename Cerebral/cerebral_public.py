@@ -1437,6 +1437,221 @@ with t_brands:
                         'different and should not be priced identically.</p>',
                         unsafe_allow_html=True)
 
+    # ------------------------------------------------------ brand deep dive
+    st.divider()
+    st.markdown("#### Brand deep dive")
+    st.markdown('<div class="howto"><b>How to read this.</b> Pick a brand and '
+                'see the company it keeps. <b>Where its revenue sits</b> shows '
+                'which categories the brand actually wins in and which way '
+                'each is moving. <b>Bought together</b> lists the other '
+                'brands most often found in the same transactions — your '
+                'readiest bundle and cross-promo candidates. <b>What it '
+                'pulls along</b> rolls those partners up by category, which '
+                'is the buying read: a stockout on this brand costs you '
+                'sales there too.</div>', unsafe_allow_html=True)
+
+    bl = q(f"""
+        SELECT brand, SUM(net) AS net
+        FROM dash_brand_scorecard {wf}
+        GROUP BY 1 HAVING SUM(net) >= 1000
+        ORDER BY net DESC
+    """)
+
+    if bl.empty:
+        st.info("No brand data in the published file.")
+    else:
+        pick = st.selectbox(
+            "Pick a brand", bl.brand.tolist(), key="deep_brand",
+            help="Brands with at least $1,000 net sales in the loaded "
+                 "period, largest first. Type to search.")
+        psql = pick.replace("'", "''")            # safe inside SQL literals
+
+        def num0(v):
+            v = pd.to_numeric(v, errors="coerce")
+            return float(v) if pd.notna(v) else 0.0
+
+        # ---- snapshot ---------------------------------------------------
+        sc = q(f"""
+            SELECT SUM(net) AS net, SUM(gm) AS gm, SUM(units) AS units,
+                   SUM(first_basket_customers) AS first_basket
+            FROM dash_brand_scorecard
+            WHERE brand = '{psql}' {af}
+        """).iloc[0]
+        tr = q(f"""
+            SELECT SUM(net_early) AS e, SUM(net_late) AS l
+            FROM dash_brand_trend
+            WHERE brand = '{psql}' {af}
+        """).iloc[0]
+
+        net, gm = num0(sc.net), num0(sc.gm)
+        e, l = num0(tr.e), num0(tr.l)
+        trend = (l / e - 1) * 100 if e > 0 else float("nan")
+
+        m = st.columns(4)
+        m[0].metric("Net sales", f"${net:,.0f}")
+        m[1].metric("Gross margin",
+                    f"{gm / net * 100:.1f}%" if net > 0 else "—",
+                    help=tip("gross margin"))
+        m[2].metric("Units", f"{int(num0(sc.units)):,}")
+        m[3].metric("Trend (2nd half vs 1st)",
+                    f"{trend:+.1f}%" if pd.notna(trend) else "—",
+                    help="Net sales in the second half of the loaded period "
+                         "versus the first half.")
+        fb = int(num0(sc.first_basket))
+        if fb:
+            st.markdown(f'<p class="note"><b>{fb:,}</b> customers had '
+                        f'<b>{pick}</b> in their first-ever basket — '
+                        f'acquisition value on top of the sales line.</p>',
+                        unsafe_allow_html=True)
+
+        # ---- category mix + co-purchases ---------------------------------
+        cm = q(f"""
+            SELECT category,
+                   SUM(net_total) AS net,
+                   SUM(net_early) AS net_early,
+                   SUM(net_late)  AS net_late
+            FROM dash_brand_trend
+            WHERE brand = '{psql}' {af}
+            GROUP BY 1 HAVING SUM(net_total) > 0
+            ORDER BY net DESC
+        """)
+
+        bp = q(f"""
+            SELECT other, other_cat, SUM(baskets) AS baskets FROM (
+                SELECT brand_b AS other, cat_b AS other_cat,
+                       SUM(joint_baskets) AS baskets
+                FROM dash_brand_pairs
+                WHERE brand_a = '{psql}' {af}
+                GROUP BY 1, 2
+                UNION ALL
+                SELECT brand_a, cat_a, SUM(joint_baskets)
+                FROM dash_brand_pairs
+                WHERE brand_b = '{psql}' {af}
+                GROUP BY 1, 2
+            ) u
+            WHERE other <> '{psql}'
+            GROUP BY 1, 2
+        """)
+        if not bp.empty:
+            bp = bp.rename(columns={"other": "partner",
+                                    "other_cat": "partner_cat"})
+
+        left, right = st.columns(2)
+
+        with left:
+            st.markdown("##### Where its revenue sits")
+            if cm.empty:
+                st.info("No category detail for this brand in the loaded "
+                        "period.")
+            else:
+                cm["share"] = cm.net / cm.net.sum() * 100
+                cm["change"] = pct_change(cm["net_late"], cm["net_early"])
+                cplot = cm.sort_values("net")
+                fig = px.bar(cplot, x="net", y="category", orientation="h",
+                             color="category",
+                             color_discrete_map={c: cat_color(c)
+                                                 for c in cplot.category},
+                             text=cplot["share"].map("{:.0f}%".format))
+                fig.update_traces(textposition="outside", cliponaxis=False)
+                fig.update_layout(height=90 + 46 * len(cplot),
+                                  showlegend=False,
+                                  margin=dict(l=0, r=0, t=10, b=0),
+                                  xaxis_title="", yaxis_title="",
+                                  plot_bgcolor="rgba(0,0,0,0)")
+                fig.update_xaxes(showticklabels=False)
+                st.plotly_chart(fig, use_container_width=True, key="deep_cm")
+                st.caption("Bar labels are each category's share of the "
+                           "brand's net sales.")
+
+                st.dataframe(pd.DataFrame({
+                    "Category": cm.category,
+                    "Net $": cm.net.round(0),
+                    "% of brand": cm["share"].round(1),
+                    "Change %": pd.to_numeric(cm["change"],
+                                              errors="coerce").round(1),
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Net $": st.column_config.NumberColumn(format="$%d"),
+                    "% of brand": st.column_config.NumberColumn(
+                        help="Share of this brand's net sales.",
+                        format="%.1f%%"),
+                    "Change %": st.column_config.NumberColumn(
+                        help="Second half of the period versus the first. "
+                             "Shows which way the brand is moving inside "
+                             "each category.", format="%.1f%%"),
+                })
+
+        with right:
+            st.markdown("##### Bought together")
+            if bp.empty:
+                st.info("No co-purchase data for this brand — either it is "
+                        "usually bought alone, or the published file "
+                        "predates brand-pair tracking.")
+            else:
+                tot = (bp.groupby("partner", as_index=False)
+                         .agg(baskets=("baskets", "sum")))
+                # a partner's category is the one where it co-occurs with
+                # the picked brand most often
+                pcat = (bp.sort_values("baskets", ascending=False)
+                          .drop_duplicates("partner")
+                          .set_index("partner")["partner_cat"])
+                tot["category"] = tot.partner.map(pcat)
+                tot = tot.sort_values("baskets", ascending=False)
+                tot["share"] = tot.baskets / tot.baskets.sum() * 100
+
+                for _, r in tot.head(3).iterrows():
+                    st.markdown(
+                        f'<div class="alert a-ok"><b>{pick} + '
+                        f'{r.partner}</b> — {int(r.baskets):,} transactions '
+                        f'contained both ({r.share:.1f}% of all {pick} '
+                        f'pairings)</div>', unsafe_allow_html=True)
+
+                show = tot.head(12)
+                st.dataframe(pd.DataFrame({
+                    "Partner brand": show.partner,
+                    "Category": show.category,
+                    "Baskets together": show.baskets,
+                    "% of pairings": show["share"].round(1),
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Baskets together": st.column_config.NumberColumn(
+                        help="Transactions containing both brands.",
+                        format="%d"),
+                    "% of pairings": st.column_config.NumberColumn(
+                        help="Of all transactions where this brand appeared "
+                             "alongside any other brand, how often it was "
+                             "this one.", format="%.1f%%"),
+                })
+                st.markdown('<p class="note">Partners from other categories '
+                            'are cross-sells — bundle and merchandise them '
+                            'together. Brands from this brand\'s own '
+                            'category that never appear here are likely '
+                            'substitutes: customers choose between you, not '
+                            'in addition to you.</p>', unsafe_allow_html=True)
+
+        # ---- category pull, full width -----------------------------------
+        if not bp.empty:
+            st.markdown("##### What it pulls along")
+            st.markdown('<p class="note">The partner brands above, rolled '
+                        'up by category: when this brand is in the basket, '
+                        'these are the aisles the rest of the basket comes '
+                        'from. Treat par levels as linked — running out '
+                        'here costs sales there.</p>',
+                        unsafe_allow_html=True)
+            bycat = (bp.groupby("partner_cat", as_index=False)
+                       .agg(baskets=("baskets", "sum"))
+                       .sort_values("baskets", ascending=False))
+            fig = px.bar(bycat, x="partner_cat", y="baskets",
+                         color="partner_cat",
+                         color_discrete_map={c: cat_color(c)
+                                             for c in bycat.partner_cat})
+            fig.update_layout(height=320, showlegend=False,
+                              margin=dict(l=0, r=0, t=10, b=0),
+                              xaxis_title="",
+                              yaxis_title="baskets together",
+                              plot_bgcolor="rgba(0,0,0,0)")
+            fig.update_yaxes(gridcolor="rgba(0,0,0,.07)")
+            st.plotly_chart(fig, use_container_width=True, key="deep_pull")
+
+
 
 # -------------------------------------------------------------- redemptions
 with t_redeem:

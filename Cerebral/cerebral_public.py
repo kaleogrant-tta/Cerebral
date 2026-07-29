@@ -2177,10 +2177,26 @@ def render_promo_lab():
     st.caption("Where churn concentrates, and the projected return on fixing it with discounts. "
                "Uses your real margins from the data, not a guess.")
 
+    import os, duckdb
     df = q("""SELECT customer_key, store_key, txn_ts, category, brand,
                      net_sales, gross_margin
               FROM fact_line
               WHERE customer_key IS NOT NULL""")
+    if df.empty:
+        for cand in [os.path.join(os.path.dirname(os.path.abspath(__file__)), "tta.duckdb"),
+                     r"C:\Users\User\cerebral\Cerebral\tta.duckdb"]:
+            if os.path.exists(cand):
+                try:
+                    con = duckdb.connect(cand, read_only=True)
+                    df = con.execute("""SELECT customer_key, store_key, txn_ts, category, brand,
+                                               net_sales, gross_margin
+                                        FROM fact_line
+                                        WHERE customer_key IS NOT NULL""").df()
+                    con.close()
+                except Exception as e:
+                    st.warning(f'Fallback query failed on {cand}: {e}')
+            if not df.empty:
+                break
     if df.empty:
         st.warning("No customer-level data found (fact_line table is missing or empty).")
         return
@@ -2206,6 +2222,7 @@ def render_promo_lab():
     work = work.dropna(subset=[date_col, cust_col])
     today = work[date_col].max()
     work["_seg"] = work[cat_col].astype(str)
+    work[store_col] = work[store_col].map(STORES).fillna(work[store_col].astype(str))
 
     # --- helper: churn + ROI for any grouping ---
     def churn_roi_table(group_cols):

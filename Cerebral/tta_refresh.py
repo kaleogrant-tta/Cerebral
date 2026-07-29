@@ -84,8 +84,14 @@ def publish(con: duckdb.DuckDBPyConnection, sheet_id: str) -> None:
         except gspread.WorksheetNotFound:
             ws = wb.add_worksheet(tab, rows=len(df) + 10, cols=max(len(df.columns), 5))
 
+        # Sheets accepts only JSON scalars. Timestamps/Dates (load_log's
+        # loaded_at is one) must become text, and NaN -> "".
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
         df = df.astype(object).where(pd.notna(df), "")
-        ws.update([df.columns.tolist()] + df.values.tolist(),
+        rows = [[_json_safe(v) for v in row] for row in df.values.tolist()]
+        ws.update([df.columns.tolist()] + rows,
                   value_input_option="RAW")
         print(f"    published {tab}: {len(df):,} rows")
 
@@ -93,6 +99,17 @@ def publish(con: duckdb.DuckDBPyConnection, sheet_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
+def _json_safe(v):
+    """Last-line defense for Sheets publishing: convert any lingering
+    date/datetime objects to strings so JSON serialization can't fail."""
+    import datetime as _dt
+    if isinstance(v, (pd.Timestamp, _dt.datetime)):
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(v, _dt.date):
+        return v.strftime("%Y-%m-%d")
+    return v
+
 
 def env(key: str) -> str:
     val = os.environ.get(key)

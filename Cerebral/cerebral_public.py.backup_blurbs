@@ -567,8 +567,8 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_redeem, t_projections, t_promo, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Redemptions", "Projections", "Promo Lab", "What the terms mean"])
+t_charts, t_insights, t_brands, t_redeem, t_projections, t_gloss, t_promo = st.tabs(
+    ["Charts", "Insights", "Brands", "Redemptions", "Projections", "What the terms mean", "Promo Lab"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -2178,14 +2178,6 @@ def render_promo_lab():
                "Uses your real margins from the data, not a guess.")
 
     import os, duckdb
-    st.markdown('<p class="note"><b>How to read this.</b> This tab answers one question:
-    where is it worth spending discount dollars? A customer counts as <b>churned</b> when
-    they have not bought anything within the lapse window you set below. Every table is
-    ranked by <b>Net gain</b> - the money a win-back promo is projected to make after paying
-    for the discount itself - not by churn rate. That way small, noisy segments can never
-    outrank big, reliable ones. Set the sliders to your own assumptions; nothing here is
-    final until a real campaign measures a real response rate.</p>', unsafe_allow_html=True)
-
     df = q("""SELECT customer_key, store_key, txn_ts, category, brand,
                      net_sales, gross_margin
               FROM fact_line
@@ -2283,12 +2275,6 @@ def render_promo_lab():
     # ============ TAB 1: churn map ============
     with tab1:
         seg = churn_roi_table(["_seg"])
-        st.markdown('<p class="note"><b>What you are looking at.</b> Each row is a product
-        category across all stores. <b>Churn %</b> is the share of that category&rsquo;s customers
-        who have not come back within the lapse window. <b>Real margin</b> comes straight from
-        your sales data, not a guess. <b>Targetable</b> is how many lapsed customers you could
-        actually send an offer to. The greener the Net gain column, the more sense a discount
-        makes there.</p>', unsafe_allow_html=True)
         st.markdown("**Segments ranked by net gain from a win-back promo**")
         show = seg[["_seg", "customers", "churned", "churn_rate", "repeat_rate",
                     "real_margin", "avg_lapsed_spend", "expected_winbacks",
@@ -2303,11 +2289,6 @@ def render_promo_lab():
     # ============ TAB 2: store opportunities ============
     with tab2:
         store_seg = churn_roi_table([store_col, "_seg"])
-        st.markdown('<p class="note"><b>How to use this.</b> The first table picks the single
-        best promo for each store - start there. The dropdown below it shows every category
-        inside one store. The verdict table at the bottom tells you whether a store needs one
-        targeted offer (churn concentrated in a few categories) or a store-wide event like a
-        double-points week (churn spread across nearly everything).</p>', unsafe_allow_html=True)
         st.markdown("**Each store's single best promo (highest net gain)**")
         if not store_seg.empty:
             idx = store_seg.groupby(store_col)["net_gain"].idxmax()
@@ -2343,12 +2324,6 @@ def render_promo_lab():
     # ============ TAB 3: brand promos ============
     with tab3:
         brand = churn_roi_table([brand_col])
-        st.markdown('<p class="note"><b>What this means.</b> Brands ranked by the return on
-        winning back their lapsed buyers. A <b>positive ROI</b> means the promo pays for itself
-        under your assumptions. A negative one means the discount would cost more than it
-        brings back - protect those brands and use them as traffic drivers in marketing
-        instead of discounting them. High ROI with tiny dollar figures means interesting but
-        not a priority.</p>', unsafe_allow_html=True)
         st.markdown("**Brands ranked by win-back ROI**")
         show = brand[[brand_col, "customers", "churn_rate", "repeat_rate", "real_margin",
                       "reachable", "expected_winbacks", "incr_revenue", "promo_cost",

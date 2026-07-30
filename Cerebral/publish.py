@@ -275,9 +275,9 @@ def build(src: str, dest: str) -> dict:
         """)
         con.execute("""
             CREATE TABLE dash_offer_performance (
-                store_key INTEGER, offer_name VARCHAR, brand VARCHAR,
-                category VARCHAR, match_method VARCHAR, redemptions BIGINT,
-                redeem_value DOUBLE, avg_basket DOUBLE,
+                store_key INTEGER, offer_name VARCHAR, product VARCHAR,
+                brand VARCHAR, category VARCHAR, match_method VARCHAR,
+                redemptions BIGINT, redeem_value DOUBLE, avg_basket DOUBLE,
                 first_seen TIMESTAMP, last_seen TIMESTAMP)
         """)
         print("  ! source has no fact_redemption — reload history to populate "
@@ -313,7 +313,8 @@ def build(src: str, dest: str) -> dict:
       # Offer-level detail, so a specific campaign can be looked up.
       con.execute("""
         CREATE TABLE dash_offer_performance AS
-        SELECT store_key, offer_name, matched_brand AS brand,
+        SELECT store_key, offer_name, matched_product AS product,
+               matched_brand AS brand,
                matched_category AS category, match_method,
                COUNT(*)                        AS redemptions,
                SUM(redeem_amt)                 AS redeem_value,
@@ -321,7 +322,7 @@ def build(src: str, dest: str) -> dict:
                MIN(txn_ts)                     AS first_seen,
                MAX(txn_ts)                     AS last_seen
         FROM src.fact_redemption
-        GROUP BY 1,2,3,4,5
+        GROUP BY 1,2,3,4,5,6
         HAVING COUNT(*) >= 5
       """)
 

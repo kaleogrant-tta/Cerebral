@@ -319,9 +319,11 @@ def gate() -> bool:
 @st.cache_resource(ttl=CACHE_MINUTES * 60)
 def load_db() -> str | None:
     """Local file if present, otherwise pull the published copy from Drive."""
-    local = Path(DASH_FILE)
-    if local.exists():
-        return str(local)
+    # Look next to the script first, then the launch directory, so the app
+    # finds its data no matter which folder streamlit was started from.
+    for local in (Path(__file__).resolve().parent / DASH_FILE, Path(DASH_FILE)):
+        if local.exists():
+            return str(local)
 
     sa = secret("gcp_service_account")
     folder = secret("TTA_DRIVE_STATE") or os.environ.get("TTA_DRIVE_STATE")
@@ -1962,6 +1964,82 @@ with t_redeem:
                 f'<p class="note">${unattributed.spend.sum():,.0f} across '
                 f'{int(unattributed.redemptions.sum()):,} redemptions could '
                 f'not be matched to a brand.</p>', unsafe_allow_html=True)
+
+        # --- Brand → SKU redemption drill-down -------------------------
+        st.divider()
+        st.markdown("##### Which SKUs were redeemed, by brand")
+        st.markdown('<p class="note">Pick a brand to see every redeemed offer '
+                    'tied to its products. Offers are named after the product '
+                    'they discount, so this is the SKU-level view of where '
+                    'the redemption dollars went.</p>', unsafe_allow_html=True)
+
+        brand_opts = sorted(attributed.brand.dropna().unique())
+        sel_brand = st.selectbox("Select a brand", brand_opts,
+                                 key="redeem_brand_sku")
+
+        # Group by the matched product (strain-level) when the published file
+        # has it; older files only carry offer names. Offer-name variants —
+        # "Loyalty …", the "Loytaly …" typo — roll up into one row per strain.
+        try:
+            sku = q(f"""
+                SELECT COALESCE(product, offer_name) AS sku, category,
+                       SUM(redemptions) AS redemptions,
+                       SUM(redeem_value) AS spend,
+                       AVG(avg_basket)  AS avg_basket
+                FROM dash_offer_performance
+                WHERE brand = '{sel_brand.replace("'", "''")}' {af}
+                GROUP BY 1,2
+                ORDER BY spend DESC
+            """)
+            if not len(sku):
+                raise ValueError("empty")
+        except Exception:
+            sku = q(f"""
+                SELECT offer_name AS sku, category,
+                       SUM(redemptions) AS redemptions,
+                       SUM(redeem_value) AS spend,
+                       AVG(avg_basket)  AS avg_basket
+                FROM dash_offer_performance
+                WHERE brand = '{sel_brand.replace("'", "''")}' {af}
+                GROUP BY 1,2
+                ORDER BY spend DESC
+            """)
+
+        if sku.empty:
+            st.info(f"No redeemed offers matched to {sel_brand}.")
+        else:
+            sku["cost_per_redemption"] = sku.spend / sku.redemptions.replace(
+                0, float("nan"))
+
+            m = st.columns(3)
+            m[0].metric("SKUs redeemed", f"{len(sku):,}")
+            m[1].metric("Redemptions", f"{int(sku.redemptions.sum()):,}")
+            m[2].metric("Redemption $", f"${sku.spend.sum():,.0f}")
+
+            st.dataframe(pd.DataFrame({
+                "SKU / Offer": sku.sku,
+                "Category": sku.category,
+                "Redemptions": sku.redemptions,
+                "Spend $": sku.spend.round(0),
+                "Cost each": sku.cost_per_redemption.round(2),
+                "Avg basket": sku.avg_basket.round(2),
+            }), use_container_width=True, hide_index=True, column_config={
+                "Redemptions": st.column_config.NumberColumn(format="%d"),
+                "Spend $": st.column_config.NumberColumn(format="$%d"),
+                "Cost each": st.column_config.NumberColumn(format="$%.2f"),
+                "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
+            })
+
+            top = sku.head(15)
+            fig = px.bar(top, x="spend", y="sku", orientation="h",
+                         color_discrete_sequence=[ACCENT],
+                         labels={"spend": "Redemption $", "sku": ""})
+            fig.update_layout(height=max(280, 36 * len(top)),
+                              margin=dict(l=0, r=0, t=10, b=0),
+                              yaxis=dict(autorange="reversed"),
+                              plot_bgcolor="rgba(0,0,0,0)")
+            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+            st.plotly_chart(fig, use_container_width=True, key="pc17")
 
         st.divider()
         st.markdown("##### Spend against basket size")

@@ -123,7 +123,8 @@ def strip_totals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 STOPWORDS = {"travel", "club", "tta", "the", "and", "for", "with", "free",
-             "off", "deal", "offer", "promo", "special", "pack", "pk"}
+             "off", "deal", "offer", "promo", "special", "pack", "pk",
+             "loyalty"}
 
 
 def _tokens(text: str) -> set[str]:
@@ -165,6 +166,13 @@ def attribute_offer(offer: str, lines: pd.DataFrame,
             if btoks and set(btoks) <= otok:
                 named_brands.add(bname)
 
+    # Token sets of the named brands. One catalogue brand can nest inside
+    # another ("Ruby" inside "Ruby Farms"): an offer naming "Ruby" should not
+    # exclude "Ruby Farms" lines, so lines are kept when their brand SHARES a
+    # token with a named brand, not only on exact string equality.
+    named_tok_sets = [btoks for btoks, bname in known_brands.items()
+                      if bname in named_brands] if known_brands else []
+
     best, best_score, best_method = None, 0.0, "unmatched"
     for _, ln in lines.iterrows():
         brand = str(ln.get("brand") or "")
@@ -172,12 +180,17 @@ def attribute_offer(offer: str, lines: pd.DataFrame,
         ptok = _tokens(str(ln.get("product") or ""))
 
         brand_hit = bool(btok) and btok <= otok          # every brand word present
-        if named_brands and brand not in named_brands:
+        if named_tok_sets and not any(btok & nts for nts in named_tok_sets):
             continue                                     # offer names someone else
         prod_overlap = len(ptok & otok)
         prod_score = prod_overlap / max(len(ptok), 1)
 
-        if brand_hit and prod_overlap:
+        if otok <= ptok:
+            # Every meaningful offer word appears in the product name
+            # ("Ruby Doobies 2pk" inside "Ruby Doobies Pre Roll Multi Pack
+            # Blue Dream 2pk") — the strongest signal there is.
+            score, method = 3.0 + prod_score, "brand+product"
+        elif brand_hit and prod_overlap:
             score, method = 2.0 + prod_score, "brand+product"
         elif brand_hit:
             score, method = 1.5, "brand"

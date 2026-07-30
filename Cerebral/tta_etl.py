@@ -124,15 +124,27 @@ def strip_totals(df: pd.DataFrame) -> pd.DataFrame:
 
 STOPWORDS = {"travel", "club", "tta", "the", "and", "for", "with", "free",
              "off", "deal", "offer", "promo", "special", "pack", "pk",
-             "loyalty"}
+             "loyalty", "loytaly"}   # "loytaly" = Alpine's own typo, Aug-Sep 2025
 
 
 def _tokens(text: str) -> set[str]:
-    """Comparable words from an offer or product name."""
+    """Comparable words from an offer or product name.
+
+    Trailing-s is stripped from longer words ("Doobies" -> "doobie",
+    "Gummies" -> "gummie") because Alpine offer names and Dutchie product
+    names disagree on plurals. Applied identically on both sides of every
+    comparison, so the normalisation can never create a false mismatch.
+    """
     if not isinstance(text, str):
         return set()
-    words = re.split(r"[^a-z0-9]+", text.lower())
-    return {w for w in words if len(w) > 2 and w not in STOPWORDS}
+    out = set()
+    for w in re.split(r"[^a-z0-9]+", text.lower()):
+        if len(w) <= 2 or w in STOPWORDS:
+            continue
+        if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.add(w)
+    return out
 
 
 def attribute_offer(offer: str, lines: pd.DataFrame,

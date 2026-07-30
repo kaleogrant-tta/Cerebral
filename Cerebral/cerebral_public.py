@@ -1962,11 +1962,21 @@ with t_redeem:
             "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
         })
 
+        if a.brand.astype(str).str.startswith(
+                ("Secret Drops", "Travel Club Substitution")).any():
+            st.markdown(
+                '<p class="note"><b>Secret Drops</b> and <b>Travel Club '
+                'Substitution</b> rows are promo families, not brands — the '
+                'offer never names a product (mystery bags and out-of-stock '
+                'swaps). Pick one in the drill-down below to see what '
+                'customers actually received.</p>', unsafe_allow_html=True)
+
         if len(unattributed) and unattributed.spend.sum() > 0:
             st.markdown(
                 f'<p class="note">${unattributed.spend.sum():,.0f} across '
                 f'{int(unattributed.redemptions.sum()):,} redemptions could '
-                f'not be matched to a brand.</p>', unsafe_allow_html=True)
+                f'not be matched to a brand or promo family.</p>',
+                unsafe_allow_html=True)
 
         # --- Brand → SKU redemption drill-down -------------------------
         st.divider()

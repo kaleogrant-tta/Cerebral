@@ -26,6 +26,25 @@ import duckdb
 SLIM = "cerebral_dash.duckdb"
 
 
+# Promo families that have no brand of their own but are worth tracking as
+# their own line items: the April "Secret Drop" mystery promos and the
+# Travel Club point-substitution tiers (staff swap an out-of-stock menu item
+# for something else). Family takes precedence over the matched brand in the
+# rollup tables, so they appear as their own rows; the offer-level table
+# still carries the actual product the customer received.
+_FAMILY_RE = "[0-9]+ *points? +substitution"
+
+def _family_sql(offer_col: str, brand_col: str) -> str:
+    return f"""CASE
+        WHEN lower({offer_col}) LIKE '%secret drop%' THEN 'Secret Drops'
+        WHEN regexp_matches(lower({offer_col}), '{_FAMILY_RE}')
+        THEN 'Travel Club Substitution — ' ||
+             regexp_extract(lower({offer_col}), '([0-9]+) *points? +substitution', 1) ||
+             ' pts'
+        ELSE {brand_col}
+    END"""
+
+
 def build(src: str, dest: str) -> dict:
     """Build the published file atomically.
 
@@ -283,7 +302,7 @@ def build(src: str, dest: str) -> dict:
         print("  ! source has no fact_redemption — reload history to populate "
               "brand redemption. Empty tables created.")
     else:
-      con.execute("""
+      con.execute(f"""
         CREATE TABLE dash_brand_redemption AS
         WITH f AS (
             SELECT customer_key, MIN(txn_ts) AS first_ts
@@ -291,8 +310,10 @@ def build(src: str, dest: str) -> dict:
             GROUP BY 1
         )
         SELECT r.store_key,
-               r.matched_brand           AS brand,
-               r.matched_category        AS category,
+               {_family_sql('r.offer_name', 'r.matched_brand')} AS brand,
+               CASE WHEN lower(r.offer_name) LIKE '%secret drop%'
+                      OR regexp_matches(lower(r.offer_name), '{_FAMILY_RE}')
+                    THEN 'Promo' ELSE r.matched_category END   AS category,
                r.match_method,
                COUNT(*)                              AS redemptions,
                SUM(r.redeem_amt)                     AS redeem_value,
@@ -310,11 +331,14 @@ def build(src: str, dest: str) -> dict:
         GROUP BY 1,2,3,4
       """)
 
-      # Offer-level detail, so a specific campaign can be looked up.
-      con.execute("""
+      # Offer-level detail, so a specific campaign can be looked up. No
+      # minimum-row filter: the brand -> SKU drill-down needs every row, and
+      # a substitution offer split across many substitute products would
+      # otherwise drop below any threshold and vanish from the drill-down.
+      con.execute(f"""
         CREATE TABLE dash_offer_performance AS
         SELECT store_key, offer_name, matched_product AS product,
-               matched_brand AS brand,
+               {_family_sql('offer_name', 'matched_brand')} AS brand,
                matched_category AS category, match_method,
                COUNT(*)                        AS redemptions,
                SUM(redeem_amt)                 AS redeem_value,
@@ -323,7 +347,6 @@ def build(src: str, dest: str) -> dict:
                MAX(txn_ts)                     AS last_seen
         FROM src.fact_redemption
         GROUP BY 1,2,3,4,5,6
-        HAVING COUNT(*) >= 5
       """)
 
 

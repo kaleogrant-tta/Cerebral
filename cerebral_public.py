@@ -2054,6 +2054,41 @@ with t_redeem:
             fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
             st.plotly_chart(fig, use_container_width=True, key="pc17")
 
+        # --- Off-menu picks: what redeemers chose instead -------------------
+        st.divider()
+        st.markdown("##### Chosen instead — off-menu picks")
+        st.markdown(
+            '<p class="note">When a redemption menu item is out of stock, '
+            'staff let the customer pick something of similar value. These '
+            'are the products redeemers actually walked out with, ranked by '
+            'redemption dollars — a ready-made shortlist of candidates for '
+            'the menu.</p>', unsafe_allow_html=True)
+        subs = q(f"""
+            SELECT product AS sku, category,
+                   SUM(redemptions)             AS redemptions,
+                   SUM(redeem_value)            AS spend,
+                   COUNT(DISTINCT offer_name)   AS offers
+            FROM dash_offer_performance
+            WHERE match_method = 'substituted-line' {af}
+            GROUP BY 1,2
+            ORDER BY spend DESC
+        """)
+        if subs.empty:
+            st.info("No substitutions recorded yet. They appear after the "
+                    "next data rebuild, once re-matching has run.")
+        else:
+            st.dataframe(pd.DataFrame({
+                "SKU chosen": subs.sku,
+                "Category": subs.category,
+                "Times picked": subs.redemptions,
+                "Redemption $": subs.spend.round(0),
+                "Via # of offers": subs.offers,
+            }), use_container_width=True, hide_index=True, column_config={
+                "Times picked": st.column_config.NumberColumn(format="%d"),
+                "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                "Via # of offers": st.column_config.NumberColumn(format="%d"),
+            })
+
         st.divider()
         st.markdown("##### Spend against basket size")
         fig = px.scatter(a, x="redemptions", y="avg_basket", size="spend",

@@ -192,7 +192,12 @@ def attribute_offer(offer: str, lines: pd.DataFrame,
         ptok = _tokens(str(ln.get("product") or ""))
 
         brand_hit = bool(btok) and btok <= otok          # every brand word present
-        if named_tok_sets and not any(btok & nts for nts in named_tok_sets):
+        # The guard rejects lines from other brands — but a brand LINE can
+        # live inside the product name under a manufacturer brand ("Dark
+        # Heart Genetics …" sold as brand "Grassroots"), so the product's
+        # own tokens count toward passing the guard too.
+        if named_tok_sets and not any((btok | ptok) & nts
+                                      for nts in named_tok_sets):
             continue                                     # offer names someone else
         prod_overlap = len(ptok & otok)
         prod_score = prod_overlap / max(len(ptok), 1)

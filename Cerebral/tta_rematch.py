@@ -24,6 +24,7 @@ Afterwards, rebuild + republish the dashboard (publish.py --upload).
 """
 
 import argparse
+import re
 import shutil
 from pathlib import Path
 
@@ -32,8 +33,31 @@ import pandas as pd
 
 from tta_etl import _tokens, attribute_offer
 
-PENNY_MAX = 0.05        # a redeemed/substituted item rings at $0.01 (or $0.00)
+PENNY_MAX = 0.05        # a substituted item usually rings at $0.01 (or $0.00)
+TAX_RATE = 0.15         # ...but staff may discount it only to its tax value:
+                        # the line keeps ~13% NY cannabis tax on the full price
+CHEAP_CAP = 40.00       # never trust a "substitute" line above this
 TEST_OFFER = "TEST GWP TEST"
+
+
+def pick_substitute(lines: pd.DataFrame, redeem_amt: float):
+    """Find the swapped-in product inside a substitution basket.
+
+    The redeemer pays (almost) nothing for the item, so it is the line that
+    costs nothing: a $0.01 penny line when there is one, otherwise the
+    cheapest line up to roughly the tax on the item's value (13% NY tax on
+    what the redemption was worth), capped at CHEAP_CAP so an unrelated
+    full-price purchase is never mistaken for the substitute.
+    """
+    priced = lines[lines["net_sales"].fillna(-1) >= 0].sort_values("net_sales")
+    penny = priced[priced["net_sales"] <= PENNY_MAX]
+    if len(penny):
+        return penny.iloc[0]
+    ceiling = min(max(redeem_amt or 0, 0) * TAX_RATE, CHEAP_CAP)
+    cheap = priced[priced["net_sales"] <= ceiling]
+    if len(cheap):
+        return cheap.iloc[0]
+    return None
 
 
 def main() -> int:
@@ -92,12 +116,18 @@ def main() -> int:
         brand, catg, prod, method = attribute_offer(
             r.offer_name, lines[["brand", "category", "product"]], catalogue)
         if method == "unmatched":
-            penny = lines[(lines["net_sales"].fillna(99) >= 0)
-                          & (lines["net_sales"] <= PENNY_MAX)]
-            if len(penny):
-                ln = penny.iloc[0]
+            ln = pick_substitute(lines, r.redeem_amt)
+            if ln is not None:
                 brand, catg, prod = ln["brand"], ln["category"], ln["product"]
                 method = "substituted-line"
+        if method == "unmatched" and len(lines) == 1 and re.search(
+                r"[0-9]+ *points? +substitution", str(r.offer_name).lower()):
+            # A substitution redemption in a one-line basket: whatever that
+            # line is, it is what the customer left with, even when it was
+            # rung above the tax ceiling.
+            ln = lines.iloc[0]
+            brand, catg, prod = ln["brand"], ln["category"], ln["product"]
+            method = "substituted-line"
         if method != "unmatched" and pd.notna(brand):
             updates.append({
                 "basket_id": r.basket_id, "offer_id": r.offer_id,

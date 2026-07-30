@@ -1,0 +1,10 @@
+# Cerebral — Streamlit theme
+# These are the widget colours theme.css cannot reach: store tags, slider,
+# tab underline, sidebar background. Keep them in sync with theme.css.
+
+[theme]
+primaryColor = "#0E7C66"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6F4"
+textColor = "#4A3B34"
+font = "sans serif"

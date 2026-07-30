@@ -568,9 +568,16 @@ st.sidebar.caption(
     f"{str(meta.first_txn)[:10]} → {str(meta.last_txn)[:10]}\n\n"
     f"updated {str(meta.built_at)[:16]}")
 
-st.title("Cerebral")
-label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
-st.caption(f"Category analytics · The Travel Agency · {label}")
+label = ("All stores" if len(keys) == len(STORES)
+         else ", ".join(STORES[k] for k in keys))
+
+st.markdown(f"""
+<div class="holo-wordmark">
+  <div class="holo-eyebrow">The Travel Agency</div>
+  <h1 class="holo-title" data-text="Cerebral">Cerebral</h1>
+  <div class="holo-sub">Category analytics &middot; <b>{label}</b></div>
+</div>
+""", unsafe_allow_html=True)
 
 t_charts, t_insights, t_brands, t_redeem, t_projections, t_promo, t_gloss = st.tabs(
     ["Charts", "Insights", "Brands", "Redemptions", "Projections", "Promo Lab", "What the terms mean"])

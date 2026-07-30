@@ -1,0 +1,825 @@
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+/* ==========================================================================
+   Cerebral — stylesheet
+   ==========================================================================
+
+   Everything visual lives here. Edit freely and reload the page.
+
+   The :root block below is the single source of truth for colour: theme.py
+   parses these variables and hands them to Plotly, so changing --accent here
+   restyles both the page chrome and the charts.
+
+   IMPORTANT — the block below is machine-read.
+   _parse_root() regex-matches the FIRST declaration block in this file, so
+   never write that selector followed by an opening brace anywhere above it,
+   not even inside a comment: the comment wins and the palette parses empty.
+   The block must also contain no nested braces. One custom property per
+   line; trailing end-of-line remarks are fine. Keep these names — Python
+   reads them:
+       accent, accent-soft, warn, muted, bad, tint-band,
+       series-1..9, cat-<category>
+   Anything else here is CSS-only and safe to rename.
+
+   NOTE for humans: never write comment open or close markers inside a CSS
+   comment — a close marker ends the comment early, the leftover text becomes
+   invalid CSS, and the parser's error recovery can swallow the whole :root
+   block below. That exact bug previously killed every variable in this
+   file (black chart labels, missing card backgrounds, dead fonts).
+
+   What this file CANNOT reach: the base font family, page and sidebar
+   background, and Streamlit's own widget colours. Those come from
+   Streamlit's theming system — see .streamlit/config.toml.
+   ========================================================================== */
+
+:root {
+  /* Chart and accent colours. Read by theme.py for Plotly. */
+  --accent:        #0E7C66;   /* primary — bars, lines, positive states     */
+  --accent-soft:   #6FA697;   /* secondary series                           */
+  --warn:          #B4632B;   /* third series, cautionary states            */
+  --bad:           #B33218;   /* breaches, negative alerts                  */
+  --ink:           #241812;   /* headings, emphasised text                  */
+  --body:          #4A3B34;   /* explanatory paragraphs                     */
+  --muted:         #8A7A70;   /* captions, secondary lines, labels          */
+  --rule:          #CFC3B4;   /* hairlines, dotted underlines               */
+
+  /* Multi-series chart palette. Ordered by how well they separate — the
+     first four carry most charts, so they are the most distinct.
+     Deliberately unchanged from the previous theme: these were picked for
+     separation, and re-colouring them would mean re-learning every chart. */
+  --series-1:      #2F6F4F;   /* green   */
+  --series-2:      #B4632B;   /* rust    */
+  --series-3:      #3B6E8F;   /* blue    */
+  --series-4:      #8A5A9E;   /* violet  */
+  --series-5:      #A8913C;   /* ochre   */
+  --series-6:      #6E7F8D;   /* slate   */
+  --series-7:      #9E3B32;   /* red     */
+  --series-8:      #4C8C7A;   /* teal    */
+  --series-9:      #7A6A55;   /* taupe   */
+
+  /* Category colours, fixed by name. Plotly otherwise assigns colour by
+     order of appearance, so changing the store filter reorders categories
+     and silently reassigns every colour — the same category appears green
+     in one view and rust in the next. Bound by name, they never move.     */
+  --cat-flower:      #2F6F4F;
+  --cat-pre-roll:    #B4632B;
+  --cat-vape:        #3B6E8F;
+  --cat-edible:      #8A5A9E;
+  --cat-concentrate: #A8913C;
+  --cat-accessory:   #6E7F8D;
+  --cat-cbd:         #4C8C7A;
+  --cat-tincture:    #9E3B32;
+  --cat-topical:     #7A6A55;
+
+  /* Surfaces */
+  --tint:          rgba(14, 124, 102, .07);  /* how-to callout background   */
+  --tint-band:     rgba(14, 124, 102, .11);  /* control-limit band fill     */
+  --alert-bg:      rgba(30, 41, 37, .04);
+
+  /* Layout */
+  --max-width:     1500px;
+  --pad-top:       2.2rem;
+
+  /* --- everything below is CSS-only: not read by Python ------------------ */
+
+  /* White ground. Cards are white with a hairline and soft shadow; recessed
+     areas get the faintest green-grey so colour coding pops. */
+  --ground:        #FFFFFF;   /* page                                       */
+  --surface:       #FFFFFF;   /* raised cards                               */
+  --surface-2:     #F3F6F4;   /* recessed wells, table headers              */
+  --hairline:      rgba(30, 41, 37, .14);
+  --hairline-soft: rgba(30, 41, 37, .07);
+
+  /* Aqua is the interaction signal ONLY — focus, hover, active tab. It is
+     never a data fill: at full saturation it is unreadable on cream and
+     would out-shout every series colour on the page. */
+  --signal:        #00FFD4;
+  --signal-ink:    #067A66;
+  --signal-glow:   rgba(0, 255, 212, .28);
+  --signal-wash:   rgba(0, 255, 212, .10);
+
+  /* Neutral elevation — clean on white. */
+  --lift-1: 0 1px 2px rgba(24, 34, 30, .06), 0 1px 1px rgba(24, 34, 30, .05);
+  --lift-2: 0 2px 4px rgba(24, 34, 30, .07), 0 4px 10px rgba(24, 34, 30, .06);
+  --lift-3: 0 4px 8px rgba(24, 34, 30, .08), 0 12px 26px rgba(24, 34, 30, .09);
+  --lift-4: 0 8px 16px rgba(24, 34, 30, .10), 0 24px 48px rgba(24, 34, 30, .11);
+
+  /* Type */
+  --font-display: 'Bricolage Grotesque', 'Inter', system-ui, sans-serif;
+  --font-body:    'Inter', system-ui, -apple-system, sans-serif;
+  --font-data:    'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* Motion. Short by design — Streamlit re-runs the whole script on every
+     widget change, so any entrance animation replays each time you move a
+     slider. Anything longer than ~400ms stops reading as polish and starts
+     reading as lag. */
+  --ease:      cubic-bezier(.22, .61, .36, 1);
+  --ease-out:  cubic-bezier(.16, 1, .3, 1);
+  --dur-fast:  120ms;
+  --dur:       200ms;
+  --dur-enter: 260ms;
+  --radius:    10px;
+  --radius-sm: 7px;
+}
+
+/* --- page ---------------------------------------------------------------- */
+
+.block-container,
+[data-testid="stMainBlockContainer"] {
+  padding-top: var(--pad-top);
+  max-width: var(--max-width);
+}
+
+[data-testid="stAppViewContainer"] {
+  background: var(--ground);
+}
+
+[data-testid="stHeader"] {
+  /* Opaque, no blur. A transparent blurred header smears charts behind it
+     every time Streamlit redraws the page. */
+  background: var(--ground);
+}
+
+body, .stMarkdown, [data-testid="stAppViewContainer"] {
+  font-family: var(--font-body);
+  color: var(--body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, h5 {
+  font-family: var(--font-display);
+  color: var(--ink);
+  letter-spacing: -0.021em;
+  font-weight: 600;
+}
+
+h1 {
+  font-size: 2.35rem;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  margin-bottom: .1rem;
+}
+
+/* The wordmark gets one flourish and nothing else does. */
+.stApp h1:first-of-type:not(.holo-title) {
+  background: linear-gradient(103deg, var(--ink) 22%, var(--signal-ink) 78%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+h4 { font-size: 1.13rem; margin-top: .35rem; }
+h5 { font-size: .96rem; color: var(--body); letter-spacing: -.01em; }
+
+[data-testid="stCaptionContainer"] {
+  font-family: var(--font-data);
+  font-size: .74rem;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+hr, [data-testid="stDivider"] hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, var(--hairline), var(--hairline-soft) 72%, transparent);
+  margin: 1.5rem 0 1.1rem;
+}
+
+/* --- entrance ------------------------------------------------------------
+   Kept deliberately fast and shallow. This replays on every re-run, so it
+   has to read as a settle, not a performance. Six steps, then nothing. */
+
+@keyframes rise {
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Entrance animation intentionally NOT applied to page elements. Streamlit
+   re-runs the whole script on every widget change, so a global animation
+   replays constantly and reads as flicker, not polish. The rise keyframes
+   stay: dropdown popovers and the wordmark still use them, once each. */
+
+/* --- metrics: the departures board ---------------------------------------
+   The one place this dashboard spends its boldness. Tiers are First,
+   Business and Economy; the loyalty programme issues boarding passes. So
+   the headline numbers are set like a departures board: mono, tabular,
+   tight. The tabular figures are not decoration — they make columns of
+   numbers align, which is the single biggest legibility win on the page. */
+
+[data-testid="stMetric"] {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: .85rem 1rem .8rem;
+  box-shadow: var(--lift-1);
+  position: relative;
+  overflow: hidden;
+  transition: box-shadow var(--dur) var(--ease),
+              transform var(--dur) var(--ease),
+              border-color var(--dur) var(--ease);
+}
+
+/* Aqua rule across the top, drawn on hover only. */
+[data-testid="stMetric"]::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--signal), var(--accent));
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--dur) var(--ease-out);
+}
+
+[data-testid="stMetric"]:hover {
+  box-shadow: var(--lift-3);
+  transform: translateY(-2px);
+  border-color: rgba(14, 124, 102, .3);
+}
+
+[data-testid="stMetric"]:hover::after { transform: scaleX(1); }
+
+[data-testid="stMetricValue"] {
+  font-family: var(--font-data);
+  font-size: 1.62rem;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
+  line-height: 1.15;
+}
+
+[data-testid="stMetricLabel"] {
+  font-size: .69rem;
+  text-transform: uppercase;
+  letter-spacing: .085em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+[data-testid="stMetricLabel"] p { font-family: var(--font-body); }
+
+[data-testid="stMetricDelta"] {
+  font-family: var(--font-data);
+  font-size: .78rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- tabs ----------------------------------------------------------------
+   Not sticky: a sticky, blurred tab strip overlaps charts and axis labels
+     while scrolling on Streamlit's redraw cycle. Plain and solid instead. */
+
+.stTabs [data-baseweb="tab-list"] {
+  gap: .15rem;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--ground);
+  padding-bottom: 0;
+}
+
+.stTabs [data-baseweb="tab"] {
+  padding: .55rem 1.05rem;
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: .89rem;
+  color: var(--muted);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: color var(--dur) var(--ease),
+              background var(--dur) var(--ease);
+}
+
+.stTabs [data-baseweb="tab"]:hover {
+  color: var(--ink);
+  background: var(--signal-wash);
+}
+
+.stTabs [aria-selected="true"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.stTabs [data-baseweb="tab-highlight"] {
+  background: linear-gradient(90deg, var(--accent), var(--signal-ink));
+  height: 2.5px;
+  border-radius: 2px;
+  transition: all var(--dur) var(--ease-out);
+}
+
+.stTabs [data-baseweb="tab-border"] { background: transparent; }
+
+/* --- charts --------------------------------------------------------------
+   Plotly draws on a transparent canvas; the card around it is CSS. */
+
+.stPlotlyChart,
+[data-testid="stPlotlyChart"] {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  box-shadow: var(--lift-1);
+  transition: box-shadow var(--dur) var(--ease);
+  /* No padding, no overflow:hidden — padding shrinks the plotting area and
+     overflow clips legend labels and the toolbar at the card edges. Charts
+     get the full width of the card, always. */
+}
+
+.stPlotlyChart:hover,
+[data-testid="stPlotlyChart"]:hover { box-shadow: var(--lift-2); }
+
+/* Plotly's own hover card, restyled to match the page rather than the
+   default white box with a blue border. */
+.hoverlayer .hovertext path,
+.hoverlayer .hovertext rect {
+  fill: var(--surface) !important;
+  stroke: var(--hairline) !important;
+  filter: drop-shadow(0 6px 16px rgba(60, 40, 32, .16));
+}
+
+.hoverlayer .hovertext text,
+.hoverlayer .hovertext .name {
+  font-family: var(--font-data) !important;
+  fill: var(--ink) !important;
+}
+
+/* Chart controls always visible — hiding them until hover made zoom,
+   pan and "download as PNG" effectively unreachable. */
+.js-plotly-plot .modebar { opacity: .92; }
+
+.js-plotly-plot .modebar-btn path { fill: var(--muted); }
+.js-plotly-plot .modebar-btn:hover path { fill: var(--accent); }
+
+/* Plotly annotation labels — e.g. the volume callout on "Channel mix by
+   week". A dark label box with dark text renders as a solid black
+   rectangle; force a light label box so the dark text is readable. */
+.annotation .bg {
+  fill: var(--surface) !important;
+  fill-opacity: .95 !important;
+  stroke: var(--hairline) !important;
+}
+
+/* --- tables --------------------------------------------------------------
+   The brand scorecard and SKU drill-down are read column-by-column, so
+   numerals go tabular here too. */
+
+[data-testid="stDataFrame"],
+[data-testid="stTable"] {
+  border-radius: var(--radius);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--lift-1);
+  overflow: hidden;
+  transition: box-shadow var(--dur) var(--ease);
+}
+
+[data-testid="stDataFrame"]:hover { box-shadow: var(--lift-2); }
+
+[data-testid="stDataFrame"] [role="gridcell"],
+[data-testid="stDataFrame"] .cell {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-size: .82rem;
+}
+
+[data-testid="stDataFrame"] [role="columnheader"] {
+  background: var(--surface-2) !important;
+  font-family: var(--font-body);
+  font-size: .72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+}
+
+/* --- alerts -------------------------------------------------------------- */
+
+.alert {
+  border-left: 3px solid;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: .7rem 1rem;
+  margin: .5rem 0;
+  background: var(--alert-bg);
+  box-shadow: var(--lift-1);
+  font-size: .9rem;
+  line-height: 1.5;
+  color: var(--body);
+  animation: rise var(--dur-enter) var(--ease-out) both;
+}
+
+.alert b { color: var(--ink); }
+
+/* Strong, unmistakable colour coding: red = problem, amber = watch,
+   green = good news. Faint tints read as "no colour" on a white page. */
+.a-bad  { border-color: var(--bad);    background: rgba(179, 50, 24, .14); }
+.a-warn { border-color: var(--warn);   background: rgba(180, 99, 43, .16); }
+.a-ok   { border-color: var(--accent); background: rgba(14, 124, 102, .13); }
+
+/* Streamlit's own st.info / st.warning boxes, brought into line. */
+[data-testid="stAlert"] {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--lift-1);
+  font-size: .88rem;
+}
+
+/* --- explanatory text ---------------------------------------------------- */
+
+.note {
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.5;
+}
+
+/* "How to read this" callouts */
+.howto {
+  background:
+    linear-gradient(180deg, var(--tint), rgba(14, 124, 102, .03));
+  border: 1px solid rgba(14, 124, 102, .16);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: .85rem 1.1rem;
+  margin: .45rem 0 1.15rem 0;
+  font-size: .87rem;
+  line-height: 1.58;
+  color: var(--body);
+  box-shadow: var(--lift-1);
+}
+
+.howto b {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-weight: 600;
+}
+
+.howto i { color: var(--signal-ink); font-style: italic; }
+
+/* --- controls ------------------------------------------------------------ */
+
+[data-baseweb="select"] > div {
+  border-radius: var(--radius-sm) !important;
+  border-color: var(--hairline) !important;
+  background: var(--surface) !important;
+  box-shadow: var(--lift-1);
+  transition: border-color var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
+}
+
+[data-baseweb="select"] > div:hover {
+  border-color: var(--accent) !important;
+  box-shadow: var(--lift-2);
+}
+
+[data-baseweb="select"] > div:focus-within {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--signal-glow);
+}
+
+/* Dropdown menus, tooltips and every other floating layer. These are the
+   "sloppy overlays": unstyled, they render as a hard white rectangle with a
+   grey border and no elevation, sitting flat on a cream page. */
+[data-baseweb="popover"] [role="listbox"],
+[data-baseweb="popover"] > div,
+[data-baseweb="menu"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: var(--lift-4) !important;
+  overflow: hidden;
+  animation: rise 140ms var(--ease-out) both;
+}
+
+[data-baseweb="menu"] li {
+  font-family: var(--font-body);
+  font-size: .87rem;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+[data-baseweb="menu"] li:hover { background: var(--signal-wash) !important; }
+
+[data-baseweb="tooltip"] {
+  background: var(--ink) !important;
+  color: var(--ground) !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: var(--lift-3) !important;
+  font-family: var(--font-body) !important;
+  font-size: .8rem !important;
+  line-height: 1.45 !important;
+  padding: .5rem .7rem !important;
+  max-width: 320px;
+  border: none !important;
+}
+
+[data-baseweb="tooltip"] div { background: transparent !important; }
+
+/* Sliders */
+[data-testid="stSlider"] [role="slider"] {
+  box-shadow: var(--lift-2), 0 0 0 0 var(--signal-glow);
+  transition: box-shadow var(--dur) var(--ease),
+              transform var(--dur) var(--ease);
+}
+
+[data-testid="stSlider"] [role="slider"]:hover { transform: scale(1.12); }
+
+[data-testid="stSlider"] [role="slider"]:focus-visible {
+  box-shadow: var(--lift-2), 0 0 0 5px var(--signal-glow);
+  outline: none;
+}
+
+/* Buttons */
+.stButton > button,
+[data-testid="stDownloadButton"] > button {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: .87rem;
+  box-shadow: var(--lift-1);
+  transition: transform var(--dur-fast) var(--ease),
+              box-shadow var(--dur) var(--ease),
+              border-color var(--dur) var(--ease),
+              background var(--dur) var(--ease);
+}
+
+.stButton > button:hover,
+[data-testid="stDownloadButton"] > button:hover {
+  border-color: var(--accent);
+  background: var(--tint);
+  box-shadow: var(--lift-2);
+  transform: translateY(-1px);
+}
+
+.stButton > button:active,
+[data-testid="stDownloadButton"] > button:active {
+  transform: translateY(0);
+  box-shadow: var(--lift-1);
+}
+
+/* Text inputs — the password gate is the first thing anyone sees. */
+[data-testid="stTextInput"] input {
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  transition: box-shadow var(--dur) var(--ease);
+}
+
+[data-testid="stTextInput"] input:focus {
+  box-shadow: 0 0 0 3px var(--signal-glow);
+  border-color: var(--accent) !important;
+}
+
+/* Expanders */
+[data-testid="stExpander"] {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--lift-1);
+  overflow: hidden;
+  transition: box-shadow var(--dur) var(--ease);
+}
+
+[data-testid="stExpander"]:hover { box-shadow: var(--lift-2); }
+
+[data-testid="stExpander"] summary { font-family: var(--font-body); font-weight: 500; }
+
+/* --- glossary hover markers ---------------------------------------------- */
+
+.gloss {
+  border-bottom: 1px dotted var(--rule);
+  cursor: help;
+  transition: color var(--dur) var(--ease),
+              border-color var(--dur) var(--ease);
+}
+
+.gloss:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  border-bottom-style: solid;
+}
+
+.gloss-mark {
+  font-size: .62em;
+  vertical-align: super;
+  color: var(--muted);
+  margin-left: 1px;
+  font-weight: 600;
+  font-family: var(--font-data);
+}
+
+/* --- glossary entries ---------------------------------------------------- */
+
+.gloss-entry {
+  margin: .1rem 0 .9rem 0;
+  padding-left: .85rem;
+  border-left: 2px solid var(--hairline-soft);
+  transition: border-color var(--dur) var(--ease);
+}
+
+.gloss-entry:hover { border-left-color: var(--accent); }
+
+.gloss-entry b {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-weight: 600;
+}
+
+.gloss-body {
+  color: var(--body);
+  font-size: .9rem;
+  line-height: 1.58;
+}
+
+/* --- title wordmark: holographic foil ------------------------------------
+   The effect is on the word, not a card behind it. That constraint drives
+   every choice below.
+
+   Three layers, all clipped to the glyphs with background-clip: text:
+
+     base       rainbow gradient, drifting slowly       (always on)
+     ::before   glitter flecks                          (hover)
+     ::after    specular sweep                          (hover)
+
+   Why the gradient stops stay dark: the sparkle layer is clipped to the
+   text, so flecks only ever appear INSIDE the letterforms. A white fleck
+   needs a dark stroke to sit on. Lighten these stops and the sparkle
+   disappears and the word stops being readable on cream — both at once.  */
+
+.holo-wordmark {
+  margin: .1rem 0 1.4rem;
+  animation: rise 420ms var(--ease-out) both;
+}
+
+.holo-eyebrow {
+  font-family: var(--font-data);
+  font-size: .64rem;
+  font-weight: 500;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: .25rem;
+}
+
+/* Beats .stApp h1:first-of-type, which sets its own gradient fill. */
+h1.holo-title {
+  position: relative;
+  display: inline-block;
+  margin: 0;
+  padding: 0 .06em 0 0;          /* room for the last glyph's overhang */
+  font-family: var(--font-display);
+  font-size: 3.05rem;
+  font-weight: 700;
+  letter-spacing: -0.045em;
+  line-height: 1.04;
+  cursor: default;
+
+  background: linear-gradient(101deg,
+    #0E7C66 0%,   #17948C 11%,  #2A7FA8 22%,  #4F5FA8 33%,
+    #7A44A0 44%,  #A8348A 55%,  #B8455A 66%,  #A86A2E 77%,
+    #7E8A34 88%,  #0E7C66 100%);
+  background-size: 320% 100%;
+  -webkit-background-clip: text;
+          background-clip: text;
+  -webkit-text-fill-color: transparent;
+          color: transparent;
+  animation: holo-shift 26s linear infinite;
+  transition: filter 320ms var(--ease), transform 320ms var(--ease-out);
+}
+
+/* glitter — only inside the glyphs */
+h1.holo-title::before {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle at 20% 30%, #FFFFFF 0 1.1px, transparent 2.1px),
+    radial-gradient(circle at 68% 66%, #C9FFF2 0 .9px, transparent 1.9px),
+    radial-gradient(circle at 88% 18%, #00FFD4 0 1.2px, transparent 2.3px),
+    radial-gradient(circle at 40% 84%, #FFFFFF 0 .8px, transparent 1.7px),
+    radial-gradient(circle at 12% 62%, #FFF4C2 0 1px,  transparent 2px);
+  background-size: 37px 31px, 53px 44px, 67px 58px, 29px 37px, 46px 51px;
+  -webkit-background-clip: text;
+          background-clip: text;
+  -webkit-text-fill-color: transparent;
+          color: transparent;
+  opacity: 0;
+  transition: opacity 260ms var(--ease);
+}
+
+/* specular sweep — the glimmer */
+h1.holo-title::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(103deg,
+    transparent 38%,
+    rgba(255, 255, 255, .30) 45%,
+    rgba(255, 255, 255, .92) 50%,
+    rgba(255, 255, 255, .30) 55%,
+    transparent 62%);
+  background-size: 300% 100%;
+  background-position: 160% 0;
+  -webkit-background-clip: text;
+          background-clip: text;
+  -webkit-text-fill-color: transparent;
+          color: transparent;
+  opacity: 0;
+}
+
+/* hover — foil accelerates, flecks light up, glimmer sweeps across */
+h1.holo-title:hover {
+  animation-duration: 4.5s;
+  filter: drop-shadow(0 0 16px rgba(0, 255, 212, .45));
+  transform: translateY(-1px);
+}
+
+h1.holo-title:hover::before {
+  opacity: 1;
+  animation: holo-twinkle 1.5s steps(1, end) infinite;
+}
+
+h1.holo-title:hover::after {
+  opacity: 1;
+  animation: holo-glimmer 1.9s var(--ease) infinite;
+}
+
+.holo-sub {
+  font-family: var(--font-data);
+  font-size: .73rem;
+  letter-spacing: .05em;
+  color: var(--muted);
+  margin-top: .5rem;
+}
+
+.holo-sub b { color: var(--accent); font-weight: 600; }
+
+@keyframes holo-shift {
+  from { background-position:   0% 50%; }
+  to   { background-position: 320% 50%; }
+}
+
+/* steps(), not a smooth fade — real glitter pops on and off, it does not
+   breathe. Each step jumps the tile offsets so different flecks catch. */
+@keyframes holo-twinkle {
+  0%   { background-position: 0 0,        0 0,        0 0,      0 0,      0 0; }
+  25%  { background-position: 13px 7px,  -9px 11px,   6px -8px, 11px 4px, -7px 9px; }
+  50%  { background-position: -8px 12px,  15px -6px, -11px 9px, -5px 13px, 10px -4px; }
+  75%  { background-position: 6px -9px,  -12px 5px,   9px 12px, 8px -7px, -13px 6px; }
+  100% { background-position: 0 0,        0 0,        0 0,      0 0,      0 0; }
+}
+
+@keyframes holo-glimmer {
+  0%       { background-position: 160% 0; }
+  55%, 100% { background-position: -60% 0; }
+}
+
+@media (max-width: 820px) {
+  h1.holo-title { font-size: 2.15rem; }
+}
+
+/* --- scrollbar ----------------------------------------------------------- */
+
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 99px;
+  border: 3px solid var(--ground);
+  transition: background var(--dur) var(--ease);
+}
+
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* --- quality floor ------------------------------------------------------- */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (max-width: 820px) {
+  :root { --pad-top: 1.2rem; }
+  h1 { font-size: 1.85rem; }
+  [data-testid="stMetricValue"] { font-size: 1.32rem; }
+  .stTabs [data-baseweb="tab"] { padding: .5rem .7rem; font-size: .82rem; }
+  .stTabs [data-baseweb="tab-list"] { position: static; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 1ms !important;
+  }
+  [data-testid="stMetric"]:hover,
+  .stButton > button:hover { transform: none; }
+  /* The wordmark keeps its foil, it just holds one fixed refraction rather
+     than drifting, and the hover glimmer does not sweep. */
+  h1.holo-title,
+  h1.holo-title:hover { animation: none; background-position: 22% 50%; }
+  h1.holo-title:hover::after { opacity: 0; }
+}

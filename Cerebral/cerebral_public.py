@@ -1981,10 +1981,15 @@ with t_redeem:
         # --- Brand → SKU redemption drill-down -------------------------
         st.divider()
         st.markdown("##### Which SKUs were redeemed, by brand")
-        st.markdown('<p class="note">Pick a brand to see every redeemed offer '
-                    'tied to its products. Offers are named after the product '
-                    'they discount, so this is the SKU-level view of where '
-                    'the redemption dollars went.</p>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="howto"><b>How to read this.</b> Pick a brand — or a '
+            'promo family like Secret Drops — to see what was actually rung '
+            'up for its redemptions. The same offer appears under different '
+            'names over time ("Loyalty …", the "Loytaly …" typo, "Travel '
+            'Club …"), so rows group by the product, not the offer name. '
+            'Where a menu item was swapped at the register, the SKU shown is '
+            'the one the customer actually received.</div>',
+            unsafe_allow_html=True)
 
         brand_opts = sorted(attributed.brand.dropna().unique())
         sel_brand = st.selectbox("Select a brand", brand_opts,
@@ -2058,11 +2063,16 @@ with t_redeem:
         st.divider()
         st.markdown("##### Chosen instead — off-menu picks")
         st.markdown(
-            '<p class="note">When a redemption menu item is out of stock, '
-            'staff let the customer pick something of similar value. These '
-            'are the products redeemers actually walked out with, ranked by '
-            'redemption dollars — a ready-made shortlist of candidates for '
-            'the menu.</p>', unsafe_allow_html=True)
+            '<div class="howto"><b>How to read this.</b> When a redemption '
+            'menu item is out of stock, staff let the customer pick something '
+            'of similar value instead. Those swaps ring up at $0.01, or '
+            'discounted down to just the tax — that price pattern is how '
+            'they are identified here. Ranked by redemption dollars, this is '
+            'a ready-made shortlist of candidates for the menu. One caveat: '
+            'if a customer also bought something genuinely cheap, that can '
+            'occasionally be picked up as the swap — sanity-check an '
+            'unfamiliar row before acting on it.</div>',
+            unsafe_allow_html=True)
         subs = q(f"""
             SELECT product AS sku, category,
                    SUM(redemptions)             AS redemptions,
@@ -2091,6 +2101,11 @@ with t_redeem:
 
         st.divider()
         st.markdown("##### Spend against basket size")
+        st.markdown('<p class="note">Each point is a brand or promo family. '
+                    'Right means redeemed often; up means customers spend '
+                    'big when they redeem. The upper right is where the '
+                    'programme is earning its keep.</p>',
+                    unsafe_allow_html=True)
         fig = px.scatter(a, x="redemptions", y="avg_basket", size="spend",
                          color="category", hover_name="brand", size_max=38,
                          color_discrete_map={c: cat_color(c)

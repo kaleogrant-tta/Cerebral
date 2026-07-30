@@ -319,9 +319,11 @@ def gate() -> bool:
 @st.cache_resource(ttl=CACHE_MINUTES * 60)
 def load_db() -> str | None:
     """Local file if present, otherwise pull the published copy from Drive."""
-    # Look next to the script first, then the launch directory, so the app
-    # finds its data no matter which folder streamlit was started from.
-    for local in (Path(__file__).resolve().parent / DASH_FILE, Path(DASH_FILE)):
+    # Look next to the script, then one level up (repo root when the app
+    # lives in a subfolder, as on Streamlit Cloud), then the launch
+    # directory — so the bundled data file always wins over Drive.
+    here = Path(__file__).resolve().parent
+    for local in (here / DASH_FILE, here.parent / DASH_FILE, Path(DASH_FILE)):
         if local.exists():
             return str(local)
 
@@ -341,7 +343,8 @@ def load_db() -> str | None:
 
     res = svc.files().list(
         q=f"'{folder}' in parents and name = '{DASH_FILE}' and trashed = false",
-        fields="files(id,name,size)").execute().get("files", [])
+        orderBy="modifiedTime desc",
+        fields="files(id,name,size,modifiedTime)").execute().get("files", [])
     if not res:
         return None
 

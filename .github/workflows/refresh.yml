@@ -40,7 +40,16 @@ jobs:
           TTA_SHEET_ID:      ${{ secrets.TTA_SHEET_ID }}
         run: python tta_refresh.py
 
+      # Rebuild and upload the dashboard data file from the JUST-UPDATED
+      # database, so the online dashboard (including the Takeover GWP
+      # reconciliation) refreshes itself after every run — no local
+      # publish step needed to watch a promotion as it runs.
+      - name: Publish dashboard file
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TTA_DRIVE_STATE:   ${{ secrets.TTA_DRIVE_STATE }}
+        run: python publish.py --db /tmp/tta_work/tta.duckdb --upload
+
       - name: Note failure
         if: failure()
         run: echo "::error::Refresh failed. Drive state unchanged — safe to re-run from the Actions tab."
-

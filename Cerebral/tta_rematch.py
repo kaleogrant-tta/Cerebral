@@ -1,29 +1,40 @@
-"""Re-match redemptions that are still unattributed (matched_brand IS NULL).
+"""Re-match redemptions against the current matcher.
 
-Why this exists: the July 2026 backfill attributed offers with the matcher as
-it was then. Since, three things surfaced:
+Two modes:
 
-  1. Alpine misspells "Loyalty" as "Loytaly" (Aug-Sep 2025), and plurals
-     differ between offer names and POS product names ("Doobies" / "Doobie").
-     Both are now handled in tta_etl._tokens.
-  2. Substituted redemptions ("Travel Club 200 Points Substitution", and
-     named offers whose menu item was out of stock) put a DIFFERENT product
-     in the basket than the offer names. The substitute rings at $0.01, so
-     the penny line identifies what the customer actually received.
-  3. A "TEST GWP TEST" campaign left test rows in the table. They are
-     archived to CSV and removed from fact_redemption.
+  default    Re-runs attribution ONLY for rows still unmatched
+             (matched_brand IS NULL). Safe top-up after incremental loads.
 
-What it does: re-runs attribution ONLY for rows still unmatched (attributed
-rows are never touched), first with the improved matcher, then with the
-penny-line fallback (method = "substituted-line"). Safe to re-run.
+  --full     Re-runs attribution for EVERY row. Needed after a matcher
+             upgrade, because rows matched WRONG by the old matcher (an
+             eighth credited against an ounce offer, a .5g cart against a
+             1g offer) are not null — only a full pass repairs them. Rows
+             that no longer match are cleared back to unmatched rather than
+             left on a stale guess.
+
+Both modes fall back to the penny line (method = "substituted-line") when
+the matcher finds nothing: substituted redemptions ("Travel Club 200 Points
+Substitution", and named offers whose menu item was out of stock) put a
+DIFFERENT product in the basket than the offer names, and the substitute
+rings at $0.01 or is discounted to roughly its tax value.
+
+  --pull     Download the latest tta.duckdb from the Drive state folder
+             before running. Always use this — a stale local copy followed
+             by publish --upload would roll the dashboard backwards.
+
+A "TEST GWP TEST" campaign left test rows in the table. They are archived
+to CSV and removed from fact_redemption (in --full mode, all of them, not
+just unmatched ones).
 
 Usage:
-    python tta_rematch.py --db C:\\Users\\User\\cerebral\\tta.duckdb
+    python tta_rematch.py --pull --full
+    python tta_rematch.py --db C:\path\to\tta.duckdb
 
-Afterwards, rebuild + republish the dashboard (publish.py --upload).
+Afterwards, rebuild + republish the dashboard:  python publish.py --upload
 """
 
 import argparse
+import os
 import re
 import shutil
 from pathlib import Path
@@ -60,12 +71,40 @@ def pick_substitute(lines: pd.DataFrame, redeem_amt: float):
     return None
 
 
+def pull_latest(db: Path) -> bool:
+    """Download the freshest database from the Drive state folder."""
+    from tta_config import DRIVE
+    from tta_drive import DriveClient
+    from tta_env import bootstrap
+    bootstrap()
+    state_id = os.environ.get(DRIVE["state_folder_env"])
+    if not state_id:
+        print(f"ERROR: {DRIVE['state_folder_env']} is not set")
+        return False
+    drive = DriveClient()
+    existing = drive.find(state_id, DRIVE["db_filename"])
+    if not existing:
+        print("ERROR: no database in the Drive state folder")
+        return False
+    drive.download(existing["id"], db)
+    print(f"  pulled latest {DRIVE['db_filename']} from Drive "
+          f"({db.stat().st_size/1e6:.1f} MB)")
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="tta.duckdb")
+    ap.add_argument("--full", action="store_true",
+                    help="re-match EVERY row, repairing wrong historical "
+                         "matches, not just filling unmatched ones")
+    ap.add_argument("--pull", action="store_true",
+                    help="download the latest database from Drive first")
     args = ap.parse_args()
 
     db = Path(args.db)
+    if args.pull and not pull_latest(db):
+        return 1
     if not db.exists():
         print(f"ERROR: {db} not found")
         return 1
@@ -76,12 +115,14 @@ def main() -> int:
         print(f"  backup written: {backup.name}")
 
     con = duckdb.connect(str(db))
-    red = con.execute("""
+    where = "" if args.full else "WHERE matched_brand IS NULL"
+    red = con.execute(f"""
         SELECT basket_id, offer_id, offer_name, redeem_amt
         FROM fact_redemption
-        WHERE matched_brand IS NULL
+        {where}
     """).df()
-    print(f"  unmatched redemptions to re-examine: {len(red):,} "
+    scope = "ALL redemptions" if args.full else "unmatched redemptions"
+    print(f"  re-examining {scope}: {len(red):,} "
           f"(${red['redeem_amt'].sum():,.0f})")
     if red.empty:
         print("Nothing to do.")
@@ -89,18 +130,23 @@ def main() -> int:
         return 0
 
     # --- 1. archive + remove TEST rows ------------------------------------
-    is_test = red["offer_name"].astype(str) == TEST_OFFER
-    if is_test.any():
+    if args.full:
+        test_rows = con.execute(
+            "SELECT * FROM fact_redemption WHERE offer_name = ?",
+            [TEST_OFFER]).df()
+    else:
+        test_rows = red[red["offer_name"].astype(str) == TEST_OFFER]
+    if len(test_rows):
         out_csv = db.with_name("test_gwp_rows_archived.csv")
-        red[is_test].to_csv(out_csv, index=False)
-        con.execute(
-            "DELETE FROM fact_redemption WHERE matched_brand IS NULL "
-            "AND offer_name = ?", [TEST_OFFER])
-        print(f"  archived + removed {int(is_test.sum()):,} '{TEST_OFFER}' "
+        test_rows.to_csv(out_csv, index=False)
+        con.execute("DELETE FROM fact_redemption WHERE offer_name = ?"
+                    + ("" if args.full else " AND matched_brand IS NULL"),
+                    [TEST_OFFER])
+        print(f"  archived + removed {len(test_rows):,} '{TEST_OFFER}' "
               f"rows -> {out_csv.name}")
-    red = red[~is_test]
+    red = red[red["offer_name"].astype(str) != TEST_OFFER]
 
-    # --- 2. re-match with the improved matcher + penny fallback -----------
+    # --- 2. re-match with the current matcher + penny fallback ------------
     line = con.execute(
         "SELECT basket_id, brand, category, product, net_sales "
         "FROM fact_line").df()
@@ -109,9 +155,11 @@ def main() -> int:
     by_basket = {bid: g for bid, g in line.groupby("basket_id")}
 
     updates = []
+    skipped = 0
     for r in red.itertuples(index=False):
         lines = by_basket.get(r.basket_id)
         if lines is None or lines.empty:
+            skipped += 1                      # basket not in fact_line; leave as-is
             continue
         brand, catg, prod, method = attribute_offer(
             r.offer_name, lines[["brand", "category", "product"]], catalogue)
@@ -128,19 +176,24 @@ def main() -> int:
             ln = lines.iloc[0]
             brand, catg, prod = ln["brand"], ln["category"], ln["product"]
             method = "substituted-line"
-        if method != "unmatched" and pd.notna(brand):
-            updates.append({
-                "basket_id": r.basket_id, "offer_id": r.offer_id,
-                "offer_name": r.offer_name, "redeem_amt": r.redeem_amt,
-                "brand": brand, "category": catg, "product": prod,
-                "method": method,
-            })
+        if method != "unmatched" and pd.isna(brand):
+            method = "unmatched"
+        updates.append({
+            "basket_id": r.basket_id, "offer_id": r.offer_id,
+            "offer_name": r.offer_name, "redeem_amt": r.redeem_amt,
+            "brand": brand if method != "unmatched" else None,
+            "category": catg if method != "unmatched" else None,
+            "product": prod if method != "unmatched" else None,
+            "method": method,
+        })
 
     # --- 3. write back -----------------------------------------------------
     if updates:
         stage = pd.DataFrame(updates)
         con.register("stage_fix", stage)
-        con.execute("""
+        null_guard = ("" if args.full
+                      else "AND fact_redemption.matched_brand IS NULL")
+        con.execute(f"""
             UPDATE fact_redemption
             SET matched_brand    = s.brand,
                 matched_category = s.category,
@@ -152,18 +205,18 @@ def main() -> int:
               AND fact_redemption.offer_name = s.offer_name
               AND ROUND(fact_redemption.redeem_amt, 2)
                   = ROUND(s.redeem_amt, 2)
-              AND fact_redemption.matched_brand IS NULL
+              {null_guard}
         """)
 
-    recovered = sum(u["redeem_amt"] for u in updates)
+    fixed = pd.DataFrame(updates) if updates else pd.DataFrame()
     got = con.execute(
         "SELECT COUNT(*), COALESCE(SUM(redeem_amt),0) FROM fact_redemption "
         "WHERE matched_brand IS NULL").fetchone()
-    print(f"\n  newly attributed: {len(updates):,} "
-          f"(${recovered:,.0f} recovered)")
-    if updates:
-        fixed = pd.DataFrame(updates)
+    if skipped:
+        print(f"  left untouched (basket missing from fact_line): {skipped:,}")
+    if len(fixed):
         bym = fixed.groupby("method")["redeem_amt"].agg(["count", "sum"])
+        print(f"\n  results by method:")
         print(bym.to_string())
     print(f"\n  still unmatched: {got[0]:,} (${got[1]:,.0f}) — "
           "this is what the dashboard note will now report")
@@ -193,7 +246,7 @@ def main() -> int:
             print(basket.to_string(index=False))
 
     con.close()
-    print("\nDone. Rebuild the dashboard with:  python Cerebral\\publish.py --upload")
+    print("\nDone. Rebuild the dashboard with:  python publish.py --upload")
     return 0
 
 

@@ -147,6 +147,41 @@ def _tokens(text: str) -> set[str]:
     return out
 
 
+_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(g|gr|gram|grams|oz|ml)\b", re.I)
+_PACK_RE = re.compile(r"(\d+)\s*(?:pk|pack|ct|count)\b", re.I)
+
+
+def _sizes(text) -> set:
+    """Size mentions in an offer or product name, normalised for comparison.
+
+    The token matcher cannot see sizes: "1g" and ".5g" die on the two-letter
+    filter and "3.5g" shatters into two fragments. That let a .5g cart match
+    a 1g offer, and an eighth match an ounce offer. Sizes are extracted
+    separately here and compared as (unit, value) pairs: ounces become 28g,
+    "Single" counts as a 1-pack, and fluid ounces (lighter fluid) are
+    excluded — they are volume, not weight, and never the discounted thing.
+    """
+    if not isinstance(text, str):
+        return set()
+    t = re.sub(r"fl\.?\s*oz\.?", " ", text.lower())
+    out = set()
+    if re.search(r"\b(ounce|ounces|oz)\b", t):
+        out.add(("g", 28.0))
+    for val, unit in _SIZE_RE.findall(t):
+        v = float(val)
+        unit = unit.lower()
+        if unit in ("gr", "gram", "grams"):
+            unit = "g"
+        if unit == "oz":
+            v, unit = v * 28.0, "g"
+        out.add((unit, round(v, 2)))
+    for n in _PACK_RE.findall(t):
+        out.add(("pk", float(n)))
+    if re.search(r"\bsingle\b", t):
+        out.add(("pk", 1.0))
+    return out
+
+
 def attribute_offer(offer: str, lines: pd.DataFrame,
                     known_brands: dict | None = None) -> tuple:
     """Work out which line of a basket an Alpine offer was spent on.
@@ -167,6 +202,8 @@ def attribute_offer(offer: str, lines: pd.DataFrame,
     otok = _tokens(offer)
     if not otok or lines.empty:
         return (None, None, None, "unmatched")
+
+    osizes = _sizes(offer)
 
     # If the offer names a brand from the catalogue, only that brand's lines
     # can match. Without this, "Wana Gummies" attributes to a Camino gummy in
@@ -192,6 +229,15 @@ def attribute_offer(offer: str, lines: pd.DataFrame,
         ptok = _tokens(str(ln.get("product") or ""))
 
         brand_hit = bool(btok) and btok <= otok          # every brand word present
+        hit_via_product = False
+        if not brand_hit and named_tok_sets:
+            # The named brand can live inside the PRODUCT name under a
+            # manufacturer brand: "Grassroots Flower Dark Heart Genetics
+            # Triple Stack" is, for offer purposes, a Dark Heart product.
+            # That hit IS product-level evidence — it identifies the line,
+            # not just the brand.
+            hit_via_product = any(nts <= ptok for nts in named_tok_sets)
+            brand_hit = hit_via_product
         # The guard rejects lines from other brands — but a brand LINE can
         # live inside the product name under a manufacturer brand ("Dark
         # Heart Genetics …" sold as brand "Grassroots"), so the product's
@@ -199,15 +245,36 @@ def attribute_offer(offer: str, lines: pd.DataFrame,
         if named_tok_sets and not any((btok | ptok) & nts
                                       for nts in named_tok_sets):
             continue                                     # offer names someone else
-        prod_overlap = len(ptok & otok)
-        prod_score = prod_overlap / max(len(ptok), 1)
+
+        # A line whose size contradicts the offer's size cannot be the
+        # discounted product: an eighth did not come from an ounce offer,
+        # a .5g cart did not come from a 1g offer. Only enforced when BOTH
+        # sides state a size — a silent side means "unknown", never conflict.
+        lsizes = _sizes(str(ln.get("product") or ""))
+        if osizes and lsizes and not (osizes & lsizes):
+            continue                                     # wrong size for this offer
+        size_hit = bool(osizes & lsizes)
+
+        # Product overlap is judged on NON-BRAND words only. Brand tokens sit
+        # inside most product names ("Dark Heart Flower Blackened Blue"), so
+        # counting them let any same-brand line claim a product match — two
+        # Dark Heart eighths in one basket would tie, and the first row won.
+        # Strip the brand's words from both sides; what remains must overlap
+        # on its own merits ("ounce", "briq", "chocolate").
+        named_in_ptok = frozenset().union(
+            *(nts for nts in named_tok_sets if nts <= ptok)
+        ) if named_tok_sets else frozenset()
+        shared = btok | named_in_ptok
+        ptok_nb = ptok - shared
+        prod_overlap = len(ptok_nb & (otok - shared))
+        prod_score = prod_overlap / max(len(ptok_nb), 1)
 
         if otok <= ptok:
             # Every meaningful offer word appears in the product name
             # ("Ruby Doobies 2pk" inside "Ruby Doobies Pre Roll Multi Pack
             # Blue Dream 2pk") — the strongest signal there is.
             score, method = 3.0 + prod_score, "brand+product"
-        elif brand_hit and prod_overlap:
+        elif brand_hit and (prod_overlap or hit_via_product):
             score, method = 2.0 + prod_score, "brand+product"
         elif brand_hit:
             score, method = 1.5, "brand"
@@ -215,6 +282,9 @@ def attribute_offer(offer: str, lines: pd.DataFrame,
             score, method = 1.0 + prod_score, "product"
         else:
             continue
+
+        if size_hit:
+            score += 0.5      # right product AND right size beats right brand alone
 
         if score > best_score:
             best, best_score, best_method = ln, score, method

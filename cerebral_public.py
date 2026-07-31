@@ -524,6 +524,30 @@ def offer_brand_vocabulary() -> tuple:
     names = {n for n in names if "substitution" not in n.lower()}
     return tuple(sorted(names, key=len, reverse=True))
 
+# Product names abbreviate these brands; the catalogue uses the full names.
+# Key: abbreviation as it appears in a name. Value: words that identify the
+# full brand in the vocabulary.
+_BRAND_ALIASES = {
+    "cannacure": ("canna", "cure"),       # Canna Cure Farms
+    "rvg": ("ravens", "view"),            # Ravens View Genetics
+    "hb": ("harney", "brothers"),         # Harney Brothers Cannabis
+}
+
+
+def _brand_alias(text_lower: str, vocabulary):
+    """Resolve a brand abbreviation to its full catalogue name."""
+    for abbr, words in _BRAND_ALIASES.items():
+        if re.search(r"(?<![A-Za-z0-9])" + re.escape(abbr)
+                     + r"(?![A-Za-z0-9])", text_lower):
+            for b in vocabulary:
+                bl = b.lower()
+                if all(w in bl for w in words):
+                    return b
+            # Brand absent from the vocabulary — still better than nothing.
+            return " ".join(w.capitalize() for w in words)
+    return None
+
+
 
 def _brand_in_offer(brand: str, offer_lower: str) -> bool:
     """Whole-name match, tolerant of trailing punctuation like 'Find.'."""
@@ -558,6 +582,12 @@ def resolve_offer_brand(offer_name, etl_brand, vocabulary) -> tuple:
             first = b.split()[0].lower().rstrip(". ")
             if len(first) >= 4 and _brand_in_offer(first, s):
                 return b, "name"
+    alias = _brand_alias(s, vocabulary)
+    if alias:
+        return alias, "name"
+    alias = _brand_alias(s, vocabulary)
+    if alias:
+        return alias, "name"
     if "tta" in s and any(w in s for w in _TTA_MERCH_WORDS):
         return "The Travel Agency", "merch"
     if (isinstance(etl_brand, str) and etl_brand.strip()
@@ -584,6 +614,12 @@ def _product_brand(product, vocabulary) -> str | None:
             first = b.split()[0].lower().rstrip(". ")
             if len(first) >= 4 and _brand_in_offer(first, s):
                 return b
+    alias = _brand_alias(s, vocabulary)
+    if alias:
+        return alias
+    alias = _brand_alias(s, vocabulary)
+    if alias:
+        return alias
     if "tta" in s and any(w in s for w in _TTA_MERCH_WORDS):
         return "The Travel Agency"
     return None

@@ -445,6 +445,29 @@ def table_exists(name: str) -> bool:
         con.close()
 
 
+def has_col(table: str, col: str) -> bool:
+    """True when the published table exists AND carries the column.
+
+    The published file and the app deploy on separate clocks: a column added
+    to publish.py only appears after the next refresh, while the app goes
+    live on push. A missing column must hide its section, not crash it —
+    q() only swallows missing-TABLE errors, not missing-column ones.
+    """
+    if not table_exists(table):
+        return False
+    path = load_db()
+    if not path:
+        return False
+    con = duckdb.connect(path, read_only=True)
+    try:
+        cols = con.execute(f"SELECT * FROM {table} LIMIT 0").df().columns
+        return col in cols
+    except Exception:
+        return False
+    finally:
+        con.close()
+
+
 def pct_change(late, early):
     """Percentage change, returning float NaN where there is no baseline.
 
@@ -1837,6 +1860,73 @@ with t_redeem:
                             'sidebar to compare redemption performance.</p>',
                             unsafe_allow_html=True)
 
+        # --- Redemptions by method (channel) ------------------------------
+        if has_col("dash_redemption_day", "channel"):
+            red_ch = q(f"""
+                SELECT channel,
+                       SUM(redemptions)  AS redemptions,
+                       SUM(redeem_value) AS redeem_value
+                FROM dash_redemption_day {wf}
+                GROUP BY 1 ORDER BY redeem_value DESC
+            """)
+            if not red_ch.empty and red_ch.redemptions.sum() > 0:
+                st.divider()
+                st.markdown("#### Redemptions by method")
+                st.markdown(
+                    '<div class="howto"><b>How to read this.</b> Method is '
+                    '<b>how the order was taken</b> — rung at an '
+                    '<b>In-Store</b> register, placed on <b>Non-Stop</b>, or '
+                    'sent out for <b>Delivery</b> — mapped from the register '
+                    'each redemption went through. Use it to see where '
+                    'loyalty value is actually being claimed: a method with '
+                    'lots of redemptions but low redemption dollars is many '
+                    'small claims; the reverse is a few big ones.</div>',
+                    unsafe_allow_html=True)
+                tot_v = red_ch.redeem_value.sum()
+                tot_n = red_ch.redemptions.sum()
+                Lc, Rc = st.columns([2, 3])
+                with Lc:
+                    st.dataframe(pd.DataFrame({
+                        "Method": red_ch.channel,
+                        "Redemptions": red_ch.redemptions,
+                        "Redemption $": red_ch.redeem_value.round(0),
+                        "% of value": (red_ch.redeem_value
+                                       / tot_v * 100).round(1),
+                        "$ per claim": (red_ch.redeem_value
+                                        / red_ch.redemptions.replace(
+                                            0, np.nan)).round(2),
+                    }), use_container_width=True, hide_index=True,
+                        column_config={
+                            "Redemptions": st.column_config.NumberColumn(
+                                format="%d"),
+                            "Redemption $": st.column_config.NumberColumn(
+                                format="$%d"),
+                            "% of value": st.column_config.NumberColumn(
+                                format="%.1f%%"),
+                            "$ per claim": st.column_config.NumberColumn(
+                                format="$%.2f"),
+                        })
+                with Rc:
+                    red_ch["label"] = red_ch.apply(
+                        lambda r: f"{int(r.redemptions):,} claims · "
+                                  f"{r.redeem_value/tot_v*100:.0f}% of $",
+                        axis=1)
+                    fig = px.bar(red_ch.sort_values("redeem_value"),
+                                 x="redeem_value", y="channel",
+                                 orientation="h", text="label",
+                                 color_discrete_sequence=[ACCENT])
+                    fig.update_traces(textposition="outside",
+                                      textfont_size=11, cliponaxis=False)
+                    fig.update_layout(height=260,
+                                      margin=dict(l=0, r=0, t=10, b=0),
+                                      xaxis_title="Redemption $",
+                                      yaxis_title="",
+                                      xaxis=dict(gridcolor="rgba(0,0,0,.07)",
+                                                 tickformat="$,.0s"),
+                                      plot_bgcolor="rgba(0,0,0,0)")
+                    st.plotly_chart(fig, use_container_width=True,
+                                    key="pc_channel")
+
         st.divider()
 
         # --- Store scorecard ---------------------------------------------
@@ -3056,16 +3146,18 @@ def render_takeovers():
             st.divider()
             st.markdown("##### GWP reconciliation — in the door vs out of it")
             st.markdown(
-                '<div class="howto"><b>How to read this.</b> <b>Received</b> '
+                '<div class="howto"><b>How to read this.</b> The big tile is '
+                '<b>GWP so far</b>: every gift unit that left the shop during '
+                'the promotion, and it moves with each refresh. <b>Received</b> '
                 'is the GWP stock that arrived for the window, from the '
-                'inventory receipt reports. <b>Mis-rung</b> is the '
-                'discrepancy you asked about: sale lines where staff keyed '
-                'the <b>SKU number</b> instead of the product — spotted '
-                'because the line\'s "product" is a bare number, and '
-                'identified by matching that number back to the receipt '
-                'SKU. <b>Redeemed</b> is in-window loyalty redemptions '
-                '(brand level, not per SKU). Whatever remains is stock '
-                'still on the shelf — or units to chase down.</div>',
+                'inventory receipt reports. <b>On the GWP SKU</b> is units '
+                'rung properly on the promo\'s own "(GWP)" item. '
+                '<b>Mis-rung</b> is the discrepancy you asked about: sale '
+                'lines where staff keyed the <b>SKU number</b> instead of '
+                'the product — spotted because the line\'s "product" is a '
+                'bare number, and identified by matching that number back '
+                'to the receipt SKU. <b>Still out there</b> is stock on the '
+                'shelf — or units to chase down.</div>',
                 unsafe_allow_html=True)
 
             skus = ",".join("'" + str(x).replace("'", "''") + "'"
@@ -3090,40 +3182,135 @@ def render_takeovers():
 
             redeemed = (float(inwin.redemptions.iloc[0])
                         if has_inwin else np.nan)
+
+            # Properly-rung GWP: units sold on the promo's own "(GWP)" SKU,
+            # published per product per day as dash_gwp_day. Preferred over
+            # the brand-level loyalty count because it is per SKU and moves
+            # daily while the promotion runs.
+            rung = pd.DataFrame()
+            if table_exists("dash_gwp_day"):
+                rung = q(f"""
+                    SELECT product, SUM(units) AS rung
+                    FROM dash_gwp_day
+                    WHERE {like} {af}
+                      AND day BETWEEN '{tk["start"]}'
+                                  AND '{s["eff_end"]:%Y-%m-%d}'
+                    GROUP BY 1
+                """)
+            has_rung = not rung.empty
+            if has_rung:
+                merged = merged.merge(rung, on="product", how="left")
+            if "rung" not in merged:
+                merged["rung"] = 0.0
+            merged["rung"] = merged["rung"].fillna(0)
+            rung_tot = float(merged.rung.sum())
+
             # The headline: how many GWP units left the shop during the
-            # window, by whatever route — properly redeemed plus mis-rung.
-            out_door = merged.misrung.sum() + \
+            # window, by whatever route — rung on the GWP SKU (preferred) or
+            # loyalty redemptions (fallback) — plus mis-rung lines.
+            basis = rung_tot if has_rung else \
                 (redeemed if pd.notna(redeemed) else 0)
+            out_door = merged.misrung.sum() + basis
+            received_tot = rec.received.sum()
+
+            # Attach rate: GWP issued per paid brand unit in the window —
+            # the number to watch if the offer is "GWP with any purchase".
+            attach = np.nan
+            du = s.get("during") or {}
+            _upd = du.get("units_pd")
+            if has_rung and _upd is not None and pd.notna(_upd):
+                paid = _upd * du.get("days", 0) - rung_tot
+                if paid > 0:
+                    attach = out_door / paid * 100
+
+            # --- hero tile: GWP so far ------------------------------------
+            _ee = s["eff_end"]
+            pct_stock = out_door / received_tot if received_tot > 0 else 0
+            sub = (f"{pct_stock:.0%} of the stock is out the door"
+                   + (f" · attach rate {attach:.1f}% of paid "
+                      f"{tk['name']} units" if pd.notna(attach) else "")
+                   + f" · data through {_ee:%b} {_ee.day}"
+                     " · updates with every refresh")
+            st.markdown(
+                '<div style="background:var(--tint);border:1px solid '
+                'var(--rule);border-left:4px solid var(--accent);'
+                'border-radius:10px;padding:1rem 1.3rem;'
+                'margin:.5rem 0 1rem 0;">'
+                '<div style="font-size:.76rem;text-transform:uppercase;'
+                'letter-spacing:.09em;color:var(--muted);">GWP so far — '
+                + tk["name"] + '</div>'
+                '<div style="font-size:2.5rem;font-weight:700;'
+                'color:var(--ink);line-height:1.15;">'
+                f"{int(out_door):,}"
+                '<span style="font-size:1.05rem;font-weight:400;'
+                'color:var(--muted);"> of '
+                f"{int(received_tot):,} received</span></div>"
+                f'<div style="font-size:.85rem;color:var(--body);">'
+                f'{sub}</div></div>', unsafe_allow_html=True)
+
+            # Which method moved the GWP: channel split of the properly-rung
+            # units (In-Store register / Non-Stop / Delivery).
+            if has_col("dash_gwp_day", "channel"):
+                gwp_ch = q(f"""
+                    SELECT channel, SUM(units) AS units
+                    FROM dash_gwp_day
+                    WHERE {like} {af}
+                      AND day BETWEEN '{tk["start"]}'
+                                  AND '{s["eff_end"]:%Y-%m-%d}'
+                    GROUP BY 1 ORDER BY units DESC
+                """)
+                if not gwp_ch.empty and gwp_ch.units.sum() > 0:
+                    bits = " · ".join(
+                        f"**{r.channel}** {int(r.units):,}"
+                        for r in gwp_ch.itertuples())
+                    st.markdown("GWP by method: " + bits +
+                                "  \n*(properly-rung units only — mis-rung "
+                                "lines are counted in the tile above)*")
+
             c = st.columns(5)
             c[0].metric("GWP out the door", f"{int(out_door):,}",
-                        help="Every GWP unit that left during the window: "
-                             "loyalty redemptions plus mis-rung lines.")
-            c[1].metric("Received", f"{int(rec.received.sum()):,}")
-            c[2].metric("Redeemed in window",
-                        f"{int(redeemed):,}" if pd.notna(redeemed) else "—",
-                        help="Brand-level: the published redemption data is "
-                             "not split by SKU.")
+                        help="Every GWP unit that left during the window, "
+                             "by any route.")
+            c[1].metric("Received", f"{int(received_tot):,}")
+            if has_rung:
+                c[2].metric("On the GWP SKU", f"{int(rung_tot):,}",
+                            help="Units rung on the promo's own '(GWP)' "
+                                 "item — per SKU, inside the window.")
+            else:
+                c[2].metric("Redeemed in window",
+                            f"{int(redeemed):,}" if pd.notna(redeemed) else "—",
+                            help="Brand-level: the published redemption data "
+                                 "is not split by SKU.")
             c[3].metric("Mis-rung", f"{int(merged.misrung.sum()):,}",
                         help="Sale lines keyed as a bare SKU number, matched "
                              "to these GWP receipts.")
-            remaining = (rec.received.sum() - merged.misrung.sum()
-                         - (redeemed if pd.notna(redeemed) else 0))
-            c[4].metric("Unaccounted", f"{int(remaining):,}",
+            remaining = received_tot - out_door
+            c[4].metric("Still out there", f"{int(remaining):,}",
                         help="Received minus out-the-door. Includes stock "
                              "still on the shelf — check the back of house "
                              "before chasing a gap.")
 
-            st.dataframe(pd.DataFrame({
+            tbl = pd.DataFrame({
                 "GWP item": merged["product"],
                 "SKU": merged["product_sku"],
                 "Received": merged.received.round(0),
                 "Mis-rung": merged.misrung.round(0),
                 "Mis-ring value $": merged.net.round(0),
-            }), use_container_width=True, hide_index=True, column_config={
+            })
+            cfg = {
                 "Received": st.column_config.NumberColumn(format="%d"),
                 "Mis-rung": st.column_config.NumberColumn(format="%d"),
                 "Mis-ring value $": st.column_config.NumberColumn(format="$%d"),
-            })
+            }
+            if has_rung:
+                tbl.insert(3, "On GWP SKU", merged.rung.round(0))
+                tbl["% of stock"] = (
+                    (merged.rung + merged.misrung)
+                    / merged.received.replace(0, np.nan) * 100).round(0)
+                cfg["On GWP SKU"] = st.column_config.NumberColumn(format="%d")
+                cfg["% of stock"] = st.column_config.NumberColumn(format="%d%%")
+            st.dataframe(tbl, use_container_width=True, hide_index=True,
+                         column_config=cfg)
             if merged.misrung.sum() > 0:
                 st.markdown(
                     '<div class="alert a-warn"><b>Mis-rung GWP found.</b> '

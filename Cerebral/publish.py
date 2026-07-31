@@ -301,7 +301,7 @@ def build(src: str, dest: str) -> dict:
         """)
         con.execute("""
             CREATE TABLE dash_redemption_day (
-                store_key INTEGER, day DATE, brand VARCHAR,
+                store_key INTEGER, day DATE, brand VARCHAR, channel VARCHAR,
                 redemptions BIGINT, redeem_value DOUBLE)
         """)
         print("  ! source has no fact_redemption — reload history to populate "
@@ -362,10 +362,11 @@ def build(src: str, dest: str) -> dict:
         SELECT r.store_key,
                CAST(r.txn_ts AS DATE)                          AS day,
                {_family_sql('r.offer_name', 'r.matched_brand')} AS brand,
+               r.channel                                       AS channel,
                COUNT(*)                                        AS redemptions,
                SUM(r.redeem_amt)                               AS redeem_value
         FROM src.fact_redemption r
-        GROUP BY 1,2,3
+        GROUP BY 1,2,3,4
       """)
 
 
@@ -472,6 +473,22 @@ def build(src: str, dest: str) -> dict:
         WHERE NOT is_return
           AND (regexp_matches(product, '^[0-9]{4,}$')""" + extra + """)
         GROUP BY 1,2,3
+    """)
+
+    # Properly-rung GWP: sale lines on the promo's own "(GWP)" SKU, kept per
+    # product so the app can reconcile item by item. This is the count that
+    # moves day to day while a takeover is running — the "GWP so far" tile.
+    # Channel (In-Store / Non-Stop / Delivery) answers "which method moves
+    # the most GWP".
+    con.execute("""
+        CREATE TABLE dash_gwp_day AS
+        SELECT store_key, CAST(txn_ts AS DATE) AS day, brand, product, channel,
+               SUM(units)     AS units,
+               SUM(net_sales) AS net
+        FROM src.fact_line
+        WHERE NOT is_return
+          AND LOWER(product) LIKE '%gwp%'
+        GROUP BY 1,2,3,4,5
     """)
 
     # --- inventory, most recent snapshot only ----------------------------

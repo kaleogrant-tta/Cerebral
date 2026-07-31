@@ -5,12 +5,26 @@ import streamlit.components.v1 as components
 
 REMEMBER_SALT = "cerebral_remember_salt_v1"
 
+def find_secret(key: str, secrets_dict=None):
+    """Recursively search st.secrets for a key, regardless of TOML nesting."""
+    if secrets_dict is None:
+        secrets_dict = st.secrets
+    if key in secrets_dict and not isinstance(secrets_dict[key], dict):
+        return secrets_dict[key]
+    for v in secrets_dict.values():
+        if isinstance(v, dict):
+            result = find_secret(key, v)
+            if result is not None:
+                return result
+    return None
+
 def get_remember_token():
-    correct_hash = st.secrets["app_password_hash"]
+    correct_hash = find_secret("app_password_hash")
+    if not correct_hash:
+        return ""
     return hashlib.sha256((correct_hash + REMEMBER_SALT).encode()).hexdigest()
 
 # ========== STEP 1: HANDLE LOGOUT FIRST ==========
-# If URL has ?logout=1, clear browser storage and do a REAL page reload
 if st.query_params.get("logout") == "1":
     components.html("""
     <script>
@@ -40,13 +54,12 @@ if query_token and query_token == get_remember_token():
 if not st.session_state.authenticated:
     st.title("🔒 Cerebral")
     
-    try:
-        correct_hash = st.secrets["app_password_hash"]
-    except Exception:
-        st.error("Add app_password_hash to .streamlit/secrets.toml")
+    correct_hash = find_secret("app_password_hash")
+    if not correct_hash:
+        st.error("⚠️ Add app_password_hash to Streamlit Secrets")
         st.stop()
     
-    # Check if browser has saved token and redirect with it
+    # Check if browser has saved token and redirect
     components.html("""
     <script>
     (function() {

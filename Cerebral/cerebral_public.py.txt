@@ -319,11 +319,9 @@ def gate() -> bool:
 @st.cache_resource(ttl=CACHE_MINUTES * 60)
 def load_db() -> str | None:
     """Local file if present, otherwise pull the published copy from Drive."""
-    # Look next to the script, then one level up (repo root when the app
-    # lives in a subfolder, as on Streamlit Cloud), then the launch
-    # directory — so the bundled data file always wins over Drive.
-    here = Path(__file__).resolve().parent
-    for local in (here / DASH_FILE, here.parent / DASH_FILE, Path(DASH_FILE)):
+    # Look next to the script first, then the launch directory, so the app
+    # finds its data no matter which folder streamlit was started from.
+    for local in (Path(__file__).resolve().parent / DASH_FILE, Path(DASH_FILE)):
         if local.exists():
             return str(local)
 
@@ -343,8 +341,7 @@ def load_db() -> str | None:
 
     res = svc.files().list(
         q=f"'{folder}' in parents and name = '{DASH_FILE}' and trashed = false",
-        orderBy="modifiedTime desc",
-        fields="files(id,name,size,modifiedTime)").execute().get("files", [])
+        fields="files(id,name,size)").execute().get("files", [])
     if not res:
         return None
 
@@ -572,8 +569,8 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_redeem, t_takeover, t_projections, t_promo, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Redemptions", "Takeovers", "Projections", "Promo Lab", "What the terms mean"])
+t_charts, t_insights, t_brands, t_redeem, t_projections, t_promo, t_gloss = st.tabs(
+    ["Charts", "Insights", "Brands", "Redemptions", "Projections", "Promo Lab", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -1962,66 +1959,34 @@ with t_redeem:
             "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
         })
 
-        if a.brand.astype(str).str.startswith(
-                ("Secret Drops", "Travel Club Substitution")).any():
-            st.markdown(
-                '<p class="note"><b>Secret Drops</b> and <b>Travel Club '
-                'Substitution</b> rows are promo families, not brands — the '
-                'offer never names a product (mystery bags and out-of-stock '
-                'swaps). Pick one in the drill-down below to see what '
-                'customers actually received.</p>', unsafe_allow_html=True)
-
         if len(unattributed) and unattributed.spend.sum() > 0:
             st.markdown(
                 f'<p class="note">${unattributed.spend.sum():,.0f} across '
                 f'{int(unattributed.redemptions.sum()):,} redemptions could '
-                f'not be matched to a brand or promo family.</p>',
-                unsafe_allow_html=True)
+                f'not be matched to a brand.</p>', unsafe_allow_html=True)
 
         # --- Brand → SKU redemption drill-down -------------------------
         st.divider()
         st.markdown("##### Which SKUs were redeemed, by brand")
-        st.markdown(
-            '<div class="howto"><b>How to read this.</b> Pick a brand — or a '
-            'promo family like Secret Drops — to see what was actually rung '
-            'up for its redemptions. The same offer appears under different '
-            'names over time ("Loyalty …", the "Loytaly …" typo, "Travel '
-            'Club …"), so rows group by the product, not the offer name. '
-            'Where a menu item was swapped at the register, the SKU shown is '
-            'the one the customer actually received.</div>',
-            unsafe_allow_html=True)
+        st.markdown('<p class="note">Pick a brand to see every redeemed offer '
+                    'tied to its products. Offers are named after the product '
+                    'they discount, so this is the SKU-level view of where '
+                    'the redemption dollars went.</p>', unsafe_allow_html=True)
 
         brand_opts = sorted(attributed.brand.dropna().unique())
         sel_brand = st.selectbox("Select a brand", brand_opts,
                                  key="redeem_brand_sku")
 
-        # Group by the matched product (strain-level) when the published file
-        # has it; older files only carry offer names. Offer-name variants —
-        # "Loyalty …", the "Loytaly …" typo — roll up into one row per strain.
-        try:
-            sku = q(f"""
-                SELECT COALESCE(product, offer_name) AS sku, category,
-                       SUM(redemptions) AS redemptions,
-                       SUM(redeem_value) AS spend,
-                       AVG(avg_basket)  AS avg_basket
-                FROM dash_offer_performance
-                WHERE brand = '{sel_brand.replace("'", "''")}' {af}
-                GROUP BY 1,2
-                ORDER BY spend DESC
-            """)
-            if not len(sku):
-                raise ValueError("empty")
-        except Exception:
-            sku = q(f"""
-                SELECT offer_name AS sku, category,
-                       SUM(redemptions) AS redemptions,
-                       SUM(redeem_value) AS spend,
-                       AVG(avg_basket)  AS avg_basket
-                FROM dash_offer_performance
-                WHERE brand = '{sel_brand.replace("'", "''")}' {af}
-                GROUP BY 1,2
-                ORDER BY spend DESC
-            """)
+        sku = q(f"""
+            SELECT offer_name AS sku, category,
+                   SUM(redemptions) AS redemptions,
+                   SUM(redeem_value) AS spend,
+                   AVG(avg_basket)  AS avg_basket
+            FROM dash_offer_performance
+            WHERE brand = '{sel_brand.replace("'", "''")}' {af}
+            GROUP BY 1,2
+            ORDER BY spend DESC
+        """)
 
         if sku.empty:
             st.info(f"No redeemed offers matched to {sel_brand}.")
@@ -2059,53 +2024,8 @@ with t_redeem:
             fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
             st.plotly_chart(fig, use_container_width=True, key="pc17")
 
-        # --- Off-menu picks: what redeemers chose instead -------------------
-        st.divider()
-        st.markdown("##### Chosen instead — off-menu picks")
-        st.markdown(
-            '<div class="howto"><b>How to read this.</b> When a redemption '
-            'menu item is out of stock, staff let the customer pick something '
-            'of similar value instead. Those swaps ring up at $0.01, or '
-            'discounted down to just the tax — that price pattern is how '
-            'they are identified here. Ranked by redemption dollars, this is '
-            'a ready-made shortlist of candidates for the menu. One caveat: '
-            'if a customer also bought something genuinely cheap, that can '
-            'occasionally be picked up as the swap — sanity-check an '
-            'unfamiliar row before acting on it.</div>',
-            unsafe_allow_html=True)
-        subs = q(f"""
-            SELECT product AS sku, category,
-                   SUM(redemptions)             AS redemptions,
-                   SUM(redeem_value)            AS spend,
-                   COUNT(DISTINCT offer_name)   AS offers
-            FROM dash_offer_performance
-            WHERE match_method = 'substituted-line' {af}
-            GROUP BY 1,2
-            ORDER BY spend DESC
-        """)
-        if subs.empty:
-            st.info("No substitutions recorded yet. They appear after the "
-                    "next data rebuild, once re-matching has run.")
-        else:
-            st.dataframe(pd.DataFrame({
-                "SKU chosen": subs.sku,
-                "Category": subs.category,
-                "Times picked": subs.redemptions,
-                "Redemption $": subs.spend.round(0),
-                "Via # of offers": subs.offers,
-            }), use_container_width=True, hide_index=True, column_config={
-                "Times picked": st.column_config.NumberColumn(format="%d"),
-                "Redemption $": st.column_config.NumberColumn(format="$%d"),
-                "Via # of offers": st.column_config.NumberColumn(format="%d"),
-            })
-
         st.divider()
         st.markdown("##### Spend against basket size")
-        st.markdown('<p class="note">Each point is a brand or promo family. '
-                    'Right means redeemed often; up means customers spend '
-                    'big when they redeem. The upper right is where the '
-                    'programme is earning its keep.</p>',
-                    unsafe_allow_html=True)
         fig = px.scatter(a, x="redemptions", y="avg_basket", size="spend",
                          color="category", hover_name="brand", size_max=38,
                          color_discrete_map={c: cat_color(c)
@@ -2151,6 +2071,199 @@ with t_redeem:
                     'offer caused the visit — redeemers are your most engaged '
                     'customers by construction.</p>', unsafe_allow_html=True)
 
+
+
+# -------------------------------------------------------------- redemptions
+with t_redeem:
+    st.markdown("#### Loyalty Redemptions")
+    st.markdown('<div class="howto"><b>How to read this tab.</b> '
+                'Redemptions are discounts given back to loyalty members. '
+                'A high redemption rate means many customers are using their '
+                'points — usually good, because engaged members buy more often. '
+                'But watch the cost: if redemption dollars grow faster than '
+                'net sales, the program is eating margin. The sweet spot is '
+                'high redemption rate with low redemption cost as a percent '
+                'of revenue, and high sales per redeeming basket.</div>',
+                unsafe_allow_html=True)
+
+    red = q(f"""
+        SELECT iso_year, iso_week,
+               SUM(baskets) AS baskets,
+               SUM(redeem_baskets) AS redeem_baskets,
+               SUM(redeem_value) AS redeem_value,
+               SUM(net) AS net
+        FROM dash_basket_week {wf}
+        GROUP BY 1,2
+        ORDER BY 1,2
+    """)
+    red_store = q(f"""
+        SELECT store_key,
+               SUM(baskets) AS baskets,
+               SUM(redeem_baskets) AS redeem_baskets,
+               SUM(redeem_value) AS redeem_value,
+               SUM(net) AS net
+        FROM dash_basket_week {wf}
+        GROUP BY 1
+    """)
+    if red.empty or red.redeem_baskets.sum() == 0:
+        st.info("No redemption data in the published file.")
+    else:
+        red["wk_date"] = pd.to_datetime(
+            red.iso_year.astype(str) + "-W" + red.iso_week.astype(str).str.zfill(2) + "-1",
+            format="%G-W%V-%u", errors="coerce")
+        red = red.sort_values("wk_date").reset_index(drop=True)
+        red["redeem_rate"] = red.redeem_baskets / red.baskets.replace(0, float("nan"))
+        red["redeem_per_basket"] = red.redeem_value / red.baskets.replace(0, float("nan"))
+        red["redeem_pct_of_net"] = red.redeem_value / red.net.replace(0, float("nan"))
+        red_active = red[red.redeem_baskets > 0].copy()
+        if len(red_active) >= 2:
+            cur = red_active.iloc[-1]
+            prev = red_active.iloc[-2]
+        elif len(red_active) == 1:
+            cur = red_active.iloc[-1]
+            prev = None
+        else:
+            cur = red.iloc[-1]
+            prev = red.iloc[-2] if len(red) > 1 else None
+        def fmt_delta(cur_val, prev_val):
+            if prev_val is None or pd.isna(prev_val) or prev_val == 0:
+                return None
+            return f"{(cur_val/prev_val-1)*100:+.1f}%"
+        c = st.columns(4)
+        c[0].metric("Redemption Rate",
+                    f"{cur.redeem_rate*100:.1f}%" if pd.notna(cur.redeem_rate) and cur.redeem_rate > 0 else "—",
+                    fmt_delta(cur.redeem_rate, prev.redeem_rate) if prev is not None else None)
+        c[1].metric("Redemption Value",
+                    f"${cur.redeem_value:,.0f}" if pd.notna(cur.redeem_value) and cur.redeem_value > 0 else "—",
+                    fmt_delta(cur.redeem_value, prev.redeem_value) if prev is not None else None)
+        c[2].metric("Avg Redemption / Basket",
+                    f"${cur.redeem_per_basket:.2f}" if pd.notna(cur.redeem_per_basket) and cur.redeem_per_basket > 0 else "—",
+                    fmt_delta(cur.redeem_per_basket, prev.redeem_per_basket) if prev is not None else None)
+        c[3].metric("Redemptions as % of Net",
+                    f"{cur.redeem_pct_of_net*100:.1f}%" if pd.notna(cur.redeem_pct_of_net) and cur.redeem_pct_of_net > 0 else "—",
+                    fmt_delta(cur.redeem_pct_of_net, prev.redeem_pct_of_net) if prev is not None else None)
+        st.divider()
+        L, R = st.columns([3, 2])
+        with L:
+            heading("Redemption value and rate by week")
+            st.markdown('<p class="note">The bars show total dollars redeemed; '
+                        'the line shows what share of baskets included a '
+                        'redemption.</p>', unsafe_allow_html=True)
+            fig = go.Figure()
+            fig.add_bar(x=red.wk_date, y=red.redeem_value, name="Redemption $",
+                        marker_color=ACCENT, opacity=.75)
+            fig.add_scatter(x=red.wk_date, y=red.redeem_rate*100, name="Redemption rate %",
+                            yaxis="y2", line=dict(color=WARN, width=2))
+            fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
+                              yaxis=dict(title="Redemption $", tickformat="$,.0s",
+                                         gridcolor="rgba(0,0,0,.07)"),
+                              yaxis2=dict(title="Rate %", overlaying="y", side="right",
+                                          showgrid=False, tickformat=".1f",
+                                          ticksuffix="%"),
+                              hovermode="x unified",
+                              legend=dict(orientation="h", y=1.12, x=0,
+                                          title_text=""),
+                              plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True, key="pc12")
+        with R:
+            st.markdown("##### Redemption by store")
+            if len(keys) > 1 and not red_store.empty:
+                red_store["store"] = red_store.store_key.map(STORES)
+                red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
+                red_store = red_store.sort_values("redeem_value", ascending=False)
+                red_store["label"] = red_store.apply(
+                    lambda r: f"${r.redeem_value/1e3:.0f}k<br>({r.redeem_rate*100:.1f}%)", axis=1)
+                fig = px.bar(red_store, x="store", y="redeem_value",
+                             color="redeem_rate", color_continuous_scale="Greens",
+                             text="label")
+                fig.update_traces(textposition="outside", textfont_size=11,
+                                  cliponaxis=False)
+                fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0),
+                                  yaxis_title="Redemption $", xaxis_title="",
+                                  coloraxis_colorbar=dict(title="Rate %",
+                                                          ticksuffix="%"),
+                                  plot_bgcolor="rgba(0,0,0,0)")
+                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+                st.plotly_chart(fig, use_container_width=True, key="pc13")
+                st.markdown('<p class="note"><b>Bar height</b> = total redemption '
+                            'dollars. <b>Color</b> = redemption rate (darker green '
+                            '= higher engagement).</p>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown('<p class="note">Select multiple stores in the '
+                            'sidebar to compare redemption performance.</p>',
+                            unsafe_allow_html=True)
+        st.divider()
+        if not red_store.empty and len(keys) > 1:
+            st.markdown("#### Store redemption scorecard")
+            st.markdown('<div class="howto"><b>How to read the scorecard.</b> '
+                        '<b>Redemption Rate</b> is engagement. '
+                        '<b>Redemption Cost %</b> is the true price of the program. '
+                        '<b>Sales / Redeem Bkt</b> is the ROI proxy.</div>',
+                        unsafe_allow_html=True)
+            red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
+            red_store["redeem_pct_of_net"] = red_store.redeem_value / red_store.net.replace(0, float("nan"))
+            red_store["sales_per_redeem_basket"] = red_store.net / red_store.redeem_baskets.replace(0, float("nan"))
+            by_rate = red_store.sort_values("redeem_rate", ascending=False)
+            by_roi = red_store.sort_values("sales_per_redeem_basket", ascending=False)
+            h1, h2, h3, h4 = st.columns(4)
+            with h1:
+                top = by_rate.iloc[0]
+                st.markdown(f'<div class="alert a-ok"><b>Most redeemed</b><br>'
+                            f'{STORES.get(top.store_key, top.store_key)} — '
+                            f'{top.redeem_rate*100:.1f}%</div>',
+                            unsafe_allow_html=True)
+            with h2:
+                bot = by_rate.iloc[-1]
+                st.markdown(f'<div class="alert a-warn"><b>Least redeemed</b><br>'
+                            f'{STORES.get(bot.store_key, bot.store_key)} — '
+                            f'{bot.redeem_rate*100:.1f}%</div>',
+                            unsafe_allow_html=True)
+            with h3:
+                top_roi = by_roi.iloc[0]
+                st.markdown(f'<div class="alert a-ok"><b>Best ROI</b><br>'
+                            f'{STORES.get(top_roi.store_key, top_roi.store_key)} — '
+                            f'${top_roi.sales_per_redeem_basket:.0f} / redeem bkt</div>',
+                            unsafe_allow_html=True)
+            with h4:
+                bot_roi = by_roi.iloc[-1]
+                st.markdown(f'<div class="alert a-bad"><b>Worst ROI</b><br>'
+                            f'{STORES.get(bot_roi.store_key, bot_roi.store_key)} — '
+                            f'${bot_roi.sales_per_redeem_basket:.0f} / redeem bkt</div>',
+                            unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame({
+                "Store": red_store.store_key.map(STORES),
+                "Baskets": red_store.baskets,
+                "Redeem Baskets": red_store.redeem_baskets,
+                "Redemption $": red_store.redeem_value.round(0),
+                "Net $": red_store.net.round(0),
+                "Redemption Rate %": (red_store.redeem_rate * 100).round(1),
+                "Redemption Cost %": (red_store.redeem_pct_of_net * 100).round(1),
+                "Sales / Redeem Bkt": red_store.sales_per_redeem_basket.round(0),
+            }), use_container_width=True, hide_index=True, column_config={
+                "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                "Net $": st.column_config.NumberColumn(format="$%d"),
+                "Redemption Rate %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Redemption Cost %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Sales / Redeem Bkt": st.column_config.NumberColumn(format="$%d"),
+            })
+        st.divider()
+        heading("Redemptions as % of net sales")
+        fig = px.line(red, x="wk_date", y=red.redeem_pct_of_net*100,
+                      markers=True, color_discrete_sequence=[WARN])
+        fig.update_traces(line=dict(width=2.5), marker=dict(size=6),
+                          hovertemplate="%{y:.1f}%<extra></extra>")
+        fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
+                          yaxis_title="% of net sales", xaxis_title="",
+                          hovermode="x unified", showlegend=False,
+                          plot_bgcolor="rgba(0,0,0,0)")
+        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%",
+                         zeroline=False)
+        fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
+        st.plotly_chart(fig, use_container_width=True, key="pc14")
+        st.markdown('<p class="note">A rising line means the loyalty program '
+                    'is taking a larger share of revenue.</p>',
+                    unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------- projections
@@ -2516,575 +2629,5 @@ def render_promo_lab():
                        "promo_lab_roi.csv", "text/csv", key="promo_download")
 
 
-# ===========================================================================
-# Brand Takeover tracker
-# ===========================================================================
-
-# The takeover calendar. Add a new takeover by copying one of these blocks.
-# `patterns` are matched case-insensitively against the brand field, so
-# spelling variants ("RYTHM", "Rythm") roll up into one takeover.
-TAKEOVERS = [
-    {"name": "Rythm (GTI)", "start": "2026-03-01", "end": "2026-03-31",
-     "notes": "Full month, GTI-scale",
-     "patterns": ["rythm", "rhythm"]},
-    {"name": "Select (Curaleaf)", "start": "2026-04-01", "end": "2026-04-15",
-     "notes": "420 campaign — first half",
-     "patterns": ["select"]},
-    {"name": "Dark Heart (Curaleaf)", "start": "2026-04-16", "end": "2026-04-30",
-     "notes": "420 campaign — second half",
-     "patterns": ["dark heart", "darkheart"]},
-    {"name": "Woodstock", "start": "2026-05-01", "end": "2026-05-14",
-     "notes": "Staff samples arrived May 11",
-     "patterns": ["woodstock"]},
-    {"name": "Timeless", "start": "2026-05-14", "end": "2026-06-07",
-     "notes": "Installed across all 4 stores May 14",
-     "patterns": ["timeless"]},
-    {"name": "Ruby Farms", "start": "2026-07-16", "end": "2026-08-17",
-     "notes": "4-week SBC, all 4 stores + e-comm",
-     "patterns": ["ruby farms", "ruby"]},
-]
-
-
-def _fact_sql(cols: list[str]) -> str | None:
-    """Build a fact_line SELECT from whatever columns the local build
-    actually carries. Older files have no product or units column, and a
-    hard-coded SELECT would fail outright there."""
-    have = set(cols)
-    if not {"store_key", "txn_ts", "brand", "basket_id",
-            "net_sales"}.issubset(have):
-        return None
-    sel = ["store_key", "txn_ts", "brand", "basket_id", "net_sales"]
-    if "gross_margin" in have:
-        sel.append("gross_margin")
-    for cand in ("units", "quantity", "qty"):
-        if cand in have:
-            sel.append(f"{cand} AS units")
-            break
-    for cand in ("product", "product_name", "sku", "item_name"):
-        if cand in have:
-            sel.append(f"{cand} AS product")
-            break
-    return f"SELECT {', '.join(sel)} FROM fact_line WHERE brand IS NOT NULL"
-
-
-@st.cache_data(ttl=CACHE_MINUTES * 60)
-def _fact_line() -> pd.DataFrame:
-    """Full line detail: published file first, then the local build — the
-    same two-step the Promo Lab uses."""
-    cols = list(q("SELECT * FROM fact_line LIMIT 0").columns)
-    if cols:
-        sql = _fact_sql(cols)
-        return q(sql) if sql else pd.DataFrame()
-    import duckdb
-    for cand in [os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "tta.duckdb"),
-                 r"C:\Users\User\cerebral\Cerebral\tta.duckdb"]:
-        if not os.path.exists(cand):
-            continue
-        try:
-            con = duckdb.connect(cand, read_only=True)
-            cols = [r[1] for r in
-                    con.execute("PRAGMA table_info('fact_line')").fetchall()]
-            sql = _fact_sql(cols)
-            out = con.execute(sql).df() if sql else pd.DataFrame()
-            con.close()
-            if not out.empty:
-                return out
-        except Exception:
-            pass
-    return pd.DataFrame()
-
-
-@st.cache_data(ttl=CACHE_MINUTES * 60)
-def takeover_daily() -> pd.DataFrame:
-    """Day x store x brand sales: day, store_key, brand, net, units, baskets,
-    gm (whichever of the last three exist).
-
-    The published dashboard file is weekly by design; day-level numbers come
-    from a small dash_brand_day table once the refresh builds it, or from
-    fact_line directly when the app runs next to the full local data."""
-    d = q("SELECT * FROM dash_brand_day")
-    if not d.empty:
-        d = d.rename(columns={"date": "day"})
-        d["day"] = pd.to_datetime(d["day"], errors="coerce")
-        return d.dropna(subset=["day"])
-
-    fl = _fact_line()
-    if fl.empty:
-        return pd.DataFrame()
-    fl["day"] = pd.to_datetime(fl["txn_ts"], errors="coerce").dt.normalize()
-    fl = fl.dropna(subset=["day"])
-    agg = {"net": ("net_sales", "sum"),
-           "baskets": ("basket_id", "nunique")}
-    if "units" in fl.columns:
-        agg["units"] = ("units", "sum")
-    if "gross_margin" in fl.columns:
-        agg["gm"] = ("gross_margin", "sum")
-    return (fl.groupby(["day", "store_key", "brand"])
-              .agg(**agg).reset_index())
-
-
-def takeover_stats(daily: pd.DataFrame, tk: dict, keys: list[int]) -> dict:
-    """Per-day rates for the takeover window and its two baselines.
-
-    Everything is a PER CALENDAR DAY rate. Takeover windows do not align
-    with the ISO weeks the rest of the dashboard uses, and a takeover can
-    still be in progress — raw totals would mislead in both cases."""
-    start = pd.Timestamp(tk["start"])
-    end = pd.Timestamp(tk["end"])
-    pat = "|".join(re.escape(p) for p in tk["patterns"])
-
-    d = daily[daily.store_key.isin(keys)]
-    if d.empty:
-        return {}
-    last_day = d.day.max()
-    b = d[d.brand.fillna("").str.lower().str.contains(pat, na=False)]
-    matched = sorted(b.brand.dropna().unique().tolist())
-
-    if last_day < start:
-        return {"status": "upcoming", "matched": matched}
-    eff_end = min(end, last_day)
-    status = "active" if last_day < end else "done"
-
-    def rates(frame, lo, hi, tot):
-        n = (hi - lo).days + 1
-        if n <= 0:
-            return None
-        w = frame[(frame.day >= lo) & (frame.day <= hi)]
-        t = tot[(tot.day >= lo) & (tot.day <= hi)]
-        net = w.net.sum()
-        tot_net = t.net.sum()
-        return {"days": n, "net": net, "net_pd": net / n,
-                "baskets_pd": (w.baskets.sum() / n
-                               if "baskets" in w.columns else np.nan),
-                "units_pd": (w.units.sum() / n
-                             if "units" in w.columns else np.nan),
-                "share": net / tot_net * 100 if tot_net > 0 else np.nan,
-                "gm_pct": (w.gm.sum() / net * 100
-                           if ("gm" in w.columns and net > 0) else np.nan)}
-
-    during = rates(b, start, eff_end, d)
-    prior = rates(b, start - pd.Timedelta(days=28),
-                  start - pd.Timedelta(days=1), d)
-
-    # Rest-of-period baseline: every loaded day outside the takeover window.
-    n_all = (last_day - d.day.min()).days + 1
-    n_out = n_all - during["days"]
-    b_out = b[(b.day < start) | (b.day > eff_end)]
-    tot_out = d[(d.day < start) | (d.day > eff_end)].net.sum()
-    net_out = b_out.net.sum()
-    period = {"days": n_out, "net": net_out, "net_pd": net_out / n_out,
-              "baskets_pd": (b_out.baskets.sum() / n_out
-                             if "baskets" in b_out.columns else np.nan),
-              "units_pd": (b_out.units.sum() / n_out
-                           if "units" in b_out.columns else np.nan),
-              "share": net_out / tot_out * 100 if tot_out > 0 else np.nan,
-              "gm_pct": (b_out.gm.sum() / net_out * 100
-                         if ("gm" in b_out.columns
-                             and net_out > 0) else np.nan)}
-
-    return {"status": status, "matched": matched, "start": start,
-            "end": end, "eff_end": eff_end, "last_day": last_day,
-            "during": during, "prior": prior, "period": period,
-            "planned_days": (end - start).days + 1}
-
-
-def _lift(now, base):
-    if base and base > 0:
-        return (now / base - 1) * 100
-    return np.nan
-
-
-def render_takeovers():
-    st.subheader("Brand Takeovers")
-    st.markdown(
-        '<div class="howto"><b>How to read this.</b> Each takeover window is '
-        'measured <b>per day</b> and compared against two baselines, side by '
-        'side: the <b>4 weeks before</b> the takeover, and the brand\'s '
-        'average across <b>the rest of the loaded data</b>. Per-day rates '
-        'keep a half-month takeover (Select, Dark Heart) comparable with a '
-        'full-month one (Rythm), and they keep a takeover that is still '
-        'running honest.<br><br>'
-        '<b>Share of store</b> is the brand\'s slice of total store sales — '
-        'the number that tells you whether the takeover moved the brand or '
-        'whether the whole store simply had a good month. A takeover that '
-        'lifts the brand\'s sales but not its share mostly rode the '
-        'tide.</div>', unsafe_allow_html=True)
-
-    daily = takeover_daily()
-    if daily.empty:
-        st.info(
-            "This tab reads day-level brand sales. On your own computer it "
-            "uses the full local data file automatically. Online it fills in "
-            "after the next data refresh — the refresh now publishes the "
-            "small daily table (`dash_brand_day`) it reads.")
-        return
-
-    for col in ("units", "baskets", "gm"):
-        if col not in daily.columns:
-            daily[col] = np.nan
-
-    # ---- scorecard across all takeovers -----------------------------------
-    rows = []
-    details = {}
-    for tk in TAKEOVERS:
-        s = takeover_stats(daily, tk, keys)
-        details[tk["name"]] = s
-        # %-d is Unix-only; building the day number by hand works everywhere.
-        _s, _e = pd.Timestamp(tk["start"]), pd.Timestamp(tk["end"])
-        win = f"{_s:%b} {_s.day} – {_e:%b} {_e.day}"
-        if not s or s.get("status") == "upcoming":
-            rows.append({"Takeover": tk["name"], "Window": win,
-                         "Status": "Upcoming", "Net/day": np.nan,
-                         "vs prior 4 wks %": np.nan,
-                         "vs period avg %": np.nan,
-                         "Share during %": np.nan,
-                         "Share prior %": np.nan,
-                         "Baskets/day": np.nan})
-            continue
-        du, pr, pe = s["during"], s["prior"], s["period"]
-        rows.append({
-            "Takeover": tk["name"], "Window": win,
-            "Status": ("In progress — day "
-                       f"{du['days']} of {s['planned_days']}"
-                       if s["status"] == "active" else "Complete"),
-            "Net/day": du["net_pd"],
-            "vs prior 4 wks %": _lift(du["net_pd"],
-                                      pr["net_pd"] if pr else np.nan),
-            "vs period avg %": _lift(du["net_pd"], pe["net_pd"]),
-            "Share during %": du["share"],
-            "Share prior %": pr["share"] if pr else np.nan,
-            "Baskets/day": du["baskets_pd"],
-        })
-    score = pd.DataFrame(rows)
-
-    st.markdown("##### Takeover scorecard")
-    st.markdown('<p class="note">Every window, ranked side by side. The two '
-                '<b>vs</b> columns are the lift in sales per day against each '
-                'baseline — green means the takeover beat it.</p>',
-                unsafe_allow_html=True)
-    st.dataframe(
-        score.style.format({
-            "Net/day": "${:,.0f}", "vs prior 4 wks %": "{:+.0f}%",
-            "vs period avg %": "{:+.0f}%", "Share during %": "{:.1f}%",
-            "Share prior %": "{:.1f}%", "Baskets/day": "{:,.1f}"}),
-        use_container_width=True, hide_index=True)
-    st.download_button("Download scorecard (CSV)", score.to_csv(index=False),
-                       "takeover_scorecard.csv", "text/csv", key="tk_dl")
-
-    # ---- detail view -------------------------------------------------------
-    st.divider()
-    pick = st.selectbox("Takeover to inspect",
-                        [t["name"] for t in TAKEOVERS], key="tk_pick")
-    tk = next(t for t in TAKEOVERS if t["name"] == pick)
-    s = details[pick]
-
-    st.caption(f"**{pick}** · {tk['start']} → {tk['end']} · {tk['notes']}")
-    if s.get("matched"):
-        st.caption("Matched brand names in the data: "
-                   + ", ".join(s["matched"]))
-
-    if not s or s.get("status") == "upcoming":
-        st.info("This takeover has not started yet in the loaded data.")
-        return
-    du, pr, pe = s["during"], s["prior"], s["period"]
-    if du["net"] <= 0:
-        st.warning("No sales for this brand inside the takeover window. "
-                   "Check the matched brand names above against the menu.")
-        return
-
-    if s["status"] == "active":
-        st.markdown(
-            f'<div class="alert a-warn">This takeover is <b>still running</b> '
-            f'— day <b>{du["days"]} of {s["planned_days"]}</b>. Figures are '
-            f'per day, so they are comparable, but the story is not '
-            f'finished.</div>', unsafe_allow_html=True)
-
-    m = st.columns(4)
-    m[0].metric("Net sales / day", f"${du['net_pd']:,.0f}",
-                delta=(f"{_lift(du['net_pd'], pr['net_pd']):+.0f}% vs prior 4 wks"
-                       if pr and pr["net_pd"] > 0 else None))
-    m[1].metric("Share of store", f"{du['share']:.1f}%",
-                delta=(f"{du['share'] - pr['share']:+.1f} pts vs prior"
-                       if pr and pd.notna(pr["share"]) else None))
-    if pd.notna(du["baskets_pd"]):
-        m[2].metric("Baskets w/ brand / day", f"{du['baskets_pd']:,.1f}",
-                    delta=(f"{_lift(du['baskets_pd'], pr['baskets_pd']):+.0f}%"
-                           if pr and pr["baskets_pd"] > 0 else None))
-    if pd.notna(du["units_pd"]):
-        m[3].metric("Units / day", f"{du['units_pd']:,.1f}",
-                    delta=(f"{_lift(du['units_pd'], pr['units_pd']):+.0f}%"
-                           if pr and pr["units_pd"] > 0 else None))
-
-    # --- the two baselines, side by side ------------------------------------
-    st.markdown("##### During the takeover vs both baselines")
-    base_rows = []
-    for label, r in (("During takeover", du),
-                     ("Prior 4 weeks", pr),
-                     ("Rest of period (avg day)", pe)):
-        if not r:
-            continue
-        base_rows.append({
-            "Period": label, "Days": r["days"],
-            "Net/day": r["net_pd"], "Units/day": r["units_pd"],
-            "Baskets/day": r["baskets_pd"], "Share of store %": r["share"],
-            "Margin %": r["gm_pct"]})
-    st.dataframe(
-        pd.DataFrame(base_rows).style.format({
-            "Net/day": "${:,.0f}", "Units/day": "{:,.1f}",
-            "Baskets/day": "{:,.1f}", "Share of store %": "{:.1f}%",
-            "Margin %": "{:.0f}%"}),
-        use_container_width=True, hide_index=True)
-
-    # --- per-store breakdown -------------------------------------------------
-    st.markdown("##### Store by store")
-    st.markdown('<p class="note">Where the takeover landed. A brand that only '
-                'moved in one store tells you where its audience actually '
-                'shops — useful when negotiating the next takeover.</p>',
-                unsafe_allow_html=True)
-    st_rows = []
-    for k in keys:
-        ds = takeover_stats(daily, tk, [k])
-        if not ds or not ds.get("during") or ds["during"]["net"] <= 0:
-            continue
-        d_s, p_s = ds["during"], ds["prior"]
-        st_rows.append({
-            "Store": STORES.get(k, str(k)),
-            "Net/day": d_s["net_pd"],
-            "vs prior 4 wks %": _lift(d_s["net_pd"],
-                                      p_s["net_pd"] if p_s else np.nan),
-            "Share during %": d_s["share"],
-            "Share prior %": p_s["share"] if p_s else np.nan,
-            "Baskets/day": d_s["baskets_pd"]})
-    if st_rows:
-        st.dataframe(
-            pd.DataFrame(st_rows).style.format({
-                "Net/day": "${:,.0f}", "vs prior 4 wks %": "{:+.0f}%",
-                "Share during %": "{:.1f}%", "Share prior %": "{:.1f}%",
-                "Baskets/day": "{:,.1f}"}),
-            use_container_width=True, hide_index=True)
-    else:
-        st.info("No per-store data for this takeover and store selection.")
-
-    # --- daily chart with the window shaded ----------------------------------
-    st.markdown("##### Daily sales, takeover window shaded")
-    pat = "|".join(re.escape(p) for p in tk["patterns"])
-    b_all = daily[daily.store_key.isin(keys)
-                  & daily.brand.fillna("").str.lower().str.contains(pat,
-                                                                    na=False)]
-    ts = (b_all.groupby("day").net.sum().reset_index().sort_values("day"))
-    fig = px.bar(ts, x="day", y="net",
-                 color_discrete_sequence=[ACCENT_SOFT],
-                 labels={"day": "", "net": "Net sales $ / day"})
-    fig.add_vrect(x0=s["start"], x1=s["eff_end"], fillcolor=ACCENT,
-                  opacity=0.15, line_width=0,
-                  annotation_text="takeover", annotation_position="top left")
-    if pr and pr["net_pd"] > 0:
-        fig.add_hline(y=pr["net_pd"], line_dash="dot", line_color="#888",
-                      annotation_text="prior 4 wks / day",
-                      annotation_position="bottom right")
-    if pe["net_pd"] > 0:
-        fig.add_hline(y=pe["net_pd"], line_dash="dash", line_color=ACCENT,
-                      annotation_text="rest of period / day",
-                      annotation_position="top right")
-    fig.update_layout(height=340, margin=dict(l=0, r=0, t=20, b=0),
-                      plot_bgcolor="rgba(0,0,0,0)", showlegend=False)
-    fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
-    st.plotly_chart(fig, use_container_width=True, key="tk_chart")
-
-    # --- top products during the window (local detail only) ------------------
-    fl = _fact_line()
-    if not fl.empty and "product" in fl.columns:
-        fl["day"] = pd.to_datetime(fl["txn_ts"], errors="coerce").dt.normalize()
-        win = fl[(fl.day >= s["start"]) & (fl.day <= s["eff_end"])
-                 & fl.store_key.isin(keys)
-                 & fl.brand.fillna("").str.lower().str.contains(pat, na=False)]
-        if not win.empty:
-            top = (win.groupby("product")
-                      .agg(net=("net_sales", "sum"),
-                           baskets=("basket_id", "nunique"))
-                      .reset_index()
-                      .sort_values("net", ascending=False).head(12))
-            st.markdown("##### What sold during the takeover")
-            st.dataframe(pd.DataFrame({
-                "Product": top["product"],
-                "Net $": top.net.round(0),
-                "Baskets": top.baskets,
-            }), use_container_width=True, hide_index=True, column_config={
-                "Net $": st.column_config.NumberColumn(format="$%d"),
-                "Baskets": st.column_config.NumberColumn(format="%d"),
-            })
-
-    # --- GWP / redemptions for the brand -------------------------------------
-    like = "(" + " OR ".join(
-        "LOWER(brand) LIKE '%" + p.replace("'", "''") + "%'"
-        for p in tk["patterns"]) + ")"
-    inwin = pd.DataFrame()
-    has_inwin = False
-    if table_exists("dash_offer_performance"):
-        st.divider()
-        st.markdown("##### Gift-with-purchase & loyalty redemptions")
-
-        # Exact in-window counts, once the refresh publishes daily
-        # redemptions. The SKU list below stays whole-period either way —
-        # the published SKU detail carries no dates.
-        inwin = pd.DataFrame()
-        if table_exists("dash_redemption_day"):
-            inwin = q(f"""
-                SELECT SUM(redemptions) AS redemptions,
-                       SUM(redeem_value) AS spend
-                FROM dash_redemption_day
-                WHERE {like} {af}
-                  AND day BETWEEN '{tk["start"]}'
-                              AND '{s["eff_end"]:%Y-%m-%d}'
-            """)
-        has_inwin = (not inwin.empty
-                     and pd.notna(inwin.redemptions.iloc[0])
-                     and inwin.redemptions.iloc[0] > 0)
-        if has_inwin:
-            st.markdown('<p class="note">Offers matched to this brand and '
-                        'redeemed <b>during the takeover window</b> — the '
-                        'exact GWP count for the promotion.</p>',
-                        unsafe_allow_html=True)
-            g = st.columns(2)
-            g[0].metric("Redemptions in window",
-                        f"{int(inwin.redemptions.iloc[0]):,}")
-            g[1].metric("Redemption $ in window",
-                        f"${inwin.spend.iloc[0]:,.0f}")
-            st.markdown('<p class="note">Which items were redeemed (whole '
-                        'loaded period):</p>', unsafe_allow_html=True)
-        else:
-            st.markdown('<p class="note">Redeemed offers matched to this '
-                        'brand, from the loyalty data. <b>Heads-up:</b> these '
-                        'tables cover the whole loaded period, not just this '
-                        'window — use them as the size of the GWP programme '
-                        'around the takeover, not an exact in-window count. '
-                        'Exact window counts appear after the next data '
-                        'refresh.</p>', unsafe_allow_html=True)
-        try:
-            sku = q(f"""
-                SELECT COALESCE(product, offer_name) AS sku,
-                       SUM(redemptions) AS redemptions,
-                       SUM(redeem_value) AS spend
-                FROM dash_offer_performance
-                WHERE {like} {af}
-                GROUP BY 1 ORDER BY spend DESC LIMIT 12
-            """)
-            if not len(sku):
-                raise ValueError("empty")
-        except Exception:
-            sku = q(f"""
-                SELECT offer_name AS sku,
-                       SUM(redemptions) AS redemptions,
-                       SUM(redeem_value) AS spend
-                FROM dash_offer_performance
-                WHERE {like} {af}
-                GROUP BY 1 ORDER BY spend DESC LIMIT 12
-            """)
-        if sku.empty or sku.spend.sum() == 0:
-            st.info(f"No redeemed offers matched to {pick}.")
-        else:
-            g = st.columns(3)
-            g[0].metric("Redemptions", f"{int(sku.redemptions.sum()):,}")
-            g[1].metric("Redemption $", f"${sku.spend.sum():,.0f}")
-            g[2].metric("SKUs / offers", f"{len(sku):,}")
-            st.dataframe(pd.DataFrame({
-                "SKU / Offer": sku.sku,
-                "Redemptions": sku.redemptions,
-                "Redemption $": sku.spend.round(0),
-            }), use_container_width=True, hide_index=True, column_config={
-                "Redemptions": st.column_config.NumberColumn(format="%d"),
-                "Redemption $": st.column_config.NumberColumn(format="$%d"),
-            })
-
-    # --- GWP reconciliation: received vs processed ---------------------------
-    if table_exists("dash_gwp_receipt"):
-        rec = q(f"""
-            SELECT product, product_sku,
-                   SUM(units_received) AS received
-            FROM dash_gwp_receipt
-            WHERE {like} {af}
-              AND day BETWEEN '{tk["start"]}' AND '{s["eff_end"]:%Y-%m-%d}'
-            GROUP BY 1,2 ORDER BY received DESC
-        """)
-        if not rec.empty and rec.received.sum() > 0:
-            st.divider()
-            st.markdown("##### GWP reconciliation — in the door vs out of it")
-            st.markdown(
-                '<div class="howto"><b>How to read this.</b> <b>Received</b> '
-                'is the GWP stock that arrived for the window, from the '
-                'inventory receipt reports. <b>Mis-rung</b> is the '
-                'discrepancy you asked about: sale lines where staff keyed '
-                'the <b>SKU number</b> instead of the product — spotted '
-                'because the line\'s "product" is a bare number, and '
-                'identified by matching that number back to the receipt '
-                'SKU. <b>Redeemed</b> is in-window loyalty redemptions '
-                '(brand level, not per SKU). Whatever remains is stock '
-                'still on the shelf — or units to chase down.</div>',
-                unsafe_allow_html=True)
-
-            skus = ",".join("'" + str(x).replace("'", "''") + "'"
-                            for x in rec.product_sku.unique())
-            sus = q(f"""
-                SELECT product AS sku, SUM(units) AS misrung,
-                       COUNT(*) AS lines, SUM(net) AS net
-                FROM dash_suspect_lines
-                WHERE product IN ({skus}) {af}
-                  AND day BETWEEN '{tk["start"]}' AND '{s["eff_end"]:%Y-%m-%d}'
-                GROUP BY 1
-            """) if table_exists("dash_suspect_lines") else pd.DataFrame()
-
-            merged = rec.merge(
-                sus.rename(columns={"sku": "product_sku"}),
-                on="product_sku", how="left")
-            for c in ("misrung", "lines", "net"):
-                if c not in merged:
-                    merged[c] = 0
-            merged[["misrung", "lines", "net"]] = \
-                merged[["misrung", "lines", "net"]].fillna(0)
-
-            redeemed = (float(inwin.redemptions.iloc[0])
-                        if has_inwin else np.nan)
-            c = st.columns(4)
-            c[0].metric("GWP units received",
-                        f"{int(rec.received.sum()):,}")
-            c[1].metric("Mis-rung units", f"{int(merged.misrung.sum()):,}",
-                        help="Sale lines keyed as a bare SKU number, matched "
-                             "to these GWP receipts.")
-            c[2].metric("Redeemed in window",
-                        f"{int(redeemed):,}" if pd.notna(redeemed) else "—",
-                        help="Brand-level: the published redemption data is "
-                             "not split by SKU.")
-            remaining = (rec.received.sum() - merged.misrung.sum()
-                         - (redeemed if pd.notna(redeemed) else 0))
-            c[3].metric("Unaccounted", f"{int(remaining):,}",
-                        help="Received minus mis-rung minus redeemed. "
-                             "Includes stock still on the shelf — check the "
-                             "back of house before chasing a gap.")
-
-            st.dataframe(pd.DataFrame({
-                "GWP item": merged["product"],
-                "SKU": merged["product_sku"],
-                "Received": merged.received.round(0),
-                "Mis-rung": merged.misrung.round(0),
-                "Mis-ring value $": merged.net.round(0),
-            }), use_container_width=True, hide_index=True, column_config={
-                "Received": st.column_config.NumberColumn(format="%d"),
-                "Mis-rung": st.column_config.NumberColumn(format="%d"),
-                "Mis-ring value $": st.column_config.NumberColumn(format="$%d"),
-            })
-            if merged.misrung.sum() > 0:
-                st.markdown(
-                    '<div class="alert a-warn"><b>Mis-rung GWP found.</b> '
-                    'The lines above were keyed by SKU number rather than '
-                    'processed as gift-with-purchase. They count as ordinary '
-                    'sales in the till, which understates the GWP programme '
-                    'and muddies the brand\'s real margin.</div>',
-                    unsafe_allow_html=True)
-
-
 with t_promo:
     render_promo_lab()
-
-with t_takeover:
-    render_takeovers()

@@ -84,14 +84,8 @@ def publish(con: duckdb.DuckDBPyConnection, sheet_id: str) -> None:
         except gspread.WorksheetNotFound:
             ws = wb.add_worksheet(tab, rows=len(df) + 10, cols=max(len(df.columns), 5))
 
-        # Sheets accepts only JSON scalars. Timestamps/Dates (load_log's
-        # loaded_at is one) must become text, and NaN -> "".
-        for col in df.columns:
-            if pd.api.types.is_datetime64_any_dtype(df[col]):
-                df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
         df = df.astype(object).where(pd.notna(df), "")
-        rows = [[_json_safe(v) for v in row] for row in df.values.tolist()]
-        ws.update([df.columns.tolist()] + rows,
+        ws.update([df.columns.tolist()] + df.values.tolist(),
                   value_input_option="RAW")
         print(f"    published {tab}: {len(df):,} rows")
 
@@ -99,17 +93,6 @@ def publish(con: duckdb.DuckDBPyConnection, sheet_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
-
-def _json_safe(v):
-    """Last-line defense for Sheets publishing: convert any lingering
-    date/datetime objects to strings so JSON serialization can't fail."""
-    import datetime as _dt
-    if isinstance(v, (pd.Timestamp, _dt.datetime)):
-        return v.strftime("%Y-%m-%d %H:%M:%S")
-    if isinstance(v, _dt.date):
-        return v.strftime("%Y-%m-%d")
-    return v
-
 
 def env(key: str) -> str:
     val = os.environ.get(key)
@@ -129,13 +112,6 @@ def main() -> int:
     drive = DriveClient()
 
     print(f"TTA scheduled refresh — config {CONFIG_VERSION}")
-    # Prove the secrets point at the folders you think they do. If this shows
-    # an old/duplicate folder name, the secret IDs are the real bug.
-    print(f"    service account: "
-          f"{getattr(credentials(), 'service_account_email', '<unknown>')}")
-    print(f"    inbox   -> {drive.folder_label(inbox_id)}")
-    print(f"    archive -> {drive.folder_label(archive_id)}")
-    print(f"    state   -> {drive.folder_label(state_id)}")
 
     with DriveLock(drive, state_id, DRIVE["lock_filename"]):
         # --- state -------------------------------------------------------
@@ -155,29 +131,24 @@ def main() -> int:
             return 0
 
         found = discover(local_inbox)
-        if "inventory" in found:
+        if "inventory" in found or "inventory_receipt" in found:
             pipe = Pipeline(str(DB_LOCAL))
-            for p in found["inventory"]:
+            for p in found.get("inventory", []):
                 # Snapshot date comes from the export header, not the filename.
                 stamp = _export_date(p)
                 counts = pipe.load_inventory(read_export(p, "inventory"), stamp)
                 print(f"    inventory {stamp}: {counts}")
+            for p in found.get("inventory_receipt", []):
+                counts = pipe.load_receipts(read_export(p, "inventory_receipt"))
+                print(f"    receipts {p.name}: {counts}")
             pipe.close()
 
         # --- transform ---------------------------------------------------
-        # Inventory-only mode: a mid-week stock snapshot (for the Days of
-        # Supply tracker) carries no sales data, so the sales ETL would
-        # refuse the run. Load the snapshot, skip ETL + publish, persist.
-        sales_keys = ("dispensations", "breakdown", "pos_register")
-        has_sales = any(k in found for k in sales_keys)
-        inventory_only = "inventory" in found and not has_sales
-
-        if inventory_only:
-            print("  [3/6] inventory-only mode — no sales exports, "
-                  "skipping sales ETL")
-            print("  [4/6] skipping Sheets publish "
-                  "(sales aggregates unchanged)")
-        else:
+        # A week that drops only receipts/inventory is legitimate. The ETL
+        # refuses an inbox without its required sales exports, which must not
+        # block receipt-only loads from publishing and archiving.
+        sales_required = {"dispensations", "breakdown", "pos_register"}
+        if sales_required.issubset(found):
             print("  [3/6] running ETL")
             rc = os.system(
                 f"python3 tta_etl.py --inbox {local_inbox} --db {DB_LOCAL} "
@@ -186,44 +157,22 @@ def main() -> int:
             if rc != 0:
                 print("  ETL reported failures — Drive left untouched")
                 return 1
+        else:
+            print("  [3/6] no sales exports in inbox — ETL skipped")
 
-            # --- publish -------------------------------------------------
-            print("  [4/6] publishing to Sheets")
-            con = duckdb.connect(str(DB_LOCAL))
-            publish(con, sheet_id)
-            con.close()
+        # --- publish -----------------------------------------------------
+        print("  [4/6] publishing to Sheets")
+        con = duckdb.connect(str(DB_LOCAL))
+        publish(con, sheet_id)
+        con.close()
 
         # --- persist -----------------------------------------------------
         print("  [5/6] pushing database back")
         drive.upload(DB_LOCAL, state_id, DRIVE["db_filename"])
 
         print("  [6/6] archiving processed exports")
-        failures = []
-        for path, file_id in pulled:
-            try:
-                drive.archive(file_id, archive_id, from_folder=inbox_id)
-                print(f"    archived {path.name}")
-            except Exception as e:
-                failures.append(path.name)
-                print(f"    !! could not archive {path.name}: {e}")
-        if failures:
-            raise RuntimeError(
-                f"{len(failures)} file(s) could not be archived: {failures}. "
-                f"Copies may already be in TTA/archive; originals remain in "
-                f"the inbox. Check that the service account printed at the "
-                f"top of this log is a Content manager on the TTA shared "
-                f"drive."
-            )
-        # The real verification: re-list the inbox. Drive hides the parents
-        # field from service accounts, but folder listings always tell the
-        # truth -- if anything we processed is still there, fail loudly.
-        remaining = {f["id"] for f in drive.list_files(inbox_id)}
-        leftovers = [p.name for p, fid in pulled if fid in remaining]
-        if leftovers:
-            raise RuntimeError(
-                f"still in the inbox after archiving: {leftovers}. "
-                f"Check the service account's access to TTA/archive."
-            )
+        for _, file_id in pulled:
+            drive.move(file_id, archive_id)
         print(f"    archived {len(pulled)} file(s)")
 
     print("done")

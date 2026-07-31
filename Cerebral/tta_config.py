@@ -173,6 +173,14 @@ EXPORTS = {
         "scope": "store",
         "signature": ["Package ID", "Product Name", "Quantity on Hand", "Inventory Room"],
     },
+    # Inventory Receipt Report - Detail. Carries "Location Name" like the
+    # inventory snapshot, so one file may be store-scoped OR chain-wide; the
+    # loader splits either way. Signature columns exist in no other export.
+    "inventory_receipt": {
+        "scope": "chain",
+        "signature": ["Product SKU", "Receive Date", "Transfer From Location",
+                      "Vendor Name"],
+    },
 }
 
 MAX_HEADER_SCAN_ROWS = 12
@@ -181,13 +189,8 @@ MAX_HEADER_SCAN_ROWS = 12
 # VALIDATION THRESHOLDS
 # ---------------------------------------------------------------------------
 THRESHOLDS = {
-    "product_join_rate":   0.990,   # dispensation lines matched to breakdown
-    # Measured by RECEIPT, not by line. Daily Dispensations includes non-POS
-    # events (inventory adjustments, destructions, retroactive corrections)
-    # that carry 30-100+ lines each; counting lines makes one adjustment look
-    # like 100 failures.
-    "receipt_join_rate":   0.990,   # receipts matched to POS register
-    "bulk_event_min_lines": 20,     # lines/receipt above which it is an adjustment
+    "product_join_rate":   0.995,   # dispensation lines matched to breakdown
+    "receipt_join_rate":   0.995,   # receipts matched to POS register
     "unmapped_category":   0,       # raw category strings not in CATEGORY_MAP
     "unknown_channel":     0,       # registers the rules could not classify
     # Reconciliation is banded. Dispensations and the Breakdown are produced by
@@ -210,7 +213,7 @@ THRESHOLDS = {
 # availability dates, thresholds). Stamped onto every row of load_log so you
 # can always tell which rules a given period was built under.
 # ---------------------------------------------------------------------------
-CONFIG_VERSION = "2026.07.26-1"
+CONFIG_VERSION = "2026.08.01-1"
 
 # ---------------------------------------------------------------------------
 # REPROCESS WINDOW

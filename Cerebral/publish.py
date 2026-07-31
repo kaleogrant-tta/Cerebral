@@ -299,6 +299,11 @@ def build(src: str, dest: str) -> dict:
                 redemptions BIGINT, redeem_value DOUBLE, avg_basket DOUBLE,
                 first_seen TIMESTAMP, last_seen TIMESTAMP)
         """)
+        con.execute("""
+            CREATE TABLE dash_redemption_day (
+                store_key INTEGER, day DATE, brand VARCHAR,
+                redemptions BIGINT, redeem_value DOUBLE)
+        """)
         print("  ! source has no fact_redemption — reload history to populate "
               "brand redemption. Empty tables created.")
     else:
@@ -349,6 +354,20 @@ def build(src: str, dest: str) -> dict:
         GROUP BY 1,2,3,4,5,6
       """)
 
+      # Redemptions per brand per day. The offer tables above cover the whole
+      # loaded period, which cannot answer "how many GWP redemptions happened
+      # during this takeover window" — this one can.
+      con.execute(f"""
+        CREATE TABLE dash_redemption_day AS
+        SELECT r.store_key,
+               CAST(r.txn_ts AS DATE)                          AS day,
+               {_family_sql('r.offer_name', 'r.matched_brand')} AS brand,
+               COUNT(*)                                        AS redemptions,
+               SUM(r.redeem_amt)                               AS redeem_value
+        FROM src.fact_redemption r
+        GROUP BY 1,2,3
+      """)
+
 
     # --- promo lab: privacy-safe churn aggregates --------------------------
     # Per-customer behaviour reduced to counts per store x category / brand.
@@ -384,6 +403,75 @@ def build(src: str, dest: str) -> dict:
                    SUM(spend)  FILTER (WHERE date_diff('day', last_ts, (SELECT t1 FROM mx)) > 90) AS lapsed_spend_90
             FROM pc GROUP BY 1,2
         """)
+
+    # --- brand x store x day ----------------------------------------------
+    # Day-level brand sales for the Takeover tab. Takeover windows (e.g.
+    # April 1-15) do not align with the ISO weeks every other table uses, so
+    # the weekly tables cannot measure them. Still only sums and counts —
+    # no basket keys, no customer keys. The small-brand floor keeps the file
+    # slim without dropping any brand a takeover would ever feature.
+    con.execute("""
+        CREATE TABLE dash_brand_day AS
+        WITH big AS (
+            -- Brand-level floor, same as the scorecard. Filtering per day
+            -- instead would silently erase slow days for smaller brands.
+            SELECT brand FROM src.fact_line
+            WHERE NOT is_return AND brand IS NOT NULL
+            GROUP BY 1 HAVING SUM(net_sales) >= 1000
+        )
+        SELECT CAST(txn_ts AS DATE)             AS day,
+               store_key, brand,
+               SUM(net_sales)                   AS net,
+               SUM(units)                       AS units,
+               COUNT(DISTINCT basket_id)        AS baskets,
+               SUM(gross_margin)                AS gm
+        FROM src.fact_line
+        WHERE NOT is_return
+          AND brand IN (SELECT brand FROM big)
+        GROUP BY 1,2,3
+    """)
+
+    # --- GWP receipts + suspect lines --------------------------------------
+    # The two sides of GWP reconciliation. dash_gwp_receipt is what came in
+    # the door; dash_suspect_lines is sale lines whose "product" is a bare
+    # SKU number — the mis-ring symptom, where staff keyed the SKU instead of
+    # picking the product. Matching those numbers against the receipt SKUs
+    # identifies what the customer actually walked out with.
+    has_receipt = con.execute("""
+        SELECT COUNT(*) FROM duckdb_tables()
+        WHERE database_name = 'src' AND table_name = 'fact_receipt'
+    """).fetchone()[0] > 0
+
+    if not has_receipt:
+        con.execute("""
+            CREATE TABLE dash_gwp_receipt (
+                store_key INTEGER, day DATE, brand VARCHAR, product VARCHAR,
+                product_sku VARCHAR, units_received DOUBLE)
+        """)
+    else:
+        con.execute("""
+            CREATE TABLE dash_gwp_receipt AS
+            SELECT store_key, receive_date AS day, brand, product, product_sku,
+                   SUM(quantity) AS units_received
+            FROM src.fact_receipt
+            WHERE is_gwp
+            GROUP BY 1,2,3,4,5
+        """)
+
+    suspect_sql = """
+        CREATE TABLE dash_suspect_lines AS
+        SELECT store_key, CAST(txn_ts AS DATE) AS day, product,
+               COUNT(*)      AS lines,
+               SUM(units)    AS units,
+               SUM(net_sales) AS net
+        FROM src.fact_line
+        WHERE NOT is_return
+          AND (regexp_matches(product, '^[0-9]{4,}$'){extra})
+        GROUP BY 1,2,3
+    """
+    extra = ("\n           OR product IN "
+             "(SELECT product_sku FROM src.fact_receipt)") if has_receipt else ""
+    con.execute(suspect_sql.format(extra=extra))
 
     # --- inventory, most recent snapshot only ----------------------------
     con.execute("""
@@ -424,10 +512,11 @@ def build(src: str, dest: str) -> dict:
     # is fine; a customer key is not. Name-substring matching flagged
     # "first_basket_customers" and would keep doing so as tables are added,
     # which trains you to ignore the check.
+    # product_sku is a stock-keeping number, not a person.
     ALLOWED_TEXT = {"category", "raw_category", "brand", "product", "channel",
                     "cat_a", "cat_b", "brand_a", "brand_b", "period",
                     "config_version", "room", "primary_category",
-                    "match_method", "offer_name"}
+                    "match_method", "offer_name", "product_sku"}
     leaked = []
     for (t,) in con.execute("SHOW TABLES").fetchall():
         info = con.execute(f"PRAGMA table_info('{t}')").fetchall()

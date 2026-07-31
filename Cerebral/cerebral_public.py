@@ -316,9 +316,15 @@ def gate() -> bool:
 # Data
 # ===========================================================================
 
+# Why the last load_db() attempt failed — shown on the no-data screen so a
+# deployment problem names itself instead of guessing.
+LOAD_DB_WHYS: list[str] = []
+
+
 @st.cache_resource(ttl=CACHE_MINUTES * 60)
 def load_db() -> str | None:
     """Local file if present, otherwise pull the published copy from Drive."""
+    LOAD_DB_WHYS.clear()
     # Look next to the script, then one level up (repo root when the app
     # lives in a subfolder, as on Streamlit Cloud), then the launch
     # directory — so the bundled data file always wins over Drive.
@@ -329,6 +335,12 @@ def load_db() -> str | None:
 
     sa = secret("gcp_service_account")
     folder = secret("TTA_DRIVE_STATE") or os.environ.get("TTA_DRIVE_STATE")
+    if not sa:
+        LOAD_DB_WHYS.append("the `gcp_service_account` secret is missing "
+                            "or empty in the app's Streamlit settings")
+    if not folder:
+        LOAD_DB_WHYS.append("the `TTA_DRIVE_STATE` secret is missing "
+                            "or empty in the app's Streamlit settings")
     if not sa or not folder:
         return None
 
@@ -336,16 +348,24 @@ def load_db() -> str | None:
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
 
-    info = dict(sa) if not isinstance(sa, str) else json.loads(sa)
-    creds = Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/drive.readonly"])
-    svc = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-    res = svc.files().list(
-        q=f"'{folder}' in parents and name = '{DASH_FILE}' and trashed = false",
-        orderBy="modifiedTime desc",
-        fields="files(id,name,size,modifiedTime)").execute().get("files", [])
+    try:
+        info = dict(sa) if not isinstance(sa, str) else json.loads(sa)
+        creds = Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive.readonly"])
+        svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        res = svc.files().list(
+            q=f"'{folder}' in parents and name = '{DASH_FILE}' and trashed = false",
+            orderBy="modifiedTime desc",
+            fields="files(id,name,size,modifiedTime)").execute().get("files", [])
+    except Exception as e:
+        msg = str(e).replace("\n", " ")[:300]
+        LOAD_DB_WHYS.append(f"Drive access failed — {type(e).__name__}: {msg}")
+        return None
     if not res:
+        LOAD_DB_WHYS.append(
+            f"the credentials work, but there is no file named `{DASH_FILE}` "
+            "in the Drive folder that `TTA_DRIVE_STATE` points to — either the "
+            "folder ID is wrong or the publish step has not uploaded it there")
         return None
 
     dest = Path(tempfile.gettempdir()) / DASH_FILE
@@ -494,11 +514,11 @@ if not gate():
 if load_db() is None:
     st.title("Cerebral")
     st.error("No published data available.")
+    for why in LOAD_DB_WHYS:
+        st.markdown(f"- {why}")
     st.markdown("""
-The dashboard reads `cerebral_dash.duckdb`, built by the scheduled refresh.
-
-If you are seeing this, either the refresh has not run since this app was
-deployed, or the app's Drive credentials are not configured.
+The dashboard reads `cerebral_dash.duckdb`, built by the scheduled refresh
+and pulled from Google Drive using the app's secrets.
 """)
     st.stop()
 

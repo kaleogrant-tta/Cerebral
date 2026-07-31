@@ -165,20 +165,33 @@ def main() -> int:
             pipe.close()
 
         # --- transform ---------------------------------------------------
-        print("  [3/6] running ETL")
-        rc = os.system(
-            f"python3 tta_etl.py --inbox {local_inbox} --db {DB_LOCAL} "
-            f"--period scheduled"
-        )
-        if rc != 0:
-            print("  ETL reported failures — Drive left untouched")
-            return 1
+        # Inventory-only mode: a mid-week stock snapshot (for the Days of
+        # Supply tracker) carries no sales data, so the sales ETL would
+        # refuse the run. Load the snapshot, skip ETL + publish, persist.
+        sales_keys = ("dispensations", "breakdown", "pos_register")
+        has_sales = any(k in found for k in sales_keys)
+        inventory_only = "inventory" in found and not has_sales
 
-        # --- publish -----------------------------------------------------
-        print("  [4/6] publishing to Sheets")
-        con = duckdb.connect(str(DB_LOCAL))
-        publish(con, sheet_id)
-        con.close()
+        if inventory_only:
+            print("  [3/6] inventory-only mode — no sales exports, "
+                  "skipping sales ETL")
+            print("  [4/6] skipping Sheets publish "
+                  "(sales aggregates unchanged)")
+        else:
+            print("  [3/6] running ETL")
+            rc = os.system(
+                f"python3 tta_etl.py --inbox {local_inbox} --db {DB_LOCAL} "
+                f"--period scheduled"
+            )
+            if rc != 0:
+                print("  ETL reported failures — Drive left untouched")
+                return 1
+
+            # --- publish -------------------------------------------------
+            print("  [4/6] publishing to Sheets")
+            con = duckdb.connect(str(DB_LOCAL))
+            publish(con, sheet_id)
+            con.close()
 
         # --- persist -----------------------------------------------------
         print("  [5/6] pushing database back")

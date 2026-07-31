@@ -24,6 +24,8 @@ Deployed (Streamlit Community Cloud): set these in the app's Secrets —
 
 from __future__ import annotations
 
+import auth_module
+
 import json
 import os
 import re

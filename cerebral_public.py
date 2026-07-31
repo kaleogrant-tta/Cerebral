@@ -483,6 +483,112 @@ def run_rule(s: pd.Series) -> str | None:
         return "6 consecutive weeks falling"
     return None
 
+# ---------------------------------------------------------------------------
+# Offer-name brand attribution
+#
+# The ETL attributes an offer's brand by matching the offer to the contents
+# of the redeeming basket. When that match fails — or lands on a basket-mate
+# rather than the discounted product — the brand comes out wrong or blank,
+# which is why one offer can appear under several brands.
+#
+# Offer names are far more reliable: they follow "Travel Club {Brand}
+# {Product}" / "Loyalty {Brand} {Product}". So the dashboard re-derives the
+# brand from the offer name and only falls back to the ETL value (flagged as
+# inferred) when the name yields nothing.
+# ---------------------------------------------------------------------------
+
+_SUB_RE = re.compile(r"(\d[\d,]*)\s*points?\s+substitution", re.IGNORECASE)
+
+_TTA_MERCH_WORDS = (
+    "lighter", "dad hat", "beanie", "battery", "papers", "grinder",
+    "rolling tray", "tray", "ashtray", "clipper", "hoodie", "tee",
+    "tote", "socks", "hat",
+)
+
+
+@st.cache_data(ttl=CACHE_MINUTES * 60)
+def offer_brand_vocabulary() -> tuple:
+    """Brand names known to the dashboard, longest first.
+
+    Pulled from the brand tables rather than hardcoded, so the matcher stays
+    current as brands rotate through the menu. Longest-first matters: "Ruby
+    Farms" must be tried before "Ruby", and "Papa & Barkley" before "Barkley".
+    """
+    names = set()
+    for tbl in ("dash_brand_trend", "dash_brand_scorecard"):
+        if table_exists(tbl):
+            r = q(f"SELECT DISTINCT brand FROM {tbl} WHERE brand IS NOT NULL")
+            names.update(b.strip() for b in r.brand
+                         if isinstance(b, str) and b.strip())
+    # ETL artefacts, not real brands — never match these into an offer.
+    names = {n for n in names if "substitution" not in n.lower()}
+    return tuple(sorted(names, key=len, reverse=True))
+
+
+def _brand_in_offer(brand: str, offer_lower: str) -> bool:
+    """Whole-name match, tolerant of trailing punctuation like 'Find.'."""
+    pat = (r"(?<![A-Za-z0-9])"
+           + re.escape(brand.lower().rstrip(". "))
+           + r"(?![A-Za-z0-9])")
+    return re.search(pat, offer_lower) is not None
+
+
+def resolve_offer_brand(offer_name, etl_brand, vocabulary) -> tuple:
+    """Return (brand, source) for one offer row.
+
+    source is one of:
+      'name'         — parsed from the offer name (trusted)
+      'merch'        — TTA house merchandise
+      'substitution' — points-substitution offer, no single brand exists
+      'etl'          — fell back to the ETL's basket match (inferred)
+      None           — could not be attributed
+    """
+    s = str(offer_name).lower()
+    if _SUB_RE.search(s):
+        return None, "substitution"
+    if s.startswith("secret drop"):
+        return "Secret Drops", "name"
+    for b in vocabulary:
+        if _brand_in_offer(b, s):
+            return b, "name"
+    # Product lines that shorten the brand: "Ruby Doobies" for Ruby Farms.
+    # First word of a multi-word brand, long enough to be distinctive.
+    for b in vocabulary:
+        if " " in b:
+            first = b.split()[0].lower().rstrip(". ")
+            if len(first) >= 4 and _brand_in_offer(first, s):
+                return b, "name"
+    if "tta" in s and any(w in s for w in _TTA_MERCH_WORDS):
+        return "The Travel Agency", "merch"
+    if (isinstance(etl_brand, str) and etl_brand.strip()
+            and "substitution" not in etl_brand.lower()):
+        return etl_brand.strip(), "etl"
+    return None, None
+
+
+def _product_brand(product, vocabulary) -> str | None:
+    """Brand of a SKU chosen in a substitution, read from the product name.
+
+    Substitution picks are recorded with the product the customer received
+    ("Rythm Flower Brownie Scout 28g"), so the brand is certain even though
+    the redemption is catalogued under a points tier. Same matching rules as
+    offer-name attribution: full brand name first, then the distinctive
+    first word of a multi-word brand.
+    """
+    s = str(product).lower()
+    for b in vocabulary:
+        if _brand_in_offer(b, s):
+            return b
+    for b in vocabulary:
+        if " " in b:
+            first = b.split()[0].lower().rstrip(". ")
+            if len(first) >= 4 and _brand_in_offer(first, s):
+                return b
+    if "tta" in s and any(w in s for w in _TTA_MERCH_WORDS):
+        return "The Travel Agency"
+    return None
+
+
 
 # ===========================================================================
 # App
@@ -1901,9 +2007,10 @@ with t_redeem:
     st.markdown("#### Brand performance in redeeming baskets")
     st.markdown('<div class="howto"><b>How to read this.</b> Alpine records a '
                 'redemption against a basket, but its offers are named after '
-                'the product they discount. Matching the offer name to the '
-                'basket contents recovers which brand the money was spent '
-                'on.<br><br>'
+                'the product they discount — so the brand is read from the '
+                'offer name itself, which is far more reliable than guessing '
+                'from basket contents. Brands marked with ~ fell back to the '
+                'old basket match and are inferred.<br><br>'
                 'The column that matters most is <b>first-visit redeemers</b>. '
                 'An offer redeemed by someone on their first-ever visit bought '
                 'you a customer. One redeemed by a regular discounted a sale '
@@ -2002,50 +2109,88 @@ with t_redeem:
                 f'not be matched to a brand or promo family.</p>',
                 unsafe_allow_html=True)
 
+        # --- Offer-level data, re-attributed from offer names -------------
+        # dash_offer_performance carries the ETL's basket-matched brand, which
+        # is wrong whenever the match failed or landed on a basket-mate —
+        # that is why one offer could appear under several brands. Offer
+        # names name the product, so the brand is re-derived here from the
+        # name; the ETL value is kept only as a flagged fallback. Points
+        # substitutions name no product, so they are handled separately.
+        off = q(f"""
+            SELECT offer_name, brand, category,
+                   SUM(redemptions)  AS redemptions,
+                   SUM(redeem_value) AS spend,
+                   AVG(avg_basket)   AS avg_basket
+            FROM dash_offer_performance {wf}
+            GROUP BY 1,2,3
+        """)
+        prod = subs2 = off.iloc[0:0]
+        if not off.empty:
+            vocab = offer_brand_vocabulary()
+            resolved = off.apply(
+                lambda r: resolve_offer_brand(r.offer_name, r.brand, vocab),
+                axis=1, result_type="expand")
+            off["brand_resolved"] = resolved[0]
+            off["brand_source"] = resolved[1]
+            prod = off[off.brand_source != "substitution"].copy()
+            subs2 = off[off.brand_source == "substitution"].copy()
+
         # --- Brand → SKU redemption drill-down -------------------------
         st.divider()
         st.markdown("##### Which SKUs were redeemed, by brand")
         st.markdown(
             '<div class="howto"><b>How to read this.</b> Pick a brand — or a '
             'promo family like Secret Drops — to see what was actually rung '
-            'up for its redemptions. The same offer appears under different '
-            'names over time ("Loyalty …", the "Loytaly …" typo, "Travel '
-            'Club …"), so rows group by the product, not the offer name. '
-            'Where a menu item was swapped at the register, the SKU shown is '
-            'the one the customer actually received.</div>',
+            'up for its redemptions. Brands are read from the offer names '
+            'themselves, so offers the old basket match scattered across '
+            'wrong brands now sit where they belong. The same offer appears '
+            'under different names over time ("Loyalty …", the "Loytaly …" '
+            'typo, "Travel Club …"), so rows group by the product, not the '
+            'offer name. Where a menu item was swapped at the register, the '
+            'SKU shown is the one the customer actually received.</div>',
             unsafe_allow_html=True)
 
-        brand_opts = sorted(attributed.brand.dropna().unique())
-        sel_brand = st.selectbox("Select a brand", brand_opts,
-                                 key="redeem_brand_sku")
+        if prod.empty:
+            st.info("No offer-level redemption data in the published file.")
+        else:
+            brand_opts = sorted(prod.brand_resolved.dropna().unique())
+            sel_brand = st.selectbox("Select a brand", brand_opts,
+                                     key="redeem_brand_sku")
 
-        # Group by the matched product (strain-level) when the published file
-        # has it; older files only carry offer names. Offer-name variants —
-        # "Loyalty …", the "Loytaly …" typo — roll up into one row per strain.
-        try:
-            sku = q(f"""
-                SELECT COALESCE(product, offer_name) AS sku, category,
-                       SUM(redemptions) AS redemptions,
-                       SUM(redeem_value) AS spend,
-                       AVG(avg_basket)  AS avg_basket
-                FROM dash_offer_performance
-                WHERE brand = '{sel_brand.replace("'", "''")}' {af}
-                GROUP BY 1,2
-                ORDER BY spend DESC
-            """)
-            if not len(sku):
-                raise ValueError("empty")
-        except Exception:
-            sku = q(f"""
-                SELECT offer_name AS sku, category,
-                       SUM(redemptions) AS redemptions,
-                       SUM(redeem_value) AS spend,
-                       AVG(avg_basket)  AS avg_basket
-                FROM dash_offer_performance
-                WHERE brand = '{sel_brand.replace("'", "''")}' {af}
-                GROUP BY 1,2
-                ORDER BY spend DESC
-            """)
+            # Filter by the OFFERS that resolve to this brand, not by the
+            # ETL's basket-matched brand column — that column is what
+            # scattered one offer across Anthem, Foy, Ayrloom and friends.
+            sel_offers = (prod.loc[prod.brand_resolved == sel_brand,
+                                   "offer_name"].dropna().unique().tolist())
+            offer_sql = ",".join("'" + str(o).replace("'", "''") + "'"
+                                 for o in sel_offers)
+
+            # Group by the matched product (strain-level) when the published
+            # file has it; older files only carry offer names.
+            try:
+                sku = q(f"""
+                    SELECT COALESCE(product, offer_name) AS sku, category,
+                           SUM(redemptions) AS redemptions,
+                           SUM(redeem_value) AS spend,
+                           AVG(avg_basket)  AS avg_basket
+                    FROM dash_offer_performance
+                    WHERE offer_name IN ({offer_sql}) {af}
+                    GROUP BY 1,2
+                    ORDER BY spend DESC
+                """)
+                if not len(sku):
+                    raise ValueError("empty")
+            except Exception:
+                sku = q(f"""
+                    SELECT offer_name AS sku, category,
+                           SUM(redemptions) AS redemptions,
+                           SUM(redeem_value) AS spend,
+                           AVG(avg_basket)  AS avg_basket
+                    FROM dash_offer_performance
+                    WHERE offer_name IN ({offer_sql}) {af}
+                    GROUP BY 1,2
+                    ORDER BY spend DESC
+                """)
 
         if sku.empty:
             st.info(f"No redeemed offers matched to {sel_brand}.")
@@ -2088,14 +2233,16 @@ with t_redeem:
         st.markdown("##### Chosen instead — off-menu picks")
         st.markdown(
             '<div class="howto"><b>How to read this.</b> When a redemption '
-            'menu item is out of stock, staff let the customer pick something '
-            'of similar value instead. Those swaps ring up at $0.01, or '
-            'discounted down to just the tax — that price pattern is how '
-            'they are identified here. Ranked by redemption dollars, this is '
-            'a ready-made shortlist of candidates for the menu. One caveat: '
-            'if a customer also bought something genuinely cheap, that can '
-            'occasionally be picked up as the swap — sanity-check an '
-            'unfamiliar row before acting on it.</div>',
+            'menu item is out of stock — or a customer spends substitution '
+            'points — the product they actually receive rings up at $0.01, '
+            'or discounted down to just the tax. That price pattern is how '
+            'these rows are identified. The Brand tag separates the two '
+            'kinds of pick: a brand already on the redemption menu (Rythm, '
+            'Select) is an expected choice — a regular spending points on a '
+            'favourite. A brand you do not recognise is a genuine candidate '
+            'for the menu. One caveat: if a customer also bought something '
+            'genuinely cheap, that can occasionally be picked up as the swap '
+            '— sanity-check an unfamiliar row before acting on it.</div>',
             unsafe_allow_html=True)
         subs = q(f"""
             SELECT product AS sku, category,
@@ -2111,8 +2258,12 @@ with t_redeem:
             st.info("No substitutions recorded yet. They appear after the "
                     "next data rebuild, once re-matching has run.")
         else:
+            vocab2 = offer_brand_vocabulary()
+            subs["brand"] = subs.sku.map(
+                lambda p: _product_brand(p, vocab2) or "—")
             st.dataframe(pd.DataFrame({
                 "SKU chosen": subs.sku,
+                "Brand": subs.brand,
                 "Category": subs.category,
                 "Times picked": subs.redemptions,
                 "Redemption $": subs.spend.round(0),
@@ -2144,27 +2295,78 @@ with t_redeem:
         fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0f")
         st.plotly_chart(fig, use_container_width=True, key="pc11")
 
-        off = q(f"""
-            SELECT offer_name, brand, category,
-                   SUM(redemptions) AS redemptions,
-                   SUM(redeem_value) AS spend,
-                   AVG(avg_basket) AS avg_basket
-            FROM dash_offer_performance {wf}
-            GROUP BY 1,2,3 ORDER BY spend DESC
-        """)
-        if not off.empty:
+        # --- Individual offers, one row per offer -------------------------
+        if not prod.empty:
             st.divider()
             st.markdown("##### Individual offers")
-            off["cost_per_redemption"] = off.spend / off.redemptions.replace(
-                0, float("nan"))
+            st.markdown('<p class="note">Each offer appears once, with the '
+                        'brand read from the offer name. A ~ after the brand '
+                        'means the name gave no answer and the old basket '
+                        'match was used instead — treat those as inferred. '
+                        'Points substitutions are in their own table below, '
+                        'because each redemption can be a different '
+                        'product.</p>', unsafe_allow_html=True)
+
+            ind = (prod.groupby("offer_name", as_index=False)
+                   .agg(brand=("brand_resolved",
+                               lambda s: (s.dropna().iloc[0]
+                                          if s.notna().any() else None)),
+                        inferred=("brand_source", lambda s: (s == "etl").all()),
+                        redemptions=("redemptions", "sum"),
+                        spend=("spend", "sum"),
+                        avg_basket=("avg_basket", "mean"))
+                   .sort_values("spend", ascending=False))
+            ind["cost_per_redemption"] = (
+                ind.spend / ind.redemptions.replace(0, float("nan")))
+            ind["brand_disp"] = ind.apply(
+                lambda r: (f"{r.brand} ~" if r.brand and r.inferred
+                           else (r.brand or "Unknown")), axis=1)
+
             st.dataframe(pd.DataFrame({
-                "Offer": off.offer_name,
-                "Brand": off.brand,
-                "Redemptions": off.redemptions,
-                "Spend $": off.spend.round(0),
-                "Cost each": off.cost_per_redemption.round(2),
-                "Avg basket": off.avg_basket.round(2),
+                "Offer": ind.offer_name,
+                "Brand": ind.brand_disp,
+                "Redemptions": ind.redemptions,
+                "Spend $": ind.spend.round(0),
+                "Cost each": ind.cost_per_redemption.round(2),
+                "Avg basket": ind.avg_basket.round(2),
             }), use_container_width=True, hide_index=True, column_config={
+                "Redemptions": st.column_config.NumberColumn(format="%d"),
+                "Spend $": st.column_config.NumberColumn(format="$%d"),
+                "Cost each": st.column_config.NumberColumn(format="$%.2f"),
+                "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
+            })
+
+        # --- Points substitutions, grouped by tier ------------------------
+        if not subs2.empty:
+            st.divider()
+            st.markdown("##### Points substitutions")
+            st.markdown('<p class="note">A substitution swaps points for a '
+                        'product of the customer\'s choosing, so there is no '
+                        'single brand to attribute. Grouped by point tier '
+                        'instead — this shows which tiers actually get '
+                        'used.</p>', unsafe_allow_html=True)
+
+            tier = subs2.copy()
+            tier["points"] = pd.to_numeric(
+                tier.offer_name.str.extract(_SUB_RE)[0]
+                .str.replace(",", "", regex=False), errors="coerce")
+            tier = (tier.groupby("points", as_index=False)
+                    .agg(redemptions=("redemptions", "sum"),
+                         spend=("spend", "sum"),
+                         avg_basket=("avg_basket", "mean"))
+                    .sort_values("points"))
+            tier["cost_per_redemption"] = (
+                tier.spend / tier.redemptions.replace(0, float("nan")))
+
+            st.dataframe(pd.DataFrame({
+                "Point tier": tier.points.map(
+                    lambda p: f"{int(p):,} pts" if pd.notna(p) else "?"),
+                "Redemptions": tier.redemptions,
+                "Spend $": tier.spend.round(0),
+                "Cost each": tier.cost_per_redemption.round(2),
+                "Avg basket": tier.avg_basket.round(2),
+            }), use_container_width=True, hide_index=True, column_config={
+                "Redemptions": st.column_config.NumberColumn(format="%d"),
                 "Spend $": st.column_config.NumberColumn(format="$%d"),
                 "Cost each": st.column_config.NumberColumn(format="$%.2f"),
                 "Avg basket": st.column_config.NumberColumn(format="$%.2f"),

@@ -3045,22 +3045,28 @@ def render_takeovers():
 
             redeemed = (float(inwin.redemptions.iloc[0])
                         if has_inwin else np.nan)
-            c = st.columns(4)
-            c[0].metric("GWP units received",
-                        f"{int(rec.received.sum()):,}")
-            c[1].metric("Mis-rung units", f"{int(merged.misrung.sum()):,}",
-                        help="Sale lines keyed as a bare SKU number, matched "
-                             "to these GWP receipts.")
+            # The headline: how many GWP units left the shop during the
+            # window, by whatever route — properly redeemed plus mis-rung.
+            out_door = merged.misrung.sum() + \
+                (redeemed if pd.notna(redeemed) else 0)
+            c = st.columns(5)
+            c[0].metric("GWP out the door", f"{int(out_door):,}",
+                        help="Every GWP unit that left during the window: "
+                             "loyalty redemptions plus mis-rung lines.")
+            c[1].metric("Received", f"{int(rec.received.sum()):,}")
             c[2].metric("Redeemed in window",
                         f"{int(redeemed):,}" if pd.notna(redeemed) else "—",
                         help="Brand-level: the published redemption data is "
                              "not split by SKU.")
+            c[3].metric("Mis-rung", f"{int(merged.misrung.sum()):,}",
+                        help="Sale lines keyed as a bare SKU number, matched "
+                             "to these GWP receipts.")
             remaining = (rec.received.sum() - merged.misrung.sum()
                          - (redeemed if pd.notna(redeemed) else 0))
-            c[3].metric("Unaccounted", f"{int(remaining):,}",
-                        help="Received minus mis-rung minus redeemed. "
-                             "Includes stock still on the shelf — check the "
-                             "back of house before chasing a gap.")
+            c[4].metric("Unaccounted", f"{int(remaining):,}",
+                        help="Received minus out-the-door. Includes stock "
+                             "still on the shelf — check the back of house "
+                             "before chasing a gap.")
 
             st.dataframe(pd.DataFrame({
                 "GWP item": merged["product"],

@@ -458,7 +458,11 @@ def build(src: str, dest: str) -> dict:
             GROUP BY 1,2,3,4,5
         """)
 
-    suspect_sql = """
+    # Built by concatenation, not .format(): the regex contains literal
+    # braces ({4,}) which .format() reads as a replacement field.
+    extra = ("\n           OR product IN "
+             "(SELECT product_sku FROM src.fact_receipt)") if has_receipt else ""
+    con.execute("""
         CREATE TABLE dash_suspect_lines AS
         SELECT store_key, CAST(txn_ts AS DATE) AS day, product,
                COUNT(*)      AS lines,
@@ -466,12 +470,9 @@ def build(src: str, dest: str) -> dict:
                SUM(net_sales) AS net
         FROM src.fact_line
         WHERE NOT is_return
-          AND (regexp_matches(product, '^[0-9]{4,}$'){extra})
+          AND (regexp_matches(product, '^[0-9]{4,}$')""" + extra + """)
         GROUP BY 1,2,3
-    """
-    extra = ("\n           OR product IN "
-             "(SELECT product_sku FROM src.fact_receipt)") if has_receipt else ""
-    con.execute(suspect_sql.format(extra=extra))
+    """)
 
     # --- inventory, most recent snapshot only ----------------------------
     con.execute("""

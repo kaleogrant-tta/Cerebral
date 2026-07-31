@@ -84,6 +84,11 @@ def publish(con: duckdb.DuckDBPyConnection, sheet_id: str) -> None:
         except gspread.WorksheetNotFound:
             ws = wb.add_worksheet(tab, rows=len(df) + 10, cols=max(len(df.columns), 5))
 
+        # Sheets speaks JSON; pandas Timestamps and NaT are not. Stringify
+        # datetimes BEFORE the null-fill, or ws.update raises TypeError.
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
         df = df.astype(object).where(pd.notna(df), "")
         ws.update([df.columns.tolist()] + df.values.tolist(),
                   value_input_option="RAW")

@@ -1126,26 +1126,36 @@ with t_insights:
                         unsafe_allow_html=True)
 
             # --- brand detail ---------------------------------------------
-            st.markdown("**Brands in these categories**")
-            show = bt.sort_values("net_total", ascending=False).head(18)
-            st.dataframe(pd.DataFrame({
-                "Category": show.category,
-                "Brand": show.brand,
-                "Net $": show.net_total.round(0),
-                "Change %": pd.to_numeric(show.change, errors="coerce").round(1),
-                "Direction": show.dir,
-            }), use_container_width=True, hide_index=True, column_config={
-                "Net $": st.column_config.NumberColumn(
-                    help="Net sales across the whole loaded period.",
-                    format="$%d"),
-                "Change %": st.column_config.NumberColumn(
-                    help="Second half of the period versus the first half. "
-                         "Shows which way the brand is moving.",
-                    format="%.1f%%"),
-                "Direction": st.column_config.TextColumn(
-                    help="Growing is more than +10%, declining is worse than "
-                         "-10%, anything between is flat."),
-            })
+            st.markdown("**Top brands in each category**")
+            st.markdown('<p class="note">One chart per category. In a single shared '
+                        'ranking the bigger category fills the whole top 10 and the '
+                        'smaller one never appears.</p>', unsafe_allow_html=True)
+            _cd = ["change"] if "change" in bt.columns else None
+            _ht = ("%{y}<br>Net $%{x:,.0f}<br>Change %{customdata[0]:+.1f}%<extra></extra>"
+                   if _cd else "%{y}<br>Net $%{x:,.0f}<extra></extra>")
+            tc1, tc2 = st.columns(2)
+            for _col, _cat in zip((tc1, tc2), (ca, cb)):
+                _tb = (bt[bt.category == _cat]
+                       .sort_values("net_total", ascending=False).head(10))
+                with _col:
+                    st.markdown(f"##### {_cat}")
+                    if _tb.empty:
+                        st.info(f"No brand-level volume in {_cat} in this window.")
+                        continue
+                    _fig = px.bar(_tb.sort_values("net_total"),
+                                  x="net_total", y="brand", orientation="h",
+                                  color_discrete_sequence=[CAT_COLORS.get(_cat, ACCENT)],
+                                  custom_data=_cd)
+                    _fig.update_traces(hovertemplate=_ht)
+                    _fig.update_layout(height=max(260, 36 * len(_tb)),
+                                       margin=dict(l=0, r=0, t=8, b=0),
+                                       xaxis=dict(title="", tickformat="$~s",
+                                                  gridcolor="rgba(0,0,0,.06)"),
+                                       yaxis=dict(title=""),
+                                       showlegend=False,
+                                       plot_bgcolor="rgba(0,0,0,0)")
+                    st.plotly_chart(_fig, use_container_width=True,
+                                    key=f"topbrands_{_cat}")
 
             # --- brand pairs ----------------------------------------------
             bp = q(f"""
@@ -1173,27 +1183,34 @@ with t_insights:
                        SUM(net_total) AS net_total
                 FROM dash_product_trend
                 WHERE category IN ('{ca}','{cb}') {af}
-                GROUP BY 1,2,3 ORDER BY net_total DESC LIMIT 20
+                GROUP BY 1,2,3 ORDER BY net_total DESC
             """)
             if not pt.empty:
                 pt["change"] = pct_change(pt.net_late, pt.net_early)
-                st.markdown("**Top products in these categories**")
-                st.dataframe(pd.DataFrame({
-                    "Category": pt.category,
-                    "Brand": pt.brand,
-                    "Product": pt["product"],
-                    "Net $": pt.net_total.round(0),
-                    "Change %": pd.to_numeric(pt.change, errors="coerce").round(1),
-                }), use_container_width=True, hide_index=True, column_config={
-                    "Net $": st.column_config.NumberColumn(format="$%d"),
-                    "Change %": st.column_config.NumberColumn(
-                        help="Second half versus first half of the period.",
-                        format="%.1f%%"),
-                })
-                st.markdown('<p class="note">Product names change often as SKUs '
-                            'turn over, so read these as examples of where the '
-                            'movement sits rather than a stable ranking.</p>',
-                            unsafe_allow_html=True)
+                st.markdown("**Top products in each category**")
+                pt1, pt2 = st.columns(2)
+                for _col, _cat in zip((pt1, pt2), (ca, cb)):
+                    _tp = (pt[pt.category == _cat]
+                           .sort_values("net_total", ascending=False).head(10))
+                    with _col:
+                        st.markdown(f"##### {_cat}")
+                        if _tp.empty:
+                            st.info(f"No product-level volume in {_cat} in this window.")
+                            continue
+                        st.dataframe(pd.DataFrame({
+                            "Brand": _tp.brand,
+                            "Product": _tp["product"],
+                            "Net $": _tp.net_total.round(0),
+                            "Change %": pd.to_numeric(_tp.change, errors="coerce").round(1),
+                        }), use_container_width=True, hide_index=True, column_config={
+                            "Net $": st.column_config.NumberColumn(format="$%d"),
+                            "Change %": st.column_config.NumberColumn(
+                                help="Second half versus first half of the period.",
+                                format="%.1f%%"),
+                        })
+                st.markdown('<p class="note">Product names change often as SKUs turn over, '
+                            'so read these as examples of where the movement sits rather '
+                            'than a stable ranking.</p>', unsafe_allow_html=True)
 
     inv = q(f"""
         SELECT category, SUM(inv_cost) AS inv_cost, SUM(qoh) AS qoh,

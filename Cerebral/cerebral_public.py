@@ -3134,12 +3134,17 @@ def render_takeovers():
 
     # --- GWP reconciliation: received vs processed ---------------------------
     if table_exists("dash_gwp_receipt"):
+        # Promo stock usually lands a few days BEFORE the takeover opens.
+        # Count receipts from 14 days ahead of launch, or a brand whose
+        # delivery arrived early shows units out the door against zero
+        # received.
+        rec_from = (pd.Timestamp(tk["start"]) - pd.Timedelta(days=14)).date()
         rec = q(f"""
             SELECT product, product_sku,
                    SUM(units_received) AS received
             FROM dash_gwp_receipt
             WHERE {like} {af}
-              AND day BETWEEN '{tk["start"]}' AND '{s["eff_end"]:%Y-%m-%d}'
+              AND day BETWEEN '{rec_from}' AND '{s["eff_end"]:%Y-%m-%d}'
             GROUP BY 1,2 ORDER BY received DESC
         """)
         if not rec.empty and rec.received.sum() > 0:
@@ -3150,7 +3155,9 @@ def render_takeovers():
                 '<b>GWP so far</b>: every gift unit that left the shop during '
                 'the promotion, and it moves with each refresh. <b>Received</b> '
                 'is the GWP stock that arrived for the window, from the '
-                'inventory receipt reports. <b>On the GWP SKU</b> is units '
+                'inventory receipt reports — deliveries often land a few days '
+                'before launch, so the two weeks ahead of the window count '
+                'too. <b>On the GWP SKU</b> is units '
                 'rung properly on the promo\'s own "(GWP)" item. '
                 '<b>Mis-rung</b> is the discrepancy you asked about: sale '
                 'lines where staff keyed the <b>SKU number</b> instead of '

@@ -2916,12 +2916,14 @@ def render_takeovers():
             })
 
     # --- GWP / redemptions for the brand -------------------------------------
+    like = "(" + " OR ".join(
+        "LOWER(brand) LIKE '%" + p.replace("'", "''") + "%'"
+        for p in tk["patterns"]) + ")"
+    inwin = pd.DataFrame()
+    has_inwin = False
     if table_exists("dash_offer_performance"):
         st.divider()
         st.markdown("##### Gift-with-purchase & loyalty redemptions")
-        like = "(" + " OR ".join(
-            "LOWER(brand) LIKE '%" + p.replace("'", "''") + "%'"
-            for p in tk["patterns"]) + ")"
 
         # Exact in-window counts, once the refresh publishes daily
         # redemptions. The SKU list below stays whole-period either way —
@@ -2994,6 +2996,91 @@ def render_takeovers():
                 "Redemptions": st.column_config.NumberColumn(format="%d"),
                 "Redemption $": st.column_config.NumberColumn(format="$%d"),
             })
+
+    # --- GWP reconciliation: received vs processed ---------------------------
+    if table_exists("dash_gwp_receipt"):
+        rec = q(f"""
+            SELECT product, product_sku,
+                   SUM(units_received) AS received
+            FROM dash_gwp_receipt
+            WHERE {like} {af}
+              AND day BETWEEN '{tk["start"]}' AND '{s["eff_end"]:%Y-%m-%d}'
+            GROUP BY 1,2 ORDER BY received DESC
+        """)
+        if not rec.empty and rec.received.sum() > 0:
+            st.divider()
+            st.markdown("##### GWP reconciliation — in the door vs out of it")
+            st.markdown(
+                '<div class="howto"><b>How to read this.</b> <b>Received</b> '
+                'is the GWP stock that arrived for the window, from the '
+                'inventory receipt reports. <b>Mis-rung</b> is the '
+                'discrepancy you asked about: sale lines where staff keyed '
+                'the <b>SKU number</b> instead of the product — spotted '
+                'because the line\'s "product" is a bare number, and '
+                'identified by matching that number back to the receipt '
+                'SKU. <b>Redeemed</b> is in-window loyalty redemptions '
+                '(brand level, not per SKU). Whatever remains is stock '
+                'still on the shelf — or units to chase down.</div>',
+                unsafe_allow_html=True)
+
+            skus = ",".join("'" + str(x).replace("'", "''") + "'"
+                            for x in rec.product_sku.unique())
+            sus = q(f"""
+                SELECT product AS sku, SUM(units) AS misrung,
+                       COUNT(*) AS lines, SUM(net) AS net
+                FROM dash_suspect_lines
+                WHERE product IN ({skus}) {af}
+                  AND day BETWEEN '{tk["start"]}' AND '{s["eff_end"]:%Y-%m-%d}'
+                GROUP BY 1
+            """) if table_exists("dash_suspect_lines") else pd.DataFrame()
+
+            merged = rec.merge(
+                sus.rename(columns={"sku": "product_sku"}),
+                on="product_sku", how="left")
+            for c in ("misrung", "lines", "net"):
+                if c not in merged:
+                    merged[c] = 0
+            merged[["misrung", "lines", "net"]] = \
+                merged[["misrung", "lines", "net"]].fillna(0)
+
+            redeemed = (float(inwin.redemptions.iloc[0])
+                        if has_inwin else np.nan)
+            c = st.columns(4)
+            c[0].metric("GWP units received",
+                        f"{int(rec.received.sum()):,}")
+            c[1].metric("Mis-rung units", f"{int(merged.misrung.sum()):,}",
+                        help="Sale lines keyed as a bare SKU number, matched "
+                             "to these GWP receipts.")
+            c[2].metric("Redeemed in window",
+                        f"{int(redeemed):,}" if pd.notna(redeemed) else "—",
+                        help="Brand-level: the published redemption data is "
+                             "not split by SKU.")
+            remaining = (rec.received.sum() - merged.misrung.sum()
+                         - (redeemed if pd.notna(redeemed) else 0))
+            c[3].metric("Unaccounted", f"{int(remaining):,}",
+                        help="Received minus mis-rung minus redeemed. "
+                             "Includes stock still on the shelf — check the "
+                             "back of house before chasing a gap.")
+
+            st.dataframe(pd.DataFrame({
+                "GWP item": merged["product"],
+                "SKU": merged["product_sku"],
+                "Received": merged.received.round(0),
+                "Mis-rung": merged.misrung.round(0),
+                "Mis-ring value $": merged.net.round(0),
+            }), use_container_width=True, hide_index=True, column_config={
+                "Received": st.column_config.NumberColumn(format="%d"),
+                "Mis-rung": st.column_config.NumberColumn(format="%d"),
+                "Mis-ring value $": st.column_config.NumberColumn(format="$%d"),
+            })
+            if merged.misrung.sum() > 0:
+                st.markdown(
+                    '<div class="alert a-warn"><b>Mis-rung GWP found.</b> '
+                    'The lines above were keyed by SKU number rather than '
+                    'processed as gift-with-purchase. They count as ordinary '
+                    'sales in the till, which understates the GWP programme '
+                    'and muddies the brand\'s real margin.</div>',
+                    unsafe_allow_html=True)
 
 
 with t_promo:

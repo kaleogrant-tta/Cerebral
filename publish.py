@@ -431,6 +431,48 @@ def build(src: str, dest: str) -> dict:
         GROUP BY 1,2,3
     """)
 
+    # --- GWP receipts + suspect lines --------------------------------------
+    # The two sides of GWP reconciliation. dash_gwp_receipt is what came in
+    # the door; dash_suspect_lines is sale lines whose "product" is a bare
+    # SKU number — the mis-ring symptom, where staff keyed the SKU instead of
+    # picking the product. Matching those numbers against the receipt SKUs
+    # identifies what the customer actually walked out with.
+    has_receipt = con.execute("""
+        SELECT COUNT(*) FROM duckdb_tables()
+        WHERE database_name = 'src' AND table_name = 'fact_receipt'
+    """).fetchone()[0] > 0
+
+    if not has_receipt:
+        con.execute("""
+            CREATE TABLE dash_gwp_receipt (
+                store_key INTEGER, day DATE, brand VARCHAR, product VARCHAR,
+                product_sku VARCHAR, units_received DOUBLE)
+        """)
+    else:
+        con.execute("""
+            CREATE TABLE dash_gwp_receipt AS
+            SELECT store_key, receive_date AS day, brand, product, product_sku,
+                   SUM(quantity) AS units_received
+            FROM src.fact_receipt
+            WHERE is_gwp
+            GROUP BY 1,2,3,4,5
+        """)
+
+    suspect_sql = """
+        CREATE TABLE dash_suspect_lines AS
+        SELECT store_key, CAST(txn_ts AS DATE) AS day, product,
+               COUNT(*)      AS lines,
+               SUM(units)    AS units,
+               SUM(net_sales) AS net
+        FROM src.fact_line
+        WHERE NOT is_return
+          AND (regexp_matches(product, '^[0-9]{4,}$'){extra})
+        GROUP BY 1,2,3
+    """
+    extra = ("\n           OR product IN "
+             "(SELECT product_sku FROM src.fact_receipt)") if has_receipt else ""
+    con.execute(suspect_sql.format(extra=extra))
+
     # --- inventory, most recent snapshot only ----------------------------
     con.execute("""
         CREATE TABLE dash_inventory AS
@@ -470,10 +512,11 @@ def build(src: str, dest: str) -> dict:
     # is fine; a customer key is not. Name-substring matching flagged
     # "first_basket_customers" and would keep doing so as tables are added,
     # which trains you to ignore the check.
+    # product_sku is a stock-keeping number, not a person.
     ALLOWED_TEXT = {"category", "raw_category", "brand", "product", "channel",
                     "cat_a", "cat_b", "brand_a", "brand_b", "period",
                     "config_version", "room", "primary_category",
-                    "match_method", "offer_name"}
+                    "match_method", "offer_name", "product_sku"}
     leaked = []
     for (t,) in con.execute("SHOW TABLES").fetchall():
         info = con.execute(f"PRAGMA table_info('{t}')").fetchall()

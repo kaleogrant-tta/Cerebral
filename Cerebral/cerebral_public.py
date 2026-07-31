@@ -317,32 +317,38 @@ def gate() -> bool:
 # ===========================================================================
 
 # Why the last load_db() attempt failed — shown on the no-data screen so a
-# deployment problem names itself instead of guessing.
+# deployment problem names itself instead of guessing. Kept INSIDE the
+# cached return value: a cached None skips the function body, so reasons
+# recorded in a module-level list would be wiped on the next rerun.
 LOAD_DB_WHYS: list[str] = []
 
 
 @st.cache_resource(ttl=CACHE_MINUTES * 60)
-def load_db() -> str | None:
-    """Local file if present, otherwise pull the published copy from Drive."""
-    LOAD_DB_WHYS.clear()
+def _load_db_cached() -> tuple[str | None, list[str]]:
+    """Local file if present, otherwise pull the published copy from Drive.
+
+    Returns (path, reasons). reasons is empty on success; on failure it
+    names the stage that broke so the caller can show it.
+    """
     # Look next to the script, then one level up (repo root when the app
     # lives in a subfolder, as on Streamlit Cloud), then the launch
     # directory — so the bundled data file always wins over Drive.
     here = Path(__file__).resolve().parent
     for local in (here / DASH_FILE, here.parent / DASH_FILE, Path(DASH_FILE)):
         if local.exists():
-            return str(local)
+            return str(local), []
 
+    whys: list[str] = []
     sa = secret("gcp_service_account")
     folder = secret("TTA_DRIVE_STATE") or os.environ.get("TTA_DRIVE_STATE")
     if not sa:
-        LOAD_DB_WHYS.append("the `gcp_service_account` secret is missing "
-                            "or empty in the app's Streamlit settings")
+        whys.append("the `gcp_service_account` secret is missing "
+                    "or empty in the app's Streamlit settings")
     if not folder:
-        LOAD_DB_WHYS.append("the `TTA_DRIVE_STATE` secret is missing "
-                            "or empty in the app's Streamlit settings")
+        whys.append("the `TTA_DRIVE_STATE` secret is missing "
+                    "or empty in the app's Streamlit settings")
     if not sa or not folder:
-        return None
+        return None, whys
 
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
@@ -353,29 +359,48 @@ def load_db() -> str | None:
         creds = Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/drive.readonly"])
         svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        # supportsAllDrives + corpora=allDrives: without them a folder that
+        # lives in a SHARED drive searches as if it were empty.
         res = svc.files().list(
             q=f"'{folder}' in parents and name = '{DASH_FILE}' and trashed = false",
             orderBy="modifiedTime desc",
-            fields="files(id,name,size,modifiedTime)").execute().get("files", [])
+            fields="files(id,name,size,modifiedTime)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            corpora="allDrives").execute().get("files", [])
     except Exception as e:
         msg = str(e).replace("\n", " ")[:300]
-        LOAD_DB_WHYS.append(f"Drive access failed — {type(e).__name__}: {msg}")
-        return None
+        whys.append(f"Drive access failed — {type(e).__name__}: {msg}")
+        return None, whys
     if not res:
-        LOAD_DB_WHYS.append(
+        whys.append(
             f"the credentials work, but there is no file named `{DASH_FILE}` "
             "in the Drive folder that `TTA_DRIVE_STATE` points to — either the "
             "folder ID is wrong or the publish step has not uploaded it there")
-        return None
+        return None, whys
 
-    dest = Path(tempfile.gettempdir()) / DASH_FILE
-    with open(dest, "wb") as fh:
-        dl = MediaIoBaseDownload(fh, svc.files().get_media(fileId=res[0]["id"]),
-                                 chunksize=4 * 1024 * 1024)
-        done = False
-        while not done:
-            _, done = dl.next_chunk()
-    return str(dest)
+    try:
+        dest = Path(tempfile.gettempdir()) / DASH_FILE
+        with open(dest, "wb") as fh:
+            dl = MediaIoBaseDownload(
+                fh, svc.files().get_media(fileId=res[0]["id"],
+                                          supportsAllDrives=True),
+                chunksize=4 * 1024 * 1024)
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+        return str(dest), []
+    except Exception as e:
+        msg = str(e).replace("\n", " ")[:300]
+        whys.append(f"the file was found (modified {res[0].get('modifiedTime', '?')}) "
+                    f"but the download failed — {type(e).__name__}: {msg}")
+        return None, whys
+
+
+def load_db() -> str | None:
+    global LOAD_DB_WHYS
+    path, LOAD_DB_WHYS = _load_db_cached()
+    return path
 
 
 @st.cache_data(ttl=CACHE_MINUTES * 60)

@@ -24,8 +24,6 @@ Deployed (Streamlit Community Cloud): set these in the app's Secrets —
 
 from __future__ import annotations
 
-import auth_module
-
 import json
 import os
 import re
@@ -321,11 +319,9 @@ def gate() -> bool:
 @st.cache_resource(ttl=CACHE_MINUTES * 60)
 def load_db() -> str | None:
     """Local file if present, otherwise pull the published copy from Drive."""
-    # Look next to the script, then one level up (repo root when the app
-    # lives in a subfolder, as on Streamlit Cloud), then the launch
-    # directory — so the bundled data file always wins over Drive.
-    here = Path(__file__).resolve().parent
-    for local in (here / DASH_FILE, here.parent / DASH_FILE, Path(DASH_FILE)):
+    # Look next to the script first, then the launch directory, so the app
+    # finds its data no matter which folder streamlit was started from.
+    for local in (Path(__file__).resolve().parent / DASH_FILE, Path(DASH_FILE)):
         if local.exists():
             return str(local)
 
@@ -345,8 +341,7 @@ def load_db() -> str | None:
 
     res = svc.files().list(
         q=f"'{folder}' in parents and name = '{DASH_FILE}' and trashed = false",
-        orderBy="modifiedTime desc",
-        fields="files(id,name,size,modifiedTime)").execute().get("files", [])
+        fields="files(id,name,size)").execute().get("files", [])
     if not res:
         return None
 
@@ -484,142 +479,6 @@ def run_rule(s: pd.Series) -> str | None:
     if len(d) >= 5 and (d < 0).all():
         return "6 consecutive weeks falling"
     return None
-
-# ---------------------------------------------------------------------------
-# Offer-name brand attribution
-#
-# The ETL attributes an offer's brand by matching the offer to the contents
-# of the redeeming basket. When that match fails — or lands on a basket-mate
-# rather than the discounted product — the brand comes out wrong or blank,
-# which is why one offer can appear under several brands.
-#
-# Offer names are far more reliable: they follow "Travel Club {Brand}
-# {Product}" / "Loyalty {Brand} {Product}". So the dashboard re-derives the
-# brand from the offer name and only falls back to the ETL value (flagged as
-# inferred) when the name yields nothing.
-# ---------------------------------------------------------------------------
-
-_SUB_RE = re.compile(r"(\d[\d,]*)\s*points?\s+substitution", re.IGNORECASE)
-
-_TTA_MERCH_WORDS = (
-    "lighter", "dad hat", "beanie", "battery", "papers", "grinder",
-    "rolling tray", "tray", "ashtray", "clipper", "hoodie", "tee",
-    "tote", "socks", "hat",
-)
-
-
-@st.cache_data(ttl=CACHE_MINUTES * 60)
-def offer_brand_vocabulary() -> tuple:
-    """Brand names known to the dashboard, longest first.
-
-    Pulled from the brand tables rather than hardcoded, so the matcher stays
-    current as brands rotate through the menu. Longest-first matters: "Ruby
-    Farms" must be tried before "Ruby", and "Papa & Barkley" before "Barkley".
-    """
-    names = set()
-    for tbl in ("dash_brand_trend", "dash_brand_scorecard"):
-        if table_exists(tbl):
-            r = q(f"SELECT DISTINCT brand FROM {tbl} WHERE brand IS NOT NULL")
-            names.update(b.strip() for b in r.brand
-                         if isinstance(b, str) and b.strip())
-    # ETL artefacts, not real brands — never match these into an offer.
-    names = {n for n in names if "substitution" not in n.lower()}
-    return tuple(sorted(names, key=len, reverse=True))
-
-# Product names abbreviate these brands; the catalogue uses the full names.
-# Key: abbreviation as it appears in a name. Value: words that identify the
-# full brand in the vocabulary.
-_BRAND_ALIASES = {
-    "cannacure": ("canna", "cure"),       # Canna Cure Farms
-    "rvg": ("ravens", "view"),            # Ravens View Genetics
-    "hb": ("harney", "brothers"),         # Harney Brothers Cannabis
-}
-
-
-def _brand_alias(text_lower: str, vocabulary):
-    """Resolve a brand abbreviation to its full catalogue name."""
-    for abbr, words in _BRAND_ALIASES.items():
-        if re.search(r"(?<![A-Za-z0-9])" + re.escape(abbr)
-                     + r"(?![A-Za-z0-9])", text_lower):
-            for b in vocabulary:
-                bl = b.lower()
-                if all(w in bl for w in words):
-                    return b
-            # Brand absent from the vocabulary — still better than nothing.
-            return " ".join(w.capitalize() for w in words)
-    return None
-
-
-
-def _brand_in_offer(brand: str, offer_lower: str) -> bool:
-    """Whole-name match, tolerant of trailing punctuation like 'Find.'."""
-    pat = (r"(?<![A-Za-z0-9])"
-           + re.escape(brand.lower().rstrip(". "))
-           + r"(?![A-Za-z0-9])")
-    return re.search(pat, offer_lower) is not None
-
-
-def resolve_offer_brand(offer_name, etl_brand, vocabulary) -> tuple:
-    """Return (brand, source) for one offer row.
-
-    source is one of:
-      'name'         — parsed from the offer name (trusted)
-      'merch'        — TTA house merchandise
-      'substitution' — points-substitution offer, no single brand exists
-      'etl'          — fell back to the ETL's basket match (inferred)
-      None           — could not be attributed
-    """
-    s = str(offer_name).lower()
-    if _SUB_RE.search(s):
-        return None, "substitution"
-    if s.startswith("secret drop"):
-        return "Secret Drops", "name"
-    for b in vocabulary:
-        if _brand_in_offer(b, s):
-            return b, "name"
-    # Product lines that shorten the brand: "Ruby Doobies" for Ruby Farms.
-    # First word of a multi-word brand, long enough to be distinctive.
-    for b in vocabulary:
-        if " " in b:
-            first = b.split()[0].lower().rstrip(". ")
-            if len(first) >= 4 and _brand_in_offer(first, s):
-                return b, "name"
-    alias = _brand_alias(s, vocabulary)
-    if alias:
-        return alias, "name"
-    if "tta" in s and any(w in s for w in _TTA_MERCH_WORDS):
-        return "The Travel Agency", "merch"
-    if (isinstance(etl_brand, str) and etl_brand.strip()
-            and "substitution" not in etl_brand.lower()):
-        return etl_brand.strip(), "etl"
-    return None, None
-
-
-def _product_brand(product, vocabulary) -> str | None:
-    """Brand of a SKU chosen in a substitution, read from the product name.
-
-    Substitution picks are recorded with the product the customer received
-    ("Rythm Flower Brownie Scout 28g"), so the brand is certain even though
-    the redemption is catalogued under a points tier. Same matching rules as
-    offer-name attribution: full brand name first, then the distinctive
-    first word of a multi-word brand.
-    """
-    s = str(product).lower()
-    for b in vocabulary:
-        if _brand_in_offer(b, s):
-            return b
-    for b in vocabulary:
-        if " " in b:
-            first = b.split()[0].lower().rstrip(". ")
-            if len(first) >= 4 and _brand_in_offer(first, s):
-                return b
-    alias = _brand_alias(s, vocabulary)
-    if alias:
-        return alias
-    if "tta" in s and any(w in s for w in _TTA_MERCH_WORDS):
-        return "The Travel Agency"
-    return None
-
 
 
 # ===========================================================================
@@ -1262,36 +1121,26 @@ with t_insights:
                         unsafe_allow_html=True)
 
             # --- brand detail ---------------------------------------------
-            st.markdown("**Top brands in each category**")
-            st.markdown('<p class="note">One chart per category. In a single shared '
-                        'ranking the bigger category fills the whole top 10 and the '
-                        'smaller one never appears.</p>', unsafe_allow_html=True)
-            _cd = ["change"] if "change" in bt.columns else None
-            _ht = ("%{y}<br>Net $%{x:,.0f}<br>Change %{customdata[0]:+.1f}%<extra></extra>"
-                   if _cd else "%{y}<br>Net $%{x:,.0f}<extra></extra>")
-            tc1, tc2 = st.columns(2)
-            for _col, _cat in zip((tc1, tc2), (ca, cb)):
-                _tb = (bt[bt.category == _cat]
-                       .sort_values("net_total", ascending=False).head(10))
-                with _col:
-                    st.markdown(f"##### {_cat}")
-                    if _tb.empty:
-                        st.info(f"No brand-level volume in {_cat} in this window.")
-                        continue
-                    _fig = px.bar(_tb.sort_values("net_total"),
-                                  x="net_total", y="brand", orientation="h",
-                                  color_discrete_sequence=[CAT_COLORS.get(_cat, ACCENT)],
-                                  custom_data=_cd)
-                    _fig.update_traces(hovertemplate=_ht)
-                    _fig.update_layout(height=max(260, 36 * len(_tb)),
-                                       margin=dict(l=0, r=0, t=8, b=0),
-                                       xaxis=dict(title="", tickformat="$~s",
-                                                  gridcolor="rgba(0,0,0,.06)"),
-                                       yaxis=dict(title=""),
-                                       showlegend=False,
-                                       plot_bgcolor="rgba(0,0,0,0)")
-                    st.plotly_chart(_fig, use_container_width=True,
-                                    key=f"topbrands_{_cat}")
+            st.markdown("**Brands in these categories**")
+            show = bt.sort_values("net_total", ascending=False).head(18)
+            st.dataframe(pd.DataFrame({
+                "Category": show.category,
+                "Brand": show.brand,
+                "Net $": show.net_total.round(0),
+                "Change %": pd.to_numeric(show.change, errors="coerce").round(1),
+                "Direction": show.dir,
+            }), use_container_width=True, hide_index=True, column_config={
+                "Net $": st.column_config.NumberColumn(
+                    help="Net sales across the whole loaded period.",
+                    format="$%d"),
+                "Change %": st.column_config.NumberColumn(
+                    help="Second half of the period versus the first half. "
+                         "Shows which way the brand is moving.",
+                    format="%.1f%%"),
+                "Direction": st.column_config.TextColumn(
+                    help="Growing is more than +10%, declining is worse than "
+                         "-10%, anything between is flat."),
+            })
 
             # --- brand pairs ----------------------------------------------
             bp = q(f"""
@@ -1319,34 +1168,27 @@ with t_insights:
                        SUM(net_total) AS net_total
                 FROM dash_product_trend
                 WHERE category IN ('{ca}','{cb}') {af}
-                GROUP BY 1,2,3 ORDER BY net_total DESC
+                GROUP BY 1,2,3 ORDER BY net_total DESC LIMIT 20
             """)
             if not pt.empty:
                 pt["change"] = pct_change(pt.net_late, pt.net_early)
-                st.markdown("**Top products in each category**")
-                pt1, pt2 = st.columns(2)
-                for _col, _cat in zip((pt1, pt2), (ca, cb)):
-                    _tp = (pt[pt.category == _cat]
-                           .sort_values("net_total", ascending=False).head(10))
-                    with _col:
-                        st.markdown(f"##### {_cat}")
-                        if _tp.empty:
-                            st.info(f"No product-level volume in {_cat} in this window.")
-                            continue
-                        st.dataframe(pd.DataFrame({
-                            "Brand": _tp.brand,
-                            "Product": _tp["product"],
-                            "Net $": _tp.net_total.round(0),
-                            "Change %": pd.to_numeric(_tp.change, errors="coerce").round(1),
-                        }), use_container_width=True, hide_index=True, column_config={
-                            "Net $": st.column_config.NumberColumn(format="$%d"),
-                            "Change %": st.column_config.NumberColumn(
-                                help="Second half versus first half of the period.",
-                                format="%.1f%%"),
-                        })
-                st.markdown('<p class="note">Product names change often as SKUs turn over, '
-                            'so read these as examples of where the movement sits rather '
-                            'than a stable ranking.</p>', unsafe_allow_html=True)
+                st.markdown("**Top products in these categories**")
+                st.dataframe(pd.DataFrame({
+                    "Category": pt.category,
+                    "Brand": pt.brand,
+                    "Product": pt["product"],
+                    "Net $": pt.net_total.round(0),
+                    "Change %": pd.to_numeric(pt.change, errors="coerce").round(1),
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Net $": st.column_config.NumberColumn(format="$%d"),
+                    "Change %": st.column_config.NumberColumn(
+                        help="Second half versus first half of the period.",
+                        format="%.1f%%"),
+                })
+                st.markdown('<p class="note">Product names change often as SKUs '
+                            'turn over, so read these as examples of where the '
+                            'movement sits rather than a stable ranking.</p>',
+                            unsafe_allow_html=True)
 
     inv = q(f"""
         SELECT category, SUM(inv_cost) AS inv_cost, SUM(qoh) AS qoh,
@@ -1384,7 +1226,7 @@ with t_insights:
             "Days supply": st.column_config.NumberColumn(
                 help=tip("days supply"), format="%d"),
         })
-        st.markdown(f'<p class="note">Stock position as at {inv.snap.max()}. '
+        st.markdown(f'<p class="note">Stock position as at {pd.to_datetime(inv.snap.max()).strftime("%B %d, %Y")}. '
                     f'Sellable stock only — sales floor, vault and day vault.'
                     f'</p>', unsafe_allow_html=True)
 
@@ -2032,10 +1874,9 @@ with t_redeem:
     st.markdown("#### Brand performance in redeeming baskets")
     st.markdown('<div class="howto"><b>How to read this.</b> Alpine records a '
                 'redemption against a basket, but its offers are named after '
-                'the product they discount — so the brand is read from the '
-                'offer name itself, which is far more reliable than guessing '
-                'from basket contents. Brands marked with ~ fell back to the '
-                'old basket match and are inferred.<br><br>'
+                'the product they discount. Matching the offer name to the '
+                'basket contents recovers which brand the money was spent '
+                'on.<br><br>'
                 'The column that matters most is <b>first-visit redeemers</b>. '
                 'An offer redeemed by someone on their first-ever visit bought '
                 'you a customer. One redeemed by a regular discounted a sale '
@@ -2118,104 +1959,34 @@ with t_redeem:
             "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
         })
 
-        if a.brand.astype(str).str.startswith(
-                ("Secret Drops", "Travel Club Substitution")).any():
-            st.markdown(
-                '<p class="note"><b>Secret Drops</b> and <b>Travel Club '
-                'Substitution</b> rows are promo families, not brands — the '
-                'offer never names a product (mystery bags and out-of-stock '
-                'swaps). Pick one in the drill-down below to see what '
-                'customers actually received.</p>', unsafe_allow_html=True)
-
         if len(unattributed) and unattributed.spend.sum() > 0:
             st.markdown(
                 f'<p class="note">${unattributed.spend.sum():,.0f} across '
                 f'{int(unattributed.redemptions.sum()):,} redemptions could '
-                f'not be matched to a brand or promo family.</p>',
-                unsafe_allow_html=True)
-
-        # --- Offer-level data, re-attributed from offer names -------------
-        # dash_offer_performance carries the ETL's basket-matched brand, which
-        # is wrong whenever the match failed or landed on a basket-mate —
-        # that is why one offer could appear under several brands. Offer
-        # names name the product, so the brand is re-derived here from the
-        # name; the ETL value is kept only as a flagged fallback. Points
-        # substitutions name no product, so they are handled separately.
-        off = q(f"""
-            SELECT offer_name, brand, category,
-                   SUM(redemptions)  AS redemptions,
-                   SUM(redeem_value) AS spend,
-                   AVG(avg_basket)   AS avg_basket
-            FROM dash_offer_performance {wf}
-            GROUP BY 1,2,3
-        """)
-        prod = subs2 = off.iloc[0:0]
-        if not off.empty:
-            vocab = offer_brand_vocabulary()
-            resolved = off.apply(
-                lambda r: resolve_offer_brand(r.offer_name, r.brand, vocab),
-                axis=1, result_type="expand")
-            off["brand_resolved"] = resolved[0]
-            off["brand_source"] = resolved[1]
-            prod = off[off.brand_source != "substitution"].copy()
-            subs2 = off[off.brand_source == "substitution"].copy()
+                f'not be matched to a brand.</p>', unsafe_allow_html=True)
 
         # --- Brand → SKU redemption drill-down -------------------------
         st.divider()
         st.markdown("##### Which SKUs were redeemed, by brand")
-        st.markdown(
-            '<div class="howto"><b>How to read this.</b> Pick a brand — or a '
-            'promo family like Secret Drops — to see what was actually rung '
-            'up for its redemptions. Brands are read from the offer names '
-            'themselves, so offers the old basket match scattered across '
-            'wrong brands now sit where they belong. The same offer appears '
-            'under different names over time ("Loyalty …", the "Loytaly …" '
-            'typo, "Travel Club …"), so rows group by the product, not the '
-            'offer name. Where a menu item was swapped at the register, the '
-            'SKU shown is the one the customer actually received.</div>',
-            unsafe_allow_html=True)
+        st.markdown('<p class="note">Pick a brand to see every redeemed offer '
+                    'tied to its products. Offers are named after the product '
+                    'they discount, so this is the SKU-level view of where '
+                    'the redemption dollars went.</p>', unsafe_allow_html=True)
 
-        if prod.empty:
-            st.info("No offer-level redemption data in the published file.")
-        else:
-            brand_opts = sorted(prod.brand_resolved.dropna().unique())
-            sel_brand = st.selectbox("Select a brand", brand_opts,
-                                     key="redeem_brand_sku")
+        brand_opts = sorted(attributed.brand.dropna().unique())
+        sel_brand = st.selectbox("Select a brand", brand_opts,
+                                 key="redeem_brand_sku")
 
-            # Filter by the OFFERS that resolve to this brand, not by the
-            # ETL's basket-matched brand column — that column is what
-            # scattered one offer across Anthem, Foy, Ayrloom and friends.
-            sel_offers = (prod.loc[prod.brand_resolved == sel_brand,
-                                   "offer_name"].dropna().unique().tolist())
-            offer_sql = ",".join("'" + str(o).replace("'", "''") + "'"
-                                 for o in sel_offers)
-
-            # Group by the matched product (strain-level) when the published
-            # file has it; older files only carry offer names.
-            try:
-                sku = q(f"""
-                    SELECT COALESCE(product, offer_name) AS sku, category,
-                           SUM(redemptions) AS redemptions,
-                           SUM(redeem_value) AS spend,
-                           AVG(avg_basket)  AS avg_basket
-                    FROM dash_offer_performance
-                    WHERE offer_name IN ({offer_sql}) {af}
-                    GROUP BY 1,2
-                    ORDER BY spend DESC
-                """)
-                if not len(sku):
-                    raise ValueError("empty")
-            except Exception:
-                sku = q(f"""
-                    SELECT offer_name AS sku, category,
-                           SUM(redemptions) AS redemptions,
-                           SUM(redeem_value) AS spend,
-                           AVG(avg_basket)  AS avg_basket
-                    FROM dash_offer_performance
-                    WHERE offer_name IN ({offer_sql}) {af}
-                    GROUP BY 1,2
-                    ORDER BY spend DESC
-                """)
+        sku = q(f"""
+            SELECT offer_name AS sku, category,
+                   SUM(redemptions) AS redemptions,
+                   SUM(redeem_value) AS spend,
+                   AVG(avg_basket)  AS avg_basket
+            FROM dash_offer_performance
+            WHERE brand = '{sel_brand.replace("'", "''")}' {af}
+            GROUP BY 1,2
+            ORDER BY spend DESC
+        """)
 
         if sku.empty:
             st.info(f"No redeemed offers matched to {sel_brand}.")
@@ -2253,53 +2024,8 @@ with t_redeem:
             fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
             st.plotly_chart(fig, use_container_width=True, key="pc17")
 
-        # --- Off-menu picks: what redeemers chose instead -------------------
-        st.divider()
-        st.markdown("##### Chosen instead — off-menu picks")
-        st.markdown(
-            '<div class="howto"><b>How to read this.</b> When a redemption '
-            'menu item is out of stock, staff let the customer pick something '
-            'of similar value instead. Those swaps ring up at $0.01, or '
-            'discounted down to just the tax — that price pattern is how '
-            'they are identified here. Ranked by redemption dollars, this is '
-            'a ready-made shortlist of candidates for the menu. One caveat: '
-            'if a customer also bought something genuinely cheap, that can '
-            'occasionally be picked up as the swap — sanity-check an '
-            'unfamiliar row before acting on it.</div>',
-            unsafe_allow_html=True)
-        subs = q(f"""
-            SELECT product AS sku, category,
-                   SUM(redemptions)             AS redemptions,
-                   SUM(redeem_value)            AS spend,
-                   COUNT(DISTINCT offer_name)   AS offers
-            FROM dash_offer_performance
-            WHERE match_method = 'substituted-line' {af}
-            GROUP BY 1,2
-            ORDER BY spend DESC
-        """)
-        if subs.empty:
-            st.info("No substitutions recorded yet. They appear after the "
-                    "next data rebuild, once re-matching has run.")
-        else:
-            st.dataframe(pd.DataFrame({
-                "SKU chosen": subs.sku,
-                "Category": subs.category,
-                "Times picked": subs.redemptions,
-                "Redemption $": subs.spend.round(0),
-                "Via # of offers": subs.offers,
-            }), use_container_width=True, hide_index=True, column_config={
-                "Times picked": st.column_config.NumberColumn(format="%d"),
-                "Redemption $": st.column_config.NumberColumn(format="$%d"),
-                "Via # of offers": st.column_config.NumberColumn(format="%d"),
-            })
-
         st.divider()
         st.markdown("##### Spend against basket size")
-        st.markdown('<p class="note">Each point is a brand or promo family. '
-                    'Right means redeemed often; up means customers spend '
-                    'big when they redeem. The upper right is where the '
-                    'programme is earning its keep.</p>',
-                    unsafe_allow_html=True)
         fig = px.scatter(a, x="redemptions", y="avg_basket", size="spend",
                          color="category", hover_name="brand", size_max=38,
                          color_discrete_map={c: cat_color(c)
@@ -2314,78 +2040,27 @@ with t_redeem:
         fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0f")
         st.plotly_chart(fig, use_container_width=True, key="pc11")
 
-        # --- Individual offers, one row per offer -------------------------
-        if not prod.empty:
+        off = q(f"""
+            SELECT offer_name, brand, category,
+                   SUM(redemptions) AS redemptions,
+                   SUM(redeem_value) AS spend,
+                   AVG(avg_basket) AS avg_basket
+            FROM dash_offer_performance {wf}
+            GROUP BY 1,2,3 ORDER BY spend DESC
+        """)
+        if not off.empty:
             st.divider()
             st.markdown("##### Individual offers")
-            st.markdown('<p class="note">Each offer appears once, with the '
-                        'brand read from the offer name. A ~ after the brand '
-                        'means the name gave no answer and the old basket '
-                        'match was used instead — treat those as inferred. '
-                        'Points substitutions are in their own table below, '
-                        'because each redemption can be a different '
-                        'product.</p>', unsafe_allow_html=True)
-
-            ind = (prod.groupby("offer_name", as_index=False)
-                   .agg(brand=("brand_resolved",
-                               lambda s: (s.dropna().iloc[0]
-                                          if s.notna().any() else None)),
-                        inferred=("brand_source", lambda s: (s == "etl").all()),
-                        redemptions=("redemptions", "sum"),
-                        spend=("spend", "sum"),
-                        avg_basket=("avg_basket", "mean"))
-                   .sort_values("spend", ascending=False))
-            ind["cost_per_redemption"] = (
-                ind.spend / ind.redemptions.replace(0, float("nan")))
-            ind["brand_disp"] = ind.apply(
-                lambda r: (f"{r.brand} ~" if r.brand and r.inferred
-                           else (r.brand or "Unknown")), axis=1)
-
+            off["cost_per_redemption"] = off.spend / off.redemptions.replace(
+                0, float("nan"))
             st.dataframe(pd.DataFrame({
-                "Offer": ind.offer_name,
-                "Brand": ind.brand_disp,
-                "Redemptions": ind.redemptions,
-                "Spend $": ind.spend.round(0),
-                "Cost each": ind.cost_per_redemption.round(2),
-                "Avg basket": ind.avg_basket.round(2),
+                "Offer": off.offer_name,
+                "Brand": off.brand,
+                "Redemptions": off.redemptions,
+                "Spend $": off.spend.round(0),
+                "Cost each": off.cost_per_redemption.round(2),
+                "Avg basket": off.avg_basket.round(2),
             }), use_container_width=True, hide_index=True, column_config={
-                "Redemptions": st.column_config.NumberColumn(format="%d"),
-                "Spend $": st.column_config.NumberColumn(format="$%d"),
-                "Cost each": st.column_config.NumberColumn(format="$%.2f"),
-                "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
-            })
-
-        # --- Points substitutions, grouped by tier ------------------------
-        if not subs2.empty:
-            st.divider()
-            st.markdown("##### Points substitutions")
-            st.markdown('<p class="note">A substitution swaps points for a '
-                        'product of the customer\'s choosing, so there is no '
-                        'single brand to attribute. Grouped by point tier '
-                        'instead — this shows which tiers actually get '
-                        'used.</p>', unsafe_allow_html=True)
-
-            tier = subs2.copy()
-            tier["points"] = pd.to_numeric(
-                tier.offer_name.str.extract(_SUB_RE)[0]
-                .str.replace(",", "", regex=False), errors="coerce")
-            tier = (tier.groupby("points", as_index=False)
-                    .agg(redemptions=("redemptions", "sum"),
-                         spend=("spend", "sum"),
-                         avg_basket=("avg_basket", "mean"))
-                    .sort_values("points"))
-            tier["cost_per_redemption"] = (
-                tier.spend / tier.redemptions.replace(0, float("nan")))
-
-            st.dataframe(pd.DataFrame({
-                "Point tier": tier.points.map(
-                    lambda p: f"{int(p):,} pts" if pd.notna(p) else "?"),
-                "Redemptions": tier.redemptions,
-                "Spend $": tier.spend.round(0),
-                "Cost each": tier.cost_per_redemption.round(2),
-                "Avg basket": tier.avg_basket.round(2),
-            }), use_container_width=True, hide_index=True, column_config={
-                "Redemptions": st.column_config.NumberColumn(format="%d"),
                 "Spend $": st.column_config.NumberColumn(format="$%d"),
                 "Cost each": st.column_config.NumberColumn(format="$%.2f"),
                 "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
@@ -2396,6 +2071,199 @@ with t_redeem:
                     'offer caused the visit — redeemers are your most engaged '
                     'customers by construction.</p>', unsafe_allow_html=True)
 
+
+
+# -------------------------------------------------------------- redemptions
+with t_redeem:
+    st.markdown("#### Loyalty Redemptions")
+    st.markdown('<div class="howto"><b>How to read this tab.</b> '
+                'Redemptions are discounts given back to loyalty members. '
+                'A high redemption rate means many customers are using their '
+                'points — usually good, because engaged members buy more often. '
+                'But watch the cost: if redemption dollars grow faster than '
+                'net sales, the program is eating margin. The sweet spot is '
+                'high redemption rate with low redemption cost as a percent '
+                'of revenue, and high sales per redeeming basket.</div>',
+                unsafe_allow_html=True)
+
+    red = q(f"""
+        SELECT iso_year, iso_week,
+               SUM(baskets) AS baskets,
+               SUM(redeem_baskets) AS redeem_baskets,
+               SUM(redeem_value) AS redeem_value,
+               SUM(net) AS net
+        FROM dash_basket_week {wf}
+        GROUP BY 1,2
+        ORDER BY 1,2
+    """)
+    red_store = q(f"""
+        SELECT store_key,
+               SUM(baskets) AS baskets,
+               SUM(redeem_baskets) AS redeem_baskets,
+               SUM(redeem_value) AS redeem_value,
+               SUM(net) AS net
+        FROM dash_basket_week {wf}
+        GROUP BY 1
+    """)
+    if red.empty or red.redeem_baskets.sum() == 0:
+        st.info("No redemption data in the published file.")
+    else:
+        red["wk_date"] = pd.to_datetime(
+            red.iso_year.astype(str) + "-W" + red.iso_week.astype(str).str.zfill(2) + "-1",
+            format="%G-W%V-%u", errors="coerce")
+        red = red.sort_values("wk_date").reset_index(drop=True)
+        red["redeem_rate"] = red.redeem_baskets / red.baskets.replace(0, float("nan"))
+        red["redeem_per_basket"] = red.redeem_value / red.baskets.replace(0, float("nan"))
+        red["redeem_pct_of_net"] = red.redeem_value / red.net.replace(0, float("nan"))
+        red_active = red[red.redeem_baskets > 0].copy()
+        if len(red_active) >= 2:
+            cur = red_active.iloc[-1]
+            prev = red_active.iloc[-2]
+        elif len(red_active) == 1:
+            cur = red_active.iloc[-1]
+            prev = None
+        else:
+            cur = red.iloc[-1]
+            prev = red.iloc[-2] if len(red) > 1 else None
+        def fmt_delta(cur_val, prev_val):
+            if prev_val is None or pd.isna(prev_val) or prev_val == 0:
+                return None
+            return f"{(cur_val/prev_val-1)*100:+.1f}%"
+        c = st.columns(4)
+        c[0].metric("Redemption Rate",
+                    f"{cur.redeem_rate*100:.1f}%" if pd.notna(cur.redeem_rate) and cur.redeem_rate > 0 else "—",
+                    fmt_delta(cur.redeem_rate, prev.redeem_rate) if prev is not None else None)
+        c[1].metric("Redemption Value",
+                    f"${cur.redeem_value:,.0f}" if pd.notna(cur.redeem_value) and cur.redeem_value > 0 else "—",
+                    fmt_delta(cur.redeem_value, prev.redeem_value) if prev is not None else None)
+        c[2].metric("Avg Redemption / Basket",
+                    f"${cur.redeem_per_basket:.2f}" if pd.notna(cur.redeem_per_basket) and cur.redeem_per_basket > 0 else "—",
+                    fmt_delta(cur.redeem_per_basket, prev.redeem_per_basket) if prev is not None else None)
+        c[3].metric("Redemptions as % of Net",
+                    f"{cur.redeem_pct_of_net*100:.1f}%" if pd.notna(cur.redeem_pct_of_net) and cur.redeem_pct_of_net > 0 else "—",
+                    fmt_delta(cur.redeem_pct_of_net, prev.redeem_pct_of_net) if prev is not None else None)
+        st.divider()
+        L, R = st.columns([3, 2])
+        with L:
+            heading("Redemption value and rate by week")
+            st.markdown('<p class="note">The bars show total dollars redeemed; '
+                        'the line shows what share of baskets included a '
+                        'redemption.</p>', unsafe_allow_html=True)
+            fig = go.Figure()
+            fig.add_bar(x=red.wk_date, y=red.redeem_value, name="Redemption $",
+                        marker_color=ACCENT, opacity=.75)
+            fig.add_scatter(x=red.wk_date, y=red.redeem_rate*100, name="Redemption rate %",
+                            yaxis="y2", line=dict(color=WARN, width=2))
+            fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
+                              yaxis=dict(title="Redemption $", tickformat="$,.0s",
+                                         gridcolor="rgba(0,0,0,.07)"),
+                              yaxis2=dict(title="Rate %", overlaying="y", side="right",
+                                          showgrid=False, tickformat=".1f",
+                                          ticksuffix="%"),
+                              hovermode="x unified",
+                              legend=dict(orientation="h", y=1.12, x=0,
+                                          title_text=""),
+                              plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True, key="pc12")
+        with R:
+            st.markdown("##### Redemption by store")
+            if len(keys) > 1 and not red_store.empty:
+                red_store["store"] = red_store.store_key.map(STORES)
+                red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
+                red_store = red_store.sort_values("redeem_value", ascending=False)
+                red_store["label"] = red_store.apply(
+                    lambda r: f"${r.redeem_value/1e3:.0f}k<br>({r.redeem_rate*100:.1f}%)", axis=1)
+                fig = px.bar(red_store, x="store", y="redeem_value",
+                             color="redeem_rate", color_continuous_scale="Greens",
+                             text="label")
+                fig.update_traces(textposition="outside", textfont_size=11,
+                                  cliponaxis=False)
+                fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0),
+                                  yaxis_title="Redemption $", xaxis_title="",
+                                  coloraxis_colorbar=dict(title="Rate %",
+                                                          ticksuffix="%"),
+                                  plot_bgcolor="rgba(0,0,0,0)")
+                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+                st.plotly_chart(fig, use_container_width=True, key="pc13")
+                st.markdown('<p class="note"><b>Bar height</b> = total redemption '
+                            'dollars. <b>Color</b> = redemption rate (darker green '
+                            '= higher engagement).</p>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown('<p class="note">Select multiple stores in the '
+                            'sidebar to compare redemption performance.</p>',
+                            unsafe_allow_html=True)
+        st.divider()
+        if not red_store.empty and len(keys) > 1:
+            st.markdown("#### Store redemption scorecard")
+            st.markdown('<div class="howto"><b>How to read the scorecard.</b> '
+                        '<b>Redemption Rate</b> is engagement. '
+                        '<b>Redemption Cost %</b> is the true price of the program. '
+                        '<b>Sales / Redeem Bkt</b> is the ROI proxy.</div>',
+                        unsafe_allow_html=True)
+            red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
+            red_store["redeem_pct_of_net"] = red_store.redeem_value / red_store.net.replace(0, float("nan"))
+            red_store["sales_per_redeem_basket"] = red_store.net / red_store.redeem_baskets.replace(0, float("nan"))
+            by_rate = red_store.sort_values("redeem_rate", ascending=False)
+            by_roi = red_store.sort_values("sales_per_redeem_basket", ascending=False)
+            h1, h2, h3, h4 = st.columns(4)
+            with h1:
+                top = by_rate.iloc[0]
+                st.markdown(f'<div class="alert a-ok"><b>Most redeemed</b><br>'
+                            f'{STORES.get(top.store_key, top.store_key)} — '
+                            f'{top.redeem_rate*100:.1f}%</div>',
+                            unsafe_allow_html=True)
+            with h2:
+                bot = by_rate.iloc[-1]
+                st.markdown(f'<div class="alert a-warn"><b>Least redeemed</b><br>'
+                            f'{STORES.get(bot.store_key, bot.store_key)} — '
+                            f'{bot.redeem_rate*100:.1f}%</div>',
+                            unsafe_allow_html=True)
+            with h3:
+                top_roi = by_roi.iloc[0]
+                st.markdown(f'<div class="alert a-ok"><b>Best ROI</b><br>'
+                            f'{STORES.get(top_roi.store_key, top_roi.store_key)} — '
+                            f'${top_roi.sales_per_redeem_basket:.0f} / redeem bkt</div>',
+                            unsafe_allow_html=True)
+            with h4:
+                bot_roi = by_roi.iloc[-1]
+                st.markdown(f'<div class="alert a-bad"><b>Worst ROI</b><br>'
+                            f'{STORES.get(bot_roi.store_key, bot_roi.store_key)} — '
+                            f'${bot_roi.sales_per_redeem_basket:.0f} / redeem bkt</div>',
+                            unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame({
+                "Store": red_store.store_key.map(STORES),
+                "Baskets": red_store.baskets,
+                "Redeem Baskets": red_store.redeem_baskets,
+                "Redemption $": red_store.redeem_value.round(0),
+                "Net $": red_store.net.round(0),
+                "Redemption Rate %": (red_store.redeem_rate * 100).round(1),
+                "Redemption Cost %": (red_store.redeem_pct_of_net * 100).round(1),
+                "Sales / Redeem Bkt": red_store.sales_per_redeem_basket.round(0),
+            }), use_container_width=True, hide_index=True, column_config={
+                "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                "Net $": st.column_config.NumberColumn(format="$%d"),
+                "Redemption Rate %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Redemption Cost %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Sales / Redeem Bkt": st.column_config.NumberColumn(format="$%d"),
+            })
+        st.divider()
+        heading("Redemptions as % of net sales")
+        fig = px.line(red, x="wk_date", y=red.redeem_pct_of_net*100,
+                      markers=True, color_discrete_sequence=[WARN])
+        fig.update_traces(line=dict(width=2.5), marker=dict(size=6),
+                          hovertemplate="%{y:.1f}%<extra></extra>")
+        fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
+                          yaxis_title="% of net sales", xaxis_title="",
+                          hovermode="x unified", showlegend=False,
+                          plot_bgcolor="rgba(0,0,0,0)")
+        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%",
+                         zeroline=False)
+        fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
+        st.plotly_chart(fig, use_container_width=True, key="pc14")
+        st.markdown('<p class="note">A rising line means the loyalty program '
+                    'is taking a larger share of revenue.</p>',
+                    unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------- projections

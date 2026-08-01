@@ -1232,34 +1232,47 @@ with t_insights:
                              "specific combinations customers already choose.",
                         format="%d")})
 
-            # --- product movers -------------------------------------------
-            pt = q(f"""
-                SELECT category, brand, product,
-                       SUM(net_early) AS net_early, SUM(net_late) AS net_late,
-                       SUM(net_total) AS net_total
-                FROM dash_product_trend
-                WHERE category IN ('{ca}','{cb}') {af}
-                GROUP BY 1,2,3 ORDER BY net_total DESC LIMIT 20
-            """)
-            if not pt.empty:
-                pt["change"] = pct_change(pt.net_late, pt.net_early)
-                st.markdown("**Top products in these categories**")
-                st.dataframe(pd.DataFrame({
-                    "Category": pt.category,
-                    "Brand": pt.brand,
-                    "Product": pt["product"],
-                    "Net $": pt.net_total.round(0),
-                    "Change %": pd.to_numeric(pt.change, errors="coerce").round(1),
-                }), use_container_width=True, hide_index=True, column_config={
-                    "Net $": st.column_config.NumberColumn(format="$%d"),
-                    "Change %": st.column_config.NumberColumn(
-                        help="Second half versus first half of the period.",
-                        format="%.1f%%"),
-                })
-                st.markdown('<p class="note">Product names change often as SKUs '
-                            'turn over, so read these as examples of where the '
-                            'movement sits rather than a stable ranking.</p>',
-                            unsafe_allow_html=True)
+            # --- product movers: one table per category, side by side -------
+            st.markdown("**Top products in these categories**")
+            tca, tcb = st.columns(2)
+            shown = 0
+            for tcol, cat in ((tca, ca), (tcb, cb)):
+                pt = q(f"""
+                    SELECT brand, product,
+                           SUM(net_early) AS net_early,
+                           SUM(net_late) AS net_late,
+                           SUM(net_total) AS net_total
+                    FROM dash_product_trend
+                    WHERE category = '{cat}' {af}
+                    GROUP BY 1,2 ORDER BY net_total DESC LIMIT 10
+                """)
+                with tcol:
+                    st.markdown(f"**{cat}**")
+                    if pt.empty:
+                        st.caption(f"No {cat} movement in this period.")
+                        continue
+                    pt["change"] = pct_change(pt.net_late, pt.net_early)
+                    shown += 1
+                    st.dataframe(pd.DataFrame({
+                        "Brand": pt.brand,
+                        "Product": pt["product"],
+                        "Net $": pt.net_total.round(0),
+                        "Change %": pd.to_numeric(
+                            pt.change, errors="coerce").round(1),
+                    }), use_container_width=True, hide_index=True,
+                        column_config={
+                            "Net $": st.column_config.NumberColumn(
+                                format="$%d"),
+                            "Change %": st.column_config.NumberColumn(
+                                help="Second half versus first half of the "
+                                     "period.",
+                                format="%.1f%%"),
+                        })
+            if shown:
+                st.markdown('<p class="note">Product names change often as '
+                            'SKUs turn over, so read these as examples of '
+                            'where the movement sits rather than a stable '
+                            'ranking.</p>', unsafe_allow_html=True)
 
     inv = q(f"""
         SELECT category, SUM(inv_cost) AS inv_cost, SUM(qoh) AS qoh,

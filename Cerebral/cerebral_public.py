@@ -2057,11 +2057,17 @@ with t_brands:
                                 "Margin %": "margin"}[rank_by]
                     agg = agg.sort_values(sort_col, ascending=False)
 
-                    n_show = st.slider("SKUs to show", 5,
-                                       max(5, min(50, len(agg))),
-                                       min(15, max(5, len(agg))),
-                                       key="deep_sku_n")
-                    show = agg.head(n_show)
+                    # A slider needs room to move. Brands with a handful of
+                    # SKUs in a category are common — show them all rather
+                    # than asking for a choice between 5 and 5.
+                    if len(agg) <= 6:
+                        show = agg
+                    else:
+                        n_show = st.slider("SKUs to show", 5,
+                                           min(50, len(agg)),
+                                           min(15, len(agg)),
+                                           key="deep_sku_n")
+                        show = agg.head(n_show)
 
                     s1, s2, s3 = st.columns(3)
                     s1.metric("SKUs sold", f"{len(agg):,}")

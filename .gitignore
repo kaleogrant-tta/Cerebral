@@ -4,3 +4,5 @@ Cerebral_archive/
 *.duckdb
 alpine_reports/
 __pycache__/
+
+secrets.toml

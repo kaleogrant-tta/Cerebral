@@ -25,6 +25,47 @@ import duckdb
 
 SLIM = "cerebral_dash.duckdb"
 
+# Products with less than this in lifetime net sales are left out of the
+# week-level product table. Without a floor that table is every SKU the chain
+# has ever sold times every week times every store, which is most of the file
+# size for rows nobody looks at.
+PRODUCT_WEEK_MIN_NET = 250
+
+
+# --------------------------------------------------------------- brand names
+# The same brand arrives under more than one spelling depending on which
+# store keyed the PO and which menu version Dutchie was on. Left alone they
+# rank as separate brands, each below the reporting floor, and the combined
+# business is invisible.
+#
+# Keys are matched after lowercasing, collapsing runs of whitespace, and
+# stripping trailing punctuation — so "RUBY FARMS", "Ruby  Farms" and
+# "Ruby Farms." all land on the same key. Everything else is left exactly as
+# it came in: this is an explicit list, not fuzzy matching, because a wrong
+# merge is silent and very hard to spot downstream.
+BRAND_ALIASES = {
+    "ruby": "Ruby",
+    "ruby farms": "Ruby",
+}
+
+
+def _brand_key_sql(col: str) -> str:
+    """Normalised lookup key for a brand column."""
+    return (f"regexp_replace(regexp_replace(lower(trim({col})), "
+            f"'\\s+', ' ', 'g'), '[.,]+$', '')")
+
+
+def _canon_brand_sql(col: str) -> str:
+    """CASE expression rewriting a brand column to its canonical name."""
+    if not BRAND_ALIASES:
+        return col
+    key = _brand_key_sql(col)
+    whens = "\n".join(
+        f"        WHEN {key} = '{alias.replace(chr(39), chr(39) * 2)}' "
+        f"THEN '{canon.replace(chr(39), chr(39) * 2)}'"
+        for alias, canon in sorted(BRAND_ALIASES.items()))
+    return f"CASE\n{whens}\n        ELSE {col}\n    END"
+
 
 # Promo families that have no brand of their own but are worth tracking as
 # their own line items: the April "Secret Drop" mystery promos and the
@@ -61,6 +102,49 @@ def build(src: str, dest: str) -> dict:
     con = duckdb.connect(str(tmp))
     con.execute(f"ATTACH '{src}' AS src (READ_ONLY)")
 
+    # --- canonical brand names -------------------------------------------
+    # Every rollup below reads `fl` rather than src.fact_line, so brand
+    # consolidation happens once, before any grouping. Doing it per-table
+    # would mean any table added later quietly misses it.
+    con.execute(f"""
+        CREATE VIEW fl AS
+        SELECT * REPLACE ({_canon_brand_sql('brand')} AS brand)
+        FROM src.fact_line
+    """)
+
+    has_redemption = con.execute("""
+        SELECT COUNT(*) FROM duckdb_tables()
+        WHERE database_name = 'src' AND table_name = 'fact_redemption'
+    """).fetchone()[0] > 0
+    if has_redemption:
+        con.execute(f"""
+            CREATE VIEW fr AS
+            SELECT * REPLACE ({_canon_brand_sql('matched_brand')}
+                              AS matched_brand)
+            FROM src.fact_redemption
+        """)
+
+    # What actually got merged, so the dashboard can say so out loud rather
+    # than silently showing one brand where the POS shows two.
+    con.execute("""
+        CREATE TABLE dash_brand_alias (
+            alias VARCHAR, canonical VARCHAR, lines BIGINT, net DOUBLE)
+    """)
+    if BRAND_ALIASES:
+        con.execute(f"""
+            INSERT INTO dash_brand_alias
+            SELECT brand                       AS alias,
+                   {_canon_brand_sql('brand')} AS canonical,
+                   COUNT(*)                    AS lines,
+                   SUM(net_sales)              AS net
+            FROM src.fact_line          -- raw, pre-canonicalisation
+            WHERE NOT is_return AND brand IS NOT NULL
+              AND {_brand_key_sql('brand')} IN (
+                  {','.join("'" + a.replace("'", "''") + "'"
+                            for a in sorted(BRAND_ALIASES))})
+            GROUP BY 1, 2
+        """)
+
     # --- category x store x channel x week -------------------------------
     con.execute("""
         CREATE TABLE dash_category_week AS
@@ -79,7 +163,7 @@ def build(src: str, dest: str) -> dict:
                    SUM(gross_margin)           AS gm,
                    SUM(units)                  AS units,
                    COUNT(DISTINCT basket_id)   AS baskets_with
-            FROM src.fact_line WHERE NOT is_return
+            FROM fl WHERE NOT is_return
             GROUP BY 1,2,3,4,5
         )
         SELECT cw.*, bw.baskets, bw.days_open, bw.net_all, bw.avg_lines
@@ -110,7 +194,7 @@ def build(src: str, dest: str) -> dict:
         CREATE TABLE dash_pairs AS
         WITH b AS (
             SELECT store_key, basket_id, category
-            FROM src.fact_line WHERE NOT is_return
+            FROM fl WHERE NOT is_return
             GROUP BY 1,2,3
         ),
         m AS (SELECT store_key, basket_id FROM b GROUP BY 1,2 HAVING COUNT(*) >= 2),
@@ -126,7 +210,7 @@ def build(src: str, dest: str) -> dict:
         CREATE TABLE dash_pair_base AS
         WITH b AS (
             SELECT store_key, basket_id, category
-            FROM src.fact_line WHERE NOT is_return
+            FROM fl WHERE NOT is_return
             GROUP BY 1,2,3
         ),
         m AS (SELECT store_key, basket_id FROM b GROUP BY 1,2 HAVING COUNT(*) >= 2),
@@ -145,7 +229,7 @@ def build(src: str, dest: str) -> dict:
         CREATE TABLE dash_brand_pairs AS
         WITH b AS (
             SELECT store_key, basket_id, category, brand
-            FROM src.fact_line
+            FROM fl
             WHERE NOT is_return AND brand IS NOT NULL
             GROUP BY 1,2,3,4
         ),
@@ -166,7 +250,7 @@ def build(src: str, dest: str) -> dict:
     con.execute("""
         CREATE TABLE dash_brand_trend AS
         WITH span AS (
-            SELECT MIN(txn_ts) AS t0, MAX(txn_ts) AS t1 FROM src.fact_line
+            SELECT MIN(txn_ts) AS t0, MAX(txn_ts) AS t1 FROM fl
         ),
         halves AS (
             SELECT l.store_key, l.category, l.brand,
@@ -175,7 +259,7 @@ def build(src: str, dest: str) -> dict:
                    SUM(l.net_sales) AS net,
                    SUM(l.units)     AS units,
                    COUNT(DISTINCT l.basket_id) AS baskets
-            FROM src.fact_line l CROSS JOIN span s
+            FROM fl l CROSS JOIN span s
             WHERE NOT l.is_return AND l.brand IS NOT NULL
             GROUP BY 1,2,3,4
         )
@@ -192,13 +276,13 @@ def build(src: str, dest: str) -> dict:
     # --- product trend, top sellers per category --------------------------
     con.execute("""
         CREATE TABLE dash_product_trend AS
-        WITH span AS (SELECT MIN(txn_ts) t0, MAX(txn_ts) t1 FROM src.fact_line),
+        WITH span AS (SELECT MIN(txn_ts) t0, MAX(txn_ts) t1 FROM fl),
         h AS (
             SELECT l.store_key, l.category, l.brand, l.product,
                    CASE WHEN l.txn_ts < s.t0 + (s.t1 - s.t0)/2
                         THEN 'early' ELSE 'late' END AS half,
                    SUM(l.net_sales) AS net, SUM(l.units) AS units
-            FROM src.fact_line l CROSS JOIN span s
+            FROM fl l CROSS JOIN span s
             WHERE NOT l.is_return AND l.product IS NOT NULL
             GROUP BY 1,2,3,4,5
         ),
@@ -218,6 +302,89 @@ def build(src: str, dest: str) -> dict:
         ) WHERE rk <= 25 AND net_total >= 1000
     """)
 
+    # --- accessory products per store x week -------------------------------
+    # Feeds the Accessories tab: the category rollup can't say how many SKUs
+    # sold exactly one unit in a week, only product-level rows can. Kept to
+    # the Accessory category so the table stays a few thousand rows.
+    con.execute("""
+        CREATE TABLE dash_acc_product_week AS
+        SELECT store_key, iso_year, iso_week, product,
+               SUM(units)     AS units,
+               SUM(net_sales) AS net
+        FROM fl
+        WHERE NOT is_return
+          AND category ILIKE 'Accessor%'
+          AND product IS NOT NULL
+        GROUP BY 1,2,3,4
+    """)
+
+    # --- brand x week ------------------------------------------------------
+    # The scorecard and trend tables are whole-file rollups: they cannot
+    # answer "how did this brand do in the last eight weeks" because the
+    # period is baked in at build time. This carries the week so the
+    # dashboard's window control can actually move the numbers.
+    #
+    # first_basket_customers is safe to sum across weeks — a customer has
+    # exactly one first basket, so they appear in one week and one only.
+    # established_customers is NOT: someone buying in three weeks counts
+    # three times. It is published for completeness and the dashboard uses
+    # it only on the full window, where it matches the scorecard.
+    con.execute("""
+        CREATE TABLE dash_brand_week AS
+        WITH firsts AS (
+            SELECT customer_key, MIN(txn_ts) AS first_ts
+            FROM src.fact_basket
+            WHERE NOT is_return AND customer_key IS NOT NULL
+            GROUP BY 1
+        ),
+        tagged AS (
+            SELECT l.store_key, l.iso_year, l.iso_week, l.brand, l.category,
+                   l.customer_key, l.basket_id, l.net_sales, l.gross_margin,
+                   l.units,
+                   date_diff('day', f.first_ts, l.txn_ts) AS age_days
+            FROM fl l
+            LEFT JOIN firsts f USING (customer_key)
+            WHERE NOT l.is_return AND l.brand IS NOT NULL
+        )
+        SELECT store_key, iso_year, iso_week, brand, category,
+               SUM(net_sales)              AS net,
+               SUM(gross_margin)           AS gm,
+               SUM(units)                  AS units,
+               COUNT(DISTINCT basket_id)   AS baskets,
+               COUNT(DISTINCT CASE WHEN age_days = 0 THEN customer_key END)
+                   AS first_basket_customers,
+               COUNT(DISTINCT CASE WHEN age_days > 90 THEN customer_key END)
+                   AS established_customers
+        FROM tagged
+        GROUP BY 1,2,3,4,5
+    """)
+
+    # --- brand x category x product x week ---------------------------------
+    # Feeds "pick a brand, pick a category, see its SKUs" and lets that list
+    # respond to the window control. The floor is applied on a product's
+    # lifetime total, not per week, so a real SKU keeps its slow weeks
+    # instead of appearing to have gaps in its sales history.
+    con.execute(f"""
+        CREATE TABLE dash_brand_product_week AS
+        WITH keep AS (
+            SELECT brand, category, product
+            FROM fl
+            WHERE NOT is_return AND brand IS NOT NULL AND product IS NOT NULL
+            GROUP BY 1,2,3
+            HAVING SUM(net_sales) >= {PRODUCT_WEEK_MIN_NET}
+        )
+        SELECT l.store_key, l.iso_year, l.iso_week,
+               l.brand, l.category, l.product,
+               SUM(l.net_sales)             AS net,
+               SUM(l.gross_margin)          AS gm,
+               SUM(l.units)                 AS units,
+               COUNT(DISTINCT l.basket_id)  AS baskets
+        FROM fl l
+        JOIN keep k USING (brand, category, product)
+        WHERE NOT l.is_return
+        GROUP BY 1,2,3,4,5,6
+    """)
+
     # --- brand scorecard --------------------------------------------------
     # Which brands bring customers IN versus which are bought by people who
     # were coming anyway. That distinction is what the 3P tier conversation
@@ -235,7 +402,7 @@ def build(src: str, dest: str) -> dict:
                    l.basket_id, l.net_sales, l.gross_margin, l.units,
                    l.product,
                    date_diff('day', f.first_ts, l.txn_ts) AS age_days
-            FROM src.fact_line l
+            FROM fl l
             LEFT JOIN firsts f USING (customer_key)
             WHERE NOT l.is_return AND l.brand IS NOT NULL
         )
@@ -267,7 +434,7 @@ def build(src: str, dest: str) -> dict:
         )
         SELECT COUNT(*) AS total_customers,
                COUNT(*) FILTER (WHERE first_ts >=
-                   (SELECT MAX(txn_ts) - INTERVAL 180 DAY FROM src.fact_line))
+                   (SELECT MAX(txn_ts) - INTERVAL 180 DAY FROM fl))
                    AS new_last_180d
         FROM f
     """)
@@ -276,11 +443,8 @@ def build(src: str, dest: str) -> dict:
     # What the loyalty programme actually spends per brand, and on whom. This
     # is the 3P Reward Program conversation: a brand can be shown what its
     # offers cost, who redeemed them, and whether those were new customers.
-    has_redemption = con.execute("""
-        SELECT COUNT(*) FROM duckdb_tables()
-        WHERE database_name = 'src' AND table_name = 'fact_redemption'
-    """).fetchone()[0] > 0
-
+    # has_redemption was resolved above, where the canonical-brand view over
+    # the table is created.
     if not has_redemption:
         # Periods loaded before redemption attribution existed have no such
         # table. Create the shape so the dashboard finds it, and leave it
@@ -331,7 +495,7 @@ def build(src: str, dest: str) -> dict:
                COUNT(DISTINCT CASE
                      WHEN date_diff('day', f.first_ts, r.txn_ts) > 90
                      THEN r.customer_key END)        AS established_redeemers
-        FROM src.fact_redemption r
+        FROM fr r
         LEFT JOIN f USING (customer_key)
         GROUP BY 1,2,3,4
       """)
@@ -350,7 +514,7 @@ def build(src: str, dest: str) -> dict:
                AVG(basket_net)                 AS avg_basket,
                MIN(txn_ts)                     AS first_seen,
                MAX(txn_ts)                     AS last_seen
-        FROM src.fact_redemption
+        FROM fr
         GROUP BY 1,2,3,4,5,6
       """)
 
@@ -365,7 +529,7 @@ def build(src: str, dest: str) -> dict:
                r.channel                                       AS channel,
                COUNT(*)                                        AS redemptions,
                SUM(r.redeem_amt)                               AS redeem_value
-        FROM src.fact_redemption r
+        FROM fr r
         GROUP BY 1,2,3,4
       """)
 
@@ -377,14 +541,14 @@ def build(src: str, dest: str) -> dict:
                         ("dash_promo_brand", "brand")]:
         con.execute(f"""
             CREATE TABLE {_name} AS
-            WITH mx AS (SELECT MAX(txn_ts) AS t1 FROM src.fact_line WHERE NOT is_return),
+            WITH mx AS (SELECT MAX(txn_ts) AS t1 FROM fl WHERE NOT is_return),
             pc AS (
                 SELECT l.store_key, l.{_dim} AS dim, l.customer_key,
                        MAX(l.txn_ts)               AS last_ts,
                        COUNT(DISTINCT l.basket_id) AS n,
                        SUM(l.net_sales)            AS spend,
                        SUM(l.gross_margin)         AS gm
-                FROM src.fact_line l
+                FROM fl l
                 WHERE NOT l.is_return AND l.customer_key IS NOT NULL
                   AND l.{_dim} IS NOT NULL
                 GROUP BY 1,2,3
@@ -416,7 +580,7 @@ def build(src: str, dest: str) -> dict:
         WITH big AS (
             -- Brand-level floor, same as the scorecard. Filtering per day
             -- instead would silently erase slow days for smaller brands.
-            SELECT brand FROM src.fact_line
+            SELECT brand FROM fl
             WHERE NOT is_return AND brand IS NOT NULL
             GROUP BY 1 HAVING SUM(net_sales) >= 1000
         )
@@ -426,7 +590,7 @@ def build(src: str, dest: str) -> dict:
                SUM(units)                       AS units,
                COUNT(DISTINCT basket_id)        AS baskets,
                SUM(gross_margin)                AS gm
-        FROM src.fact_line
+        FROM fl
         WHERE NOT is_return
           AND brand IN (SELECT brand FROM big)
         GROUP BY 1,2,3
@@ -469,7 +633,7 @@ def build(src: str, dest: str) -> dict:
                COUNT(*)      AS lines,
                SUM(units)    AS units,
                SUM(net_sales) AS net
-        FROM src.fact_line
+        FROM fl
         WHERE NOT is_return
           AND (regexp_matches(product, '^[0-9]{4,}$')""" + extra + """)
         GROUP BY 1,2,3
@@ -485,7 +649,7 @@ def build(src: str, dest: str) -> dict:
         SELECT store_key, CAST(txn_ts AS DATE) AS day, brand, product, channel,
                SUM(units)     AS units,
                SUM(net_sales) AS net
-        FROM src.fact_line
+        FROM fl
         WHERE NOT is_return
           AND LOWER(product) LIKE '%gwp%'
         GROUP BY 1,2,3,4,5
@@ -506,6 +670,22 @@ def build(src: str, dest: str) -> dict:
         GROUP BY store_key, category, snapshot_date
     """)
 
+    # Accessory stock at product level, so the dashboard can count SKUs down
+    # to their last sellable unit. Same latest-snapshot, sellable-only scope
+    # as dash_inventory; quantity is summed across sellable rooms per product.
+    con.execute("""
+        CREATE TABLE dash_acc_product_inv AS
+        SELECT store_key, product,
+               SUM(qty_on_hand) AS qoh,
+               snapshot_date
+        FROM src.fact_inventory
+        WHERE sellable
+          AND category ILIKE 'Accessor%'
+          AND product IS NOT NULL
+          AND snapshot_date = (SELECT MAX(snapshot_date) FROM src.fact_inventory)
+        GROUP BY store_key, product, snapshot_date
+    """)
+
     # --- load log and metadata -------------------------------------------
     con.execute("""
         CREATE TABLE dash_load_log AS
@@ -520,9 +700,14 @@ def build(src: str, dest: str) -> dict:
                MIN(txn_ts)                  AS first_txn,
                MAX(txn_ts)                  AS last_txn,
                now()                        AS built_at
-        FROM src.fact_line WHERE NOT is_return
+        FROM fl WHERE NOT is_return
     """)
 
+    # The canonical-brand views select * from the source, customer keys and
+    # all. They must go before DETACH — and before the leak check below,
+    # which walks SHOW TABLES and would otherwise flag them.
+    con.execute("DROP VIEW IF EXISTS fl")
+    con.execute("DROP VIEW IF EXISTS fr")
     con.execute("DETACH src")
 
     # --- confirm no identifiers survived ---------------------------------
@@ -534,7 +719,8 @@ def build(src: str, dest: str) -> dict:
     ALLOWED_TEXT = {"category", "raw_category", "brand", "product", "channel",
                     "cat_a", "cat_b", "brand_a", "brand_b", "period",
                     "config_version", "room", "primary_category",
-                    "match_method", "offer_name", "product_sku"}
+                    "match_method", "offer_name", "product_sku",
+                    "alias", "canonical"}
     leaked = []
     for (t,) in con.execute("SHOW TABLES").fetchall():
         info = con.execute(f"PRAGMA table_info('{t}')").fetchall()
@@ -559,7 +745,8 @@ def build(src: str, dest: str) -> dict:
     stats = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for (t,) in con.execute("SHOW TABLES").fetchall()}
 
-    required = {"dash_meta", "dash_category_week", "dash_basket_week"}
+    required = {"dash_meta", "dash_category_week", "dash_basket_week",
+                "dash_brand_week", "dash_brand_product_week"}
     missing = required - set(stats)
     con.close()
     if missing:

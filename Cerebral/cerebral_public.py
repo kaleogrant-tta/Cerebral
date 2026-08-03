@@ -45,6 +45,30 @@ BASELINE_WEEKS = 13
 
 STORES = {1: "DTBK", 2: "5th Avenue", 3: "Soho", 4: "Union Square"}
 
+# Mirrors PRODUCT_WEEK_MIN_NET in publish.py. Only used for captions, so a
+# drift between the two is cosmetic rather than a wrong number — but keep
+# them in step.
+PRODUCT_FLOOR = 250
+
+# Mirrors BRAND_ALIASES in publish.py. The published tables already arrive
+# consolidated, so this is only for the Takeover tab's fallback path, which
+# reads raw fact_line off the local build when no published table is there.
+# Keys are lowercased and whitespace-collapsed before lookup.
+BRAND_ALIASES = {
+    "ruby": "Ruby",
+    "ruby farms": "Ruby",
+}
+
+
+def canon_brand(s: "pd.Series") -> "pd.Series":
+    """Rewrite a brand column to canonical names, leaving unknowns alone."""
+    if not BRAND_ALIASES:
+        return s
+    key = (s.astype("string").str.strip().str.lower()
+            .str.replace(r"\s+", " ", regex=True)
+            .str.replace(r"[.,]+$", "", regex=True))
+    return key.map(BRAND_ALIASES).fillna(s)
+
 st.set_page_config(page_title="Cerebral", layout="wide",
                    initial_sidebar_state="expanded")
 
@@ -630,6 +654,93 @@ keep = set(zip(weeks.iso_year.tail(n_wk), weeks.iso_week.tail(n_wk)))
 dfv = df[df.apply(lambda r: (r.iso_year, r.iso_week) in keep, axis=1)]
 dfv = dfv.sort_values(["category", "wk_date"])
 
+# ---------------------------------------------------------------- window
+# The slider used to move charts only, so a tab could show eight weeks of
+# trend above a brand table covering thirteen months. Everything that CAN be
+# scoped to the window now is; the exceptions are named where they occur.
+#
+# iso_year * 100 + iso_week gives one sortable integer per week, which keeps
+# the SQL to a plain IN list instead of a row-comparison the older DuckDB
+# builds on Streamlit Cloud do not all support.
+WIN = weeks.tail(n_wk)
+WIN_FULL = n_wk >= len(weeks)
+WIN_IDS = [int(y) * 100 + int(w)
+           for y, w in zip(WIN.iso_year, WIN.iso_week)]
+COND_WEEK = "" if WIN_FULL else \
+    f"(iso_year * 100 + iso_week) IN ({','.join(map(str, WIN_IDS))})"
+COND_STORE = "" if len(keys) == len(STORES) else \
+    f"store_key IN ({','.join(map(str, keys))})"
+
+_win_dates = pd.to_datetime(
+    WIN.iso_year.astype(str) + "-W"
+    + WIN.iso_week.astype(str).str.zfill(2) + "-1",
+    format="%G-W%V-%u", errors="coerce")
+WIN_START = _win_dates.min()
+WIN_END = _win_dates.max() + pd.Timedelta(days=6) if len(_win_dates) else None
+
+
+def scoped(*extra: str, where: bool = True) -> str:
+    """Store + window filter, plus any extra conditions.
+
+    where=True returns a WHERE clause, where=False an AND fragment to append
+    to a query that already has one. Empty conditions drop out, so a full
+    window over all stores costs nothing.
+    """
+    parts = [p for p in (COND_STORE, COND_WEEK, *extra) if p]
+    if not parts:
+        return ""
+    joined = " AND ".join(parts)
+    return f" WHERE {joined}" if where else f" AND {joined}"
+
+
+def day_scoped(*extra: str, col: str = "day", where: bool = True) -> str:
+    """Same window, expressed as dates, for day-grained tables.
+
+    dash_redemption_day and dash_brand_day carry a date rather than an ISO
+    week, so they cannot use the integer week list.
+    """
+    parts = [p for p in (COND_STORE, *extra) if p]
+    if not WIN_FULL and WIN_START is not None:
+        parts.append(f"{col} BETWEEN DATE '{WIN_START:%Y-%m-%d}' "
+                     f"AND DATE '{WIN_END:%Y-%m-%d}'")
+    if not parts:
+        return ""
+    joined = " AND ".join(parts)
+    return f" WHERE {joined}" if where else f" AND {joined}"
+
+
+def win_halves(frame: pd.DataFrame, value: str, by: list[str] | None = None):
+    """Split a week-grained frame into early/late halves OF THE WINDOW.
+
+    dash_brand_trend bakes its halves in at publish time against the whole
+    file, so it cannot answer "which way is this moving in the last eight
+    weeks". This does the same split against whatever the slider selected.
+    """
+    if frame.empty:
+        return pd.DataFrame(columns=(by or []) + ["early", "late"])
+    f = frame.copy()
+    f["_wk"] = f.iso_year.astype(int) * 100 + f.iso_week.astype(int)
+    ordered = sorted(f["_wk"].unique())
+    cut = ordered[len(ordered) // 2] if len(ordered) > 1 else ordered[0] + 1
+    f["_half"] = f["_wk"].map(lambda v: "early" if v < cut else "late")
+    grp = (by or []) + ["_half"]
+    piv = (f.groupby(grp, as_index=False)[value].sum()
+             .pivot_table(index=by or None, columns="_half", values=value,
+                          aggfunc="sum", fill_value=0))
+    for col in ("early", "late"):
+        if col not in piv.columns:
+            piv[col] = 0.0
+    piv = piv.reset_index() if by else piv
+    return piv
+
+
+# The old fragments stay: plenty of queries are deliberately whole-file.
+wfw, afw = scoped(), scoped(where=False)
+if not WIN_FULL:
+    st.sidebar.caption(
+        f"window {WIN_START:%b %d, %Y} → {WIN_END:%b %d, %Y}  ·  "
+        f"{n_wk} of {len(weeks)} weeks")
+
 st.sidebar.divider()
 st.sidebar.caption(
     f"{int(meta.n_baskets):,} baskets\n\n"
@@ -640,8 +751,8 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_redeem, t_takeover, t_projections, t_promo, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Redemptions", "Takeovers", "Projections", "Promo Lab", "What the terms mean"])
+t_charts, t_insights, t_brands, t_acc, t_redeem, t_takeover, t_projections, t_promo, t_gloss = st.tabs(
+    ["Charts", "Insights", "Brands", "Accessories", "Redemptions", "Takeovers", "Projections", "Promo Lab", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -811,7 +922,7 @@ with t_charts:
         heading("Channel mix by week", "channel")
         ch = q(f"""
             SELECT iso_year, iso_week, channel, SUM(baskets) AS baskets
-            FROM dash_basket_week {wf} GROUP BY 1,2,3
+            FROM dash_basket_week {wfw} GROUP BY 1,2,3
         """)
         if not ch.empty:
             ch = ch.merge(ch.groupby(["iso_year", "iso_week"]).baskets.sum()
@@ -860,7 +971,7 @@ with t_charts:
         heading("Category by channel — index", "channel index")
         ci = q(f"""
             WITH t AS (SELECT channel, category, SUM(net) AS net
-                       FROM dash_category_week {wf} GROUP BY 1,2)
+                       FROM dash_category_week {wfw} GROUP BY 1,2)
             SELECT category, channel,
                    net / SUM(net) OVER (PARTITION BY channel)
                    / (SUM(net) OVER (PARTITION BY category) / SUM(net) OVER ())
@@ -1236,16 +1347,42 @@ with t_insights:
             st.markdown("**Top products in these categories**")
             tca, tcb = st.columns(2)
             shown = 0
+            # dash_product_trend bakes its early/late split against the whole
+            # file, so it cannot follow the window. Where the week-level
+            # product table exists, use it and split the window itself.
             for tcol, cat in ((tca, ca), (tcb, cb)):
-                pt = q(f"""
-                    SELECT brand, product,
-                           SUM(net_early) AS net_early,
-                           SUM(net_late) AS net_late,
-                           SUM(net_total) AS net_total
-                    FROM dash_product_trend
-                    WHERE category = '{cat}' {af}
-                    GROUP BY 1,2 ORDER BY net_total DESC LIMIT 10
-                """)
+                csql = cat.replace("'", "''")
+                if table_exists("dash_brand_product_week"):
+                    raw = q(f"""
+                        SELECT brand, product, iso_year, iso_week,
+                               SUM(net) AS net
+                        FROM dash_brand_product_week
+                        {scoped(f"category = '{csql}'")}
+                        GROUP BY 1,2,3,4
+                    """)
+                    if raw.empty:
+                        pt = pd.DataFrame()
+                    else:
+                        raw["net"] = pd.to_numeric(raw.net,
+                                                   errors="coerce").fillna(0)
+                        pt = (raw.groupby(["brand", "product"], as_index=False)
+                                 .net.sum()
+                                 .rename(columns={"net": "net_total"}))
+                        hv = win_halves(raw, "net", by=["brand", "product"])
+                        pt = pt.merge(hv, on=["brand", "product"], how="left")
+                        pt = pt.rename(columns={"early": "net_early",
+                                                "late": "net_late"})
+                        pt = pt.nlargest(10, "net_total")
+                else:
+                    pt = q(f"""
+                        SELECT brand, product,
+                               SUM(net_early) AS net_early,
+                               SUM(net_late) AS net_late,
+                               SUM(net_total) AS net_total
+                        FROM dash_product_trend
+                        WHERE category = '{csql}' {af}
+                        GROUP BY 1,2 ORDER BY net_total DESC LIMIT 10
+                    """)
                 with tcol:
                     st.markdown(f"**{cat}**")
                     if pt.empty:
@@ -1265,7 +1402,7 @@ with t_insights:
                                 format="$%d"),
                             "Change %": st.column_config.NumberColumn(
                                 help="Second half versus first half of the "
-                                     "period.",
+                                     "selected window.",
                                 format="%.1f%%"),
                         })
             if shown:
@@ -1317,6 +1454,36 @@ with t_insights:
 
 # ------------------------------------------------------------------- brands
 with t_brands:
+    HAVE_BW = table_exists("dash_brand_week")
+    HAVE_BPW = table_exists("dash_brand_product_week")
+
+    if not WIN_FULL and not HAVE_BW:
+        st.markdown(
+            f'<div class="alert a-warn">This tab is showing the whole loaded '
+            f'period, not your {n_wk}-week window — the published file '
+            f'predates week-level brand data. It will follow the slider after '
+            f'the next refresh.</div>', unsafe_allow_html=True)
+
+    # Brands that were merged under one name, said out loud. Silently
+    # collapsing two POS spellings into one row is the kind of thing that
+    # costs you a meeting when a partner's own numbers do not match.
+    if table_exists("dash_brand_alias"):
+        al = q("SELECT * FROM dash_brand_alias ORDER BY canonical, net DESC")
+        if not al.empty:
+            merged = (al.groupby("canonical")["alias"]
+                        .apply(lambda s: sorted(set(s)))
+                        .to_dict())
+            bits = "; ".join(
+                f"<b>{c}</b> ← {', '.join(a for a in v if a != c)}"
+                for c, v in merged.items()
+                if len([a for a in v if a != c]))
+            if bits:
+                st.markdown(
+                    f'<p class="note">Consolidated brands: {bits}. These '
+                    f'arrive from the POS under more than one spelling and '
+                    f'are reported here as one business.</p>',
+                    unsafe_allow_html=True)
+
     st.markdown("#### Brand scorecard")
     st.markdown('<div class="howto"><b>How to read this.</b> Revenue tells you '
                 'what a brand sells. It does not tell you whether the brand '
@@ -1328,59 +1495,125 @@ with t_brands:
                 'brand bought mostly by established customers is riding '
                 'traffic you already had.</div>', unsafe_allow_html=True)
 
-    bs = q(f"""
-        SELECT brand,
-               MIN(primary_category)            AS category,
-               SUM(net)                         AS net,
-               SUM(gm)                          AS gm,
-               SUM(units)                       AS units,
-               SUM(skus)                        AS skus,
-               SUM(first_basket_customers)      AS first_basket,
-               SUM(established_customers)       AS established
-        FROM dash_brand_scorecard {wf}
-        GROUP BY 1
-    """)
+    # ---- source the scorecard ------------------------------------------
+    # Preferred path is dash_brand_week, which carries the week and so can
+    # be cut to the slider window. dash_brand_scorecard is the fallback for
+    # files built before that table existed; it is whole-period by
+    # construction and cannot respond to the window.
+    if HAVE_BW:
+        bw_raw = q(f"""
+            SELECT brand, category, iso_year, iso_week,
+                   SUM(net) AS net, SUM(gm) AS gm, SUM(units) AS units,
+                   SUM(baskets) AS baskets,
+                   SUM(first_basket_customers) AS first_basket,
+                   SUM(established_customers)  AS established
+            FROM dash_brand_week {wfw}
+            GROUP BY 1,2,3,4
+        """)
+        if bw_raw.empty:
+            bs = pd.DataFrame()
+        else:
+            for c in ("net", "gm", "units", "baskets", "first_basket",
+                      "established"):
+                bw_raw[c] = pd.to_numeric(bw_raw[c], errors="coerce").fillna(0)
+            bs = (bw_raw.groupby("brand", as_index=False)
+                        .agg(net=("net", "sum"), gm=("gm", "sum"),
+                             units=("units", "sum"),
+                             first_basket=("first_basket", "sum"),
+                             established=("established", "sum")))
+            # A brand's headline category is where most of its money sat in
+            # the window — not MIN(category), which is alphabetical accident.
+            topcat = (bw_raw.groupby(["brand", "category"], as_index=False)
+                            .net.sum()
+                            .sort_values("net", ascending=False)
+                            .drop_duplicates("brand")
+                            .set_index("brand")["category"])
+            bs["category"] = bs.brand.map(topcat)
+            if HAVE_BPW:
+                sk = q(f"""
+                    SELECT brand, COUNT(DISTINCT product) AS skus
+                    FROM dash_brand_product_week {wfw} GROUP BY 1
+                """)
+                bs = bs.merge(sk, on="brand", how="left")
+            else:
+                bs["skus"] = float("nan")
+            # Trend against the window's own halves, not the file's.
+            half = win_halves(bw_raw, "net", by=["brand"])
+            half["trend"] = pct_change(half["late"], half["early"])
+            bs = bs.merge(half[["brand", "trend"]], on="brand", how="left")
+    else:
+        bs = q(f"""
+            SELECT brand,
+                   MIN(primary_category)            AS category,
+                   SUM(net)                         AS net,
+                   SUM(gm)                          AS gm,
+                   SUM(units)                       AS units,
+                   SUM(skus)                        AS skus,
+                   SUM(first_basket_customers)      AS first_basket,
+                   SUM(established_customers)       AS established
+            FROM dash_brand_scorecard {sfilter(keys)}
+            GROUP BY 1
+        """)
+        if not bs.empty:
+            bt_all = q(f"""
+                SELECT brand, SUM(net_early) AS net_early,
+                       SUM(net_late) AS net_late
+                FROM dash_brand_trend {sfilter(keys)} GROUP BY 1
+            """)
+            bt_all["trend"] = pct_change(bt_all["net_late"],
+                                         bt_all["net_early"])
+            bs = bs.merge(bt_all[["brand", "trend"]], on="brand", how="left")
 
     if bs.empty:
-        st.info("No brand data in the published file.")
+        st.info("No brand data for the selected stores and window.")
     else:
-        bt_all = q(f"""
-            SELECT brand, SUM(net_early) AS net_early,
-                   SUM(net_late) AS net_late
-            FROM dash_brand_trend {wf} GROUP BY 1
-        """)
-        # Bracket access, not attribute access: a column named `ne` would
-        # resolve to DataFrame.ne (the not-equal method) and silently pass a
-        # bound method into pct_change.
-        bt_all["trend"] = pct_change(bt_all["net_late"], bt_all["net_early"])
-        bs = bs.merge(bt_all[["brand", "trend"]], on="brand", how="left")
-
-        min_net = st.slider("Minimum revenue to include", 1000, 100000, 5000,
-                            step=1000, format="$%d",
+        # The revenue floor has to scale with the window: $5,000 over
+        # thirteen months and $5,000 over four weeks are not the same ask,
+        # and a fixed floor empties the table as you narrow the slider.
+        floor_default = max(250, int(round(5000 * n_wk / max(len(weeks), 1)
+                                           / 250)) * 250)
+        min_net = st.slider("Minimum revenue to include", 250, 100000,
+                            min(floor_default, 100000), step=250, format="$%d",
                             help="Small brands produce unstable ratios. Raise "
                                  "this to focus on brands with enough volume "
-                                 "to rank meaningfully.")
+                                 "to rank meaningfully. The default scales "
+                                 "with the number of weeks you have selected.")
         bs = bs[bs.net >= min_net].copy()
 
         if bs.empty:
-            st.info("No brands above that revenue threshold.")
+            st.info("No brands above that revenue threshold in this window.")
         else:
             bs["margin"] = pd.to_numeric(bs.gm, errors="coerce") / \
                 pd.to_numeric(bs.net, errors="coerce").replace(0, float("nan")) * 100
             bs["acq_share"] = bs.first_basket / max(bs.first_basket.sum(), 1) * 100
 
             est_total = bs.established.sum()
-            has_tenure = est_total > 0
+            # Established-customer counts are per week in dash_brand_week, so
+            # summing them across a multi-week window counts a repeat buyer
+            # once per week they shopped. That is fine as a denominator only
+            # when the window is the whole file, where it matches the
+            # scorecard's own definition.
+            has_tenure = est_total > 0 and (WIN_FULL or not HAVE_BW)
             if has_tenure:
                 bs["acq_ratio"] = (bs.first_basket /
                                    bs.established.replace(0, float("nan")))
             else:
                 bs["acq_ratio"] = float("nan")
-                st.warning(
-                    "The loaded window is too short to tell new customers from "
-                    "established ones — nobody in it is yet 90 days past their "
-                    "first purchase. Acquisition ratio is hidden until there is "
-                    "more history. Everything else below is valid.")
+                if est_total <= 0:
+                    st.warning(
+                        "The loaded window is too short to tell new customers "
+                        "from established ones — nobody in it is yet 90 days "
+                        "past their first purchase. Acquisition ratio is "
+                        "hidden until there is more history. Everything else "
+                        "below is valid.")
+                else:
+                    st.info(
+                        "Acquisition ratio is a whole-period measure — its "
+                        "denominator counts customers 90+ days established, "
+                        "which cannot be summed across a narrowed window "
+                        "without double-counting repeat buyers. Set the "
+                        "slider to all weeks to see it. First-basket counts "
+                        "below are exact at any window.")
 
             def z(col):
                 x = pd.to_numeric(bs[col], errors="coerce").fillna(0)
@@ -1409,6 +1642,9 @@ with t_brands:
             k[2].metric("Business tier", f"{(bs.tier == 'Business').sum()}")
             k[3].metric("Economy tier", f"{(bs.tier == 'Economy').sum()}")
 
+            period_help = ("Net sales across the selected window."
+                           if not WIN_FULL else
+                           "Net sales across the loaded period.")
             cols = {
                 "Brand": bs.brand,
                 "Category": bs.category,
@@ -1430,11 +1666,12 @@ with t_brands:
                          "Economy the rest. A starting point for the tier "
                          "conversation, not a decision."),
                 "Net $": st.column_config.NumberColumn(
-                    help="Net sales across the loaded period.", format="$%d"),
+                    help=period_help, format="$%d"),
                 "Margin %": st.column_config.NumberColumn(
                     help=tip("gross margin"), format="%.1f%%"),
                 "Trend %": st.column_config.NumberColumn(
-                    help="Second half of the period versus the first half.",
+                    help="Second half of the selected window versus the "
+                         "first half.",
                     format="%.1f%%"),
                 "First-basket customers": st.column_config.NumberColumn(
                     help="Customers whose first-ever purchase here included "
@@ -1529,27 +1766,39 @@ with t_brands:
     st.markdown('<div class="howto"><b>How to read this.</b> Pick a brand and '
                 'see the company it keeps. <b>Where its revenue sits</b> shows '
                 'which categories the brand actually wins in and which way '
-                'each is moving. <b>Bought together</b> lists the other '
+                'each is moving. <b>Top SKUs</b> drills into a single '
+                'category to rank the brand\'s individual products. '
+                '<b>Bought together</b> lists the other '
                 'brands most often found in the same transactions — your '
                 'readiest bundle and cross-promo candidates. <b>What it '
                 'pulls along</b> rolls those partners up by category, which '
                 'is the buying read: a stockout on this brand costs you '
                 'sales there too.</div>', unsafe_allow_html=True)
 
-    bl = q(f"""
-        SELECT brand, SUM(net) AS net
-        FROM dash_brand_scorecard {wf}
-        GROUP BY 1 HAVING SUM(net) >= 1000
-        ORDER BY net DESC
-    """)
+    if HAVE_BW:
+        bl = q(f"""
+            SELECT brand, SUM(net) AS net
+            FROM dash_brand_week {wfw}
+            GROUP BY 1 HAVING SUM(net) >= 250
+            ORDER BY net DESC
+        """)
+        pick_help = ("Brands with at least $250 net sales in the selected "
+                     "window, largest first. Type to search.")
+    else:
+        bl = q(f"""
+            SELECT brand, SUM(net) AS net
+            FROM dash_brand_scorecard {sfilter(keys)}
+            GROUP BY 1 HAVING SUM(net) >= 1000
+            ORDER BY net DESC
+        """)
+        pick_help = ("Brands with at least $1,000 net sales in the loaded "
+                     "period, largest first. Type to search.")
 
     if bl.empty:
-        st.info("No brand data in the published file.")
+        st.info("No brand data for the selected stores and window.")
     else:
-        pick = st.selectbox(
-            "Pick a brand", bl.brand.tolist(), key="deep_brand",
-            help="Brands with at least $1,000 net sales in the loaded "
-                 "period, largest first. Type to search.")
+        pick = st.selectbox("Pick a brand", bl.brand.tolist(),
+                            key="deep_brand", help=pick_help)
         psql = pick.replace("'", "''")            # safe inside SQL literals
 
         def num0(v):
@@ -1557,20 +1806,42 @@ with t_brands:
             return float(v) if pd.notna(v) else 0.0
 
         # ---- snapshot ---------------------------------------------------
-        sc = q(f"""
-            SELECT SUM(net) AS net, SUM(gm) AS gm, SUM(units) AS units,
-                   SUM(first_basket_customers) AS first_basket
-            FROM dash_brand_scorecard
-            WHERE brand = '{psql}' {af}
-        """).iloc[0]
-        tr = q(f"""
-            SELECT SUM(net_early) AS e, SUM(net_late) AS l
-            FROM dash_brand_trend
-            WHERE brand = '{psql}' {af}
-        """).iloc[0]
+        if HAVE_BW:
+            bwd = q(f"""
+                SELECT category, iso_year, iso_week,
+                       SUM(net) AS net, SUM(gm) AS gm, SUM(units) AS units,
+                       SUM(first_basket_customers) AS first_basket
+                FROM dash_brand_week
+                {scoped(f"brand = '{psql}'")}
+                GROUP BY 1,2,3
+            """)
+            for c in ("net", "gm", "units", "first_basket"):
+                if c in bwd.columns:
+                    bwd[c] = pd.to_numeric(bwd[c], errors="coerce").fillna(0)
+            net = float(bwd.net.sum()) if not bwd.empty else 0.0
+            gm = float(bwd.gm.sum()) if not bwd.empty else 0.0
+            units = float(bwd.units.sum()) if not bwd.empty else 0.0
+            fb = int(bwd.first_basket.sum()) if not bwd.empty else 0
+            hv = win_halves(bwd, "net")
+            e = float(hv["early"].sum()) if len(hv) else 0.0
+            l = float(hv["late"].sum()) if len(hv) else 0.0
+        else:
+            sc = q(f"""
+                SELECT SUM(net) AS net, SUM(gm) AS gm, SUM(units) AS units,
+                       SUM(first_basket_customers) AS first_basket
+                FROM dash_brand_scorecard
+                WHERE brand = '{psql}' {and_filter(keys)}
+            """).iloc[0]
+            tr = q(f"""
+                SELECT SUM(net_early) AS e, SUM(net_late) AS l
+                FROM dash_brand_trend
+                WHERE brand = '{psql}' {and_filter(keys)}
+            """).iloc[0]
+            net, gm = num0(sc.net), num0(sc.gm)
+            units, fb = num0(sc.units), int(num0(sc.first_basket))
+            e, l = num0(tr.e), num0(tr.l)
+            bwd = pd.DataFrame()
 
-        net, gm = num0(sc.net), num0(sc.gm)
-        e, l = num0(tr.e), num0(tr.l)
         trend = (l / e - 1) * 100 if e > 0 else float("nan")
 
         m = st.columns(4)
@@ -1578,12 +1849,11 @@ with t_brands:
         m[1].metric("Gross margin",
                     f"{gm / net * 100:.1f}%" if net > 0 else "—",
                     help=tip("gross margin"))
-        m[2].metric("Units", f"{int(num0(sc.units)):,}")
+        m[2].metric("Units", f"{int(units):,}")
         m[3].metric("Trend (2nd half vs 1st)",
                     f"{trend:+.1f}%" if pd.notna(trend) else "—",
-                    help="Net sales in the second half of the loaded period "
-                         "versus the first half.")
-        fb = int(num0(sc.first_basket))
+                    help="Net sales in the second half of the selected "
+                         "window versus the first half.")
         if fb:
             st.markdown(f'<p class="note"><b>{fb:,}</b> customers had '
                         f'<b>{pick}</b> in their first-ever basket — '
@@ -1591,28 +1861,40 @@ with t_brands:
                         unsafe_allow_html=True)
 
         # ---- category mix + co-purchases ---------------------------------
-        cm = q(f"""
-            SELECT category,
-                   SUM(net_total) AS net,
-                   SUM(net_early) AS net_early,
-                   SUM(net_late)  AS net_late
-            FROM dash_brand_trend
-            WHERE brand = '{psql}' {af}
-            GROUP BY 1 HAVING SUM(net_total) > 0
-            ORDER BY net DESC
-        """)
+        if HAVE_BW and not bwd.empty:
+            cm = (bwd.groupby("category", as_index=False).net.sum()
+                     .query("net > 0").sort_values("net", ascending=False))
+            cmh = win_halves(bwd, "net", by=["category"])
+            cm = cm.merge(cmh, on="category", how="left")
+            cm["net_early"] = cm["early"].fillna(0)
+            cm["net_late"] = cm["late"].fillna(0)
+        else:
+            cm = q(f"""
+                SELECT category,
+                       SUM(net_total) AS net,
+                       SUM(net_early) AS net_early,
+                       SUM(net_late)  AS net_late
+                FROM dash_brand_trend
+                WHERE brand = '{psql}' {and_filter(keys)}
+                GROUP BY 1 HAVING SUM(net_total) > 0
+                ORDER BY net DESC
+            """)
 
+        # Co-purchase pairs are published without a week, so this block is
+        # whole-file whatever the slider says. Labelled rather than hidden:
+        # pairing behaviour is stable enough that the lifetime read is still
+        # the right input for bundling.
         bp = q(f"""
             SELECT other, other_cat, SUM(baskets) AS baskets FROM (
                 SELECT brand_b AS other, cat_b AS other_cat,
                        SUM(joint_baskets) AS baskets
                 FROM dash_brand_pairs
-                WHERE brand_a = '{psql}' {af}
+                WHERE brand_a = '{psql}' {and_filter(keys)}
                 GROUP BY 1, 2
                 UNION ALL
                 SELECT brand_a, cat_a, SUM(joint_baskets)
                 FROM dash_brand_pairs
-                WHERE brand_b = '{psql}' {af}
+                WHERE brand_b = '{psql}' {and_filter(keys)}
                 GROUP BY 1, 2
             ) u
             WHERE other <> '{psql}'
@@ -1627,8 +1909,8 @@ with t_brands:
         with left:
             st.markdown("##### Where its revenue sits")
             if cm.empty:
-                st.info("No category detail for this brand in the loaded "
-                        "period.")
+                st.info("No category detail for this brand in the selected "
+                        "window.")
             else:
                 cm["share"] = cm.net / cm.net.sum() * 100
                 cm["change"] = pct_change(cm["net_late"], cm["net_early"])
@@ -1661,9 +1943,9 @@ with t_brands:
                         help="Share of this brand's net sales.",
                         format="%.1f%%"),
                     "Change %": st.column_config.NumberColumn(
-                        help="Second half of the period versus the first. "
-                             "Shows which way the brand is moving inside "
-                             "each category.", format="%.1f%%"),
+                        help="Second half of the selected window versus the "
+                             "first. Shows which way the brand is moving "
+                             "inside each category.", format="%.1f%%"),
                 })
 
         with right:
@@ -1706,12 +1988,143 @@ with t_brands:
                              "alongside any other brand, how often it was "
                              "this one.", format="%.1f%%"),
                 })
+                if not WIN_FULL:
+                    st.markdown('<p class="note">Pairings cover the whole '
+                                'loaded period, not your selected window — '
+                                'basket co-occurrence is published without a '
+                                'week.</p>', unsafe_allow_html=True)
                 st.markdown('<p class="note">Partners from other categories '
                             'are cross-sells — bundle and merchandise them '
                             'together. Brands from this brand\'s own '
                             'category that never appear here are likely '
                             'substitutes: customers choose between you, not '
                             'in addition to you.</p>', unsafe_allow_html=True)
+
+        # ---- top SKUs within a category ----------------------------------
+        st.markdown("##### Top SKUs")
+        if not HAVE_BPW:
+            st.info("Product-level brand detail is not in the published file "
+                    "yet. It appears after the next refresh.")
+        else:
+            cats = q(f"""
+                SELECT category, SUM(net) AS net
+                FROM dash_brand_product_week
+                {scoped(f"brand = '{psql}'")}
+                GROUP BY 1 HAVING SUM(net) > 0
+                ORDER BY net DESC
+            """)
+            if cats.empty:
+                st.info(f"No product-level sales for {pick} in this window.")
+            else:
+                cl, cr = st.columns([2, 1])
+                cat_pick = cl.selectbox(
+                    "Category", cats.category.tolist(), key="deep_cat",
+                    help="Categories this brand sold in during the selected "
+                         "window, largest first.")
+                rank_by = cr.selectbox("Rank by", ["Net $", "Units",
+                                                   "Baskets", "Margin %"],
+                                       key="deep_rank")
+                csql = cat_pick.replace("'", "''")
+
+                sk = q(f"""
+                    SELECT product, iso_year, iso_week,
+                           SUM(net) AS net, SUM(gm) AS gm,
+                           SUM(units) AS units, SUM(baskets) AS baskets
+                    FROM dash_brand_product_week
+                    {scoped(f"brand = '{psql}'", f"category = '{csql}'")}
+                    GROUP BY 1,2,3
+                """)
+                if sk.empty:
+                    st.info("No SKUs for that combination in this window.")
+                else:
+                    for c in ("net", "gm", "units", "baskets"):
+                        sk[c] = pd.to_numeric(sk[c], errors="coerce").fillna(0)
+                    agg = (sk.groupby("product", as_index=False)
+                             .agg(net=("net", "sum"), gm=("gm", "sum"),
+                                  units=("units", "sum"),
+                                  baskets=("baskets", "sum")))
+                    hv = win_halves(sk, "net", by=["product"])
+                    agg = agg.merge(hv, on="product", how="left")
+                    agg["trend"] = pct_change(agg["late"], agg["early"])
+                    agg["margin"] = agg.gm / agg.net.replace(0, float("nan")) * 100
+                    agg["share"] = agg.net / agg.net.sum() * 100
+                    agg["wks"] = (sk[sk.units > 0]
+                                  .groupby("product").size()
+                                  .reindex(agg["product"]).fillna(0).values)
+
+                    sort_col = {"Net $": "net", "Units": "units",
+                                "Baskets": "baskets",
+                                "Margin %": "margin"}[rank_by]
+                    agg = agg.sort_values(sort_col, ascending=False)
+
+                    n_show = st.slider("SKUs to show", 5,
+                                       max(5, min(50, len(agg))),
+                                       min(15, max(5, len(agg))),
+                                       key="deep_sku_n")
+                    show = agg.head(n_show)
+
+                    s1, s2, s3 = st.columns(3)
+                    s1.metric("SKUs sold", f"{len(agg):,}")
+                    s2.metric(f"{cat_pick} net", f"${agg.net.sum():,.0f}")
+                    top3 = agg.nlargest(3, "net").net.sum()
+                    s3.metric("Top 3 SKU concentration",
+                              f"{top3 / agg.net.sum() * 100:.0f}%",
+                              help="Share of this brand's revenue in this "
+                                   "category coming from its three biggest "
+                                   "SKUs. High concentration means the "
+                                   "brand's performance here is really one "
+                                   "or two products — treat those par "
+                                   "levels as critical.")
+
+                    st.dataframe(pd.DataFrame({
+                        "SKU": show["product"],
+                        "Net $": show.net.round(0),
+                        "% of category": show["share"].round(1),
+                        "Units": show.units.astype(int),
+                        "Baskets": show.baskets.astype(int),
+                        "Margin %": show.margin.round(1),
+                        "Trend %": pd.to_numeric(show["trend"],
+                                                 errors="coerce").round(1),
+                        "Weeks selling": show.wks.astype(int),
+                    }), use_container_width=True, hide_index=True,
+                        column_config={
+                        "Net $": st.column_config.NumberColumn(format="$%d"),
+                        "% of category": st.column_config.NumberColumn(
+                            help="Share of this brand's net sales within "
+                                 "this category and window.",
+                            format="%.1f%%"),
+                        "Margin %": st.column_config.NumberColumn(
+                            help=tip("gross margin"), format="%.1f%%"),
+                        "Trend %": st.column_config.NumberColumn(
+                            help="Second half of the selected window versus "
+                                 "the first half.", format="%.1f%%"),
+                        "Baskets": st.column_config.NumberColumn(
+                            help="Transactions containing this SKU.",
+                            format="%d"),
+                        "Weeks selling": st.column_config.NumberColumn(
+                            help="Weeks in the window where this SKU moved "
+                                 "at least one unit. A high net on few weeks "
+                                 "is a drop, not a staple.", format="%d"),
+                    })
+
+                    splot = show.sort_values("net")
+                    fig = px.bar(splot, x="net", y="product",
+                                 orientation="h",
+                                 color_discrete_sequence=[cat_color(cat_pick)])
+                    fig.update_layout(height=120 + 26 * len(splot),
+                                      showlegend=False,
+                                      margin=dict(l=0, r=0, t=10, b=0),
+                                      xaxis_title="net $", yaxis_title="",
+                                      plot_bgcolor="rgba(0,0,0,0)")
+                    fig.update_xaxes(gridcolor="rgba(0,0,0,.07)")
+                    st.plotly_chart(fig, use_container_width=True,
+                                    key="deep_sku")
+                    st.markdown(
+                        f'<p class="note">SKUs below '
+                        f'${PRODUCT_FLOOR:,.0f} in lifetime net sales are not '
+                        f'published at product level, so a very long tail of '
+                        f'one-off items will not appear here.</p>',
+                        unsafe_allow_html=True)
 
         # ---- category pull, full width -----------------------------------
         if not bp.empty:
@@ -1738,6 +2151,189 @@ with t_brands:
             st.plotly_chart(fig, use_container_width=True, key="deep_pull")
 
 
+# -------------------------------------------------------------- accessories
+with t_acc:
+    st.markdown("#### Accessory performance by store")
+    st.markdown(
+        '<div class="howto"><b>How to read this tab.</b> Pick a week and '
+        'compare the stores on how accessories move: how often an accessory '
+        'makes it into a basket, what share of revenue the category earns, '
+        'and the long tail — SKUs that sold exactly one unit, what those '
+        'sales were worth, and SKUs down to their last unit on the sales '
+        'floor (restock candidates).</div>',
+        unsafe_allow_html=True)
+
+    ACC_SHORT = {1: "DTBK", 4: "USQ", 2: "5th AVE", 3: "SoHo"}
+    acc_keys = [k for k in ACC_SHORT if k in keys]
+
+    _wkopts = weeks.copy()
+    _wkopts["wk_date"] = pd.to_datetime(
+        _wkopts.iso_year.astype(str) + "-W"
+        + _wkopts.iso_week.astype(str).str.zfill(2) + "-1",
+        format="%G-W%V-%u", errors="coerce")
+    _wklabels = [
+        f"Week of {d:%b} {d.day}, {d:%Y}" if pd.notna(d)
+        else f"{y} week {w}"
+        for d, y, w in zip(_wkopts.wk_date, _wkopts.iso_year,
+                           _wkopts.iso_week)]
+    # Deliberately built from `weeks`, not WIN: the week picker offers every
+    # week in the published file regardless of where the sidebar slider sits.
+    # Narrowing it would hide history for no reason — you pick one week here
+    # anyway. The window total column below is what respects the slider.
+    acc_pick = st.selectbox("Week", list(range(len(_wkopts))),
+                            format_func=lambda i: _wklabels[i],
+                            index=len(_wkopts) - 1, key="acc_week")
+    st.caption(
+        f"Week list covers the full published range — all {len(_wkopts)} "
+        f"weeks, {_wkopts.wk_date.min():%b %d, %Y} to "
+        f"{_wkopts.wk_date.max():%b %d, %Y}. The sidebar slider does not "
+        f"trim it; it drives the window column only.")
+    wy = int(_wkopts.iso_year.iloc[acc_pick])
+    ww = int(_wkopts.iso_week.iloc[acc_pick])
+    if PARTIAL_WEEK and acc_pick == len(_wkopts) - 1:
+        st.markdown(
+            f'<div class="alert a-warn">This week is still in progress — '
+            f'<b>{PARTIAL_DAYS} trading day'
+            f'{"s" if PARTIAL_DAYS != 1 else ""} so far</b>. Counts and '
+            f'revenue will grow as the week completes; the two percentage '
+            f'rows are already comparable.</div>',
+            unsafe_allow_html=True)
+
+    acc_cat = q(f"""
+        SELECT store_key,
+               SUM(CASE WHEN category ILIKE 'Accessor%' THEN baskets_with
+                        ELSE 0 END) AS acc_baskets,
+               SUM(CASE WHEN category ILIKE 'Accessor%' THEN net
+                        ELSE 0 END) AS acc_net
+        FROM dash_category_week
+        WHERE iso_year = {wy} AND iso_week = {ww} {af}
+        GROUP BY 1
+    """)
+    acc_tot = q(f"""
+        SELECT store_key, SUM(baskets) AS baskets, SUM(net) AS net
+        FROM dash_basket_week
+        WHERE iso_year = {wy} AND iso_week = {ww} {af}
+        GROUP BY 1
+    """)
+
+    # The single-unit rows need product-level detail. Those tables are
+    # published by the refresh on its own schedule, so until they exist the
+    # rows show a dash instead of failing.
+    have_apw = table_exists("dash_acc_product_week")
+    have_api = table_exists("dash_acc_product_inv")
+    acc_single = q(f"""
+        SELECT store_key,
+               COUNT(*) FILTER (units = 1) AS single_skus,
+               COALESCE(SUM(net) FILTER (units = 1), 0) AS single_net
+        FROM dash_acc_product_week
+        WHERE iso_year = {wy} AND iso_week = {ww} {af}
+        GROUP BY 1
+    """) if have_apw else pd.DataFrame()
+    acc_onhand = q(f"""
+        SELECT store_key, COUNT(*) FILTER (qoh = 1) AS single_onhand
+        FROM dash_acc_product_inv
+        WHERE snapshot_date = (SELECT MAX(snapshot_date)
+                               FROM dash_acc_product_inv) {af}
+        GROUP BY 1
+    """) if have_api else pd.DataFrame()
+
+    def acc_lookup(frame: pd.DataFrame, store_key: int, col: str):
+        if frame.empty or "store_key" not in frame.columns:
+            return None
+        hit = frame.loc[frame.store_key == store_key, col]
+        if hit.empty or pd.isna(hit.iloc[0]):
+            return None
+        return float(hit.iloc[0])
+
+    ACC_ROWS = ["% transactions w/ accessory",
+                "% revenue by category",
+                "# single unit skus sold",
+                "revenue of single unit skus sold",
+                "# single unit skus on hand"]
+    acc_tbl = pd.DataFrame(index=ACC_ROWS,
+                           columns=[ACC_SHORT[k] for k in acc_keys])
+    for k in acc_keys:
+        baskets = acc_lookup(acc_tot, k, "baskets")
+        net_tot = acc_lookup(acc_tot, k, "net")
+        acc_b = acc_lookup(acc_cat, k, "acc_baskets")
+        acc_n = acc_lookup(acc_cat, k, "acc_net")
+        s_skus = acc_lookup(acc_single, k, "single_skus")
+        s_net = acc_lookup(acc_single, k, "single_net")
+        s_oh = acc_lookup(acc_onhand, k, "single_onhand")
+        col = ACC_SHORT[k]
+        acc_tbl.loc["% transactions w/ accessory", col] = (
+            f"{acc_b / baskets:.2%}"
+            if acc_b is not None and baskets else "—")
+        acc_tbl.loc["% revenue by category", col] = (
+            f"{acc_n / net_tot:.2%}"
+            if acc_n is not None and net_tot else "—")
+        acc_tbl.loc["# single unit skus sold", col] = (
+            f"{int(s_skus)}" if s_skus is not None else "—")
+        acc_tbl.loc["revenue of single unit skus sold", col] = (
+            f"${s_net:,.0f}" if s_net is not None else "—")
+        acc_tbl.loc["# single unit skus on hand", col] = (
+            f"{int(s_oh)}" if s_oh is not None else "—")
+
+    if acc_keys and not acc_tot.empty:
+        st.dataframe(acc_tbl, use_container_width=True)
+    else:
+        st.caption("No data for the selected stores in this week.")
+
+    # ---- the same two ratios across the slider window --------------------
+    # One week is a small sample for a category this thin: a single busy
+    # Saturday moves accessory penetration by a point. The window read is
+    # the one to act on; the week above is for spotting the outlier.
+    st.markdown("##### Across the selected window")
+    accw_cat = q(f"""
+        SELECT store_key,
+               SUM(CASE WHEN category ILIKE 'Accessor%' THEN baskets_with
+                        ELSE 0 END) AS acc_baskets,
+               SUM(CASE WHEN category ILIKE 'Accessor%' THEN net
+                        ELSE 0 END) AS acc_net
+        FROM dash_category_week {wfw}
+        GROUP BY 1
+    """)
+    accw_tot = q(f"""
+        SELECT store_key, SUM(baskets) AS baskets, SUM(net) AS net
+        FROM dash_basket_week {wfw}
+        GROUP BY 1
+    """)
+    ACCW_ROWS = ["% transactions w/ accessory", "% revenue by category",
+                 "accessory net $"]
+    accw_tbl = pd.DataFrame(index=ACCW_ROWS,
+                            columns=[ACC_SHORT[k] for k in acc_keys])
+    for k in acc_keys:
+        col = ACC_SHORT[k]
+        baskets = acc_lookup(accw_tot, k, "baskets")
+        net_tot = acc_lookup(accw_tot, k, "net")
+        acc_b = acc_lookup(accw_cat, k, "acc_baskets")
+        acc_n = acc_lookup(accw_cat, k, "acc_net")
+        accw_tbl.loc["% transactions w/ accessory", col] = (
+            f"{acc_b / baskets:.2%}" if acc_b is not None and baskets else "—")
+        accw_tbl.loc["% revenue by category", col] = (
+            f"{acc_n / net_tot:.2%}" if acc_n is not None and net_tot else "—")
+        accw_tbl.loc["accessory net $", col] = (
+            f"${acc_n:,.0f}" if acc_n is not None else "—")
+    if acc_keys and not accw_tot.empty:
+        st.dataframe(accw_tbl, use_container_width=True)
+        st.caption(
+            f"{len(WIN)} week{'s' if len(WIN) != 1 else ''}, "
+            f"{WIN_START:%b %d, %Y} → {WIN_END:%b %d, %Y}. Move the sidebar "
+            f"slider to change this.")
+
+    st.markdown(
+        '<p class="note"><b>Single unit</b> means exactly one unit: sold '
+        'one unit in the chosen week, or one unit left on the sales floor. '
+        'On-hand counts come from the latest inventory snapshot, so they '
+        'read “right now” rather than as of the chosen week.</p>',
+        unsafe_allow_html=True)
+    if not (have_apw and have_api):
+        st.markdown(
+            '<p class="note">The last three rows light up after the next '
+            'data refresh publishes product-level accessory detail — the '
+            'two percentage rows already run on existing tables.</p>',
+            unsafe_allow_html=True)
+
 
 # -------------------------------------------------------------- redemptions
 with t_redeem:
@@ -1759,7 +2355,7 @@ with t_redeem:
                SUM(redeem_baskets) AS redeem_baskets,
                SUM(redeem_value) AS redeem_value,
                SUM(net) AS net
-        FROM dash_basket_week {wf}
+        FROM dash_basket_week {wfw}
         GROUP BY 1,2
         ORDER BY 1,2
     """)
@@ -1769,7 +2365,7 @@ with t_redeem:
                SUM(redeem_baskets) AS redeem_baskets,
                SUM(redeem_value) AS redeem_value,
                SUM(net) AS net
-        FROM dash_basket_week {wf}
+        FROM dash_basket_week {wfw}
         GROUP BY 1
     """)
 
@@ -1879,7 +2475,7 @@ with t_redeem:
                 SELECT channel,
                        SUM(redemptions)  AS redemptions,
                        SUM(redeem_value) AS redeem_value
-                FROM dash_redemption_day {wf}
+                FROM dash_redemption_day {day_scoped()}
                 GROUP BY 1 ORDER BY redeem_value DESC
             """)
             if not red_ch.empty and red_ch.redemptions.sum() > 0:
@@ -2304,12 +2900,20 @@ with t_redeem:
 # -------------------------------------------------------------- projections
 with t_projections:
     st.markdown("#### Next Quarter Projection")
-    st.markdown('<p class="note">Simple linear projections from the last 26 '
-                'weeks, extended 13 weeks forward. Use as a baseline, not a '
-                'forecast.</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="note">Simple linear projections fitted to the '
+                f'<b>{len(WIN)} week{"s" if len(WIN) != 1 else ""}</b> you '
+                f'have selected in the sidebar, extended 13 weeks forward. '
+                f'Use as a baseline, not a forecast.</p>',
+                unsafe_allow_html=True)
+    if len(WIN) < 12:
+        st.markdown(
+            f'<div class="alert a-warn">A 13-week projection off '
+            f'{len(WIN)} weeks of history will swing hard on one unusual '
+            f'week. Widen the sidebar window to at least 12 weeks before '
+            f'quoting these numbers.</div>', unsafe_allow_html=True)
     proj_bw = q(f"""
         SELECT iso_year, iso_week, SUM(baskets) AS baskets, SUM(net) AS net
-        FROM dash_basket_week {wf}
+        FROM dash_basket_week {wfw}
         GROUP BY 1,2
         ORDER BY 1,2
     """)
@@ -2369,7 +2973,7 @@ with t_projections:
         heading("Category projections")
         proj_cat = q(f"""
             SELECT iso_year, iso_week, category, SUM(net) AS net
-            FROM dash_category_week {wf}
+            FROM dash_category_week {wfw}
             GROUP BY 1,2,3
             ORDER BY 1,2,3
         """)
@@ -2722,7 +3326,10 @@ def _fact_line() -> pd.DataFrame:
     cols = list(q("SELECT * FROM fact_line LIMIT 0").columns)
     if cols:
         sql = _fact_sql(cols)
-        return q(sql) if sql else pd.DataFrame()
+        out = q(sql) if sql else pd.DataFrame()
+        if not out.empty and "brand" in out.columns:
+            out["brand"] = canon_brand(out["brand"])
+        return out
     import duckdb
     for cand in [os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "tta.duckdb"),
@@ -2737,6 +3344,8 @@ def _fact_line() -> pd.DataFrame:
             out = con.execute(sql).df() if sql else pd.DataFrame()
             con.close()
             if not out.empty:
+                if "brand" in out.columns:
+                    out["brand"] = canon_brand(out["brand"])
                 return out
         except Exception:
             pass

@@ -218,6 +218,22 @@ def build(src: str, dest: str) -> dict:
         ) WHERE rk <= 25 AND net_total >= 1000
     """)
 
+    # --- accessory products per store x week -------------------------------
+    # Feeds the Accessories tab: the category rollup can't say how many SKUs
+    # sold exactly one unit in a week, only product-level rows can. Kept to
+    # the Accessory category so the table stays a few thousand rows.
+    con.execute("""
+        CREATE TABLE dash_acc_product_week AS
+        SELECT store_key, iso_year, iso_week, product,
+               SUM(units)     AS units,
+               SUM(net_sales) AS net
+        FROM src.fact_line
+        WHERE NOT is_return
+          AND category ILIKE 'Accessor%'
+          AND product IS NOT NULL
+        GROUP BY 1,2,3,4
+    """)
+
     # --- brand scorecard --------------------------------------------------
     # Which brands bring customers IN versus which are bought by people who
     # were coming anyway. That distinction is what the 3P tier conversation
@@ -504,6 +520,22 @@ def build(src: str, dest: str) -> dict:
         WHERE sellable
           AND snapshot_date = (SELECT MAX(snapshot_date) FROM src.fact_inventory)
         GROUP BY store_key, category, snapshot_date
+    """)
+
+    # Accessory stock at product level, so the dashboard can count SKUs down
+    # to their last sellable unit. Same latest-snapshot, sellable-only scope
+    # as dash_inventory; quantity is summed across sellable rooms per product.
+    con.execute("""
+        CREATE TABLE dash_acc_product_inv AS
+        SELECT store_key, product,
+               SUM(qty_on_hand) AS qoh,
+               snapshot_date
+        FROM src.fact_inventory
+        WHERE sellable
+          AND category ILIKE 'Accessor%'
+          AND product IS NOT NULL
+          AND snapshot_date = (SELECT MAX(snapshot_date) FROM src.fact_inventory)
+        GROUP BY store_key, product, snapshot_date
     """)
 
     # --- load log and metadata -------------------------------------------

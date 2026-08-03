@@ -640,8 +640,8 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_redeem, t_takeover, t_projections, t_promo, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Redemptions", "Takeovers", "Projections", "Promo Lab", "What the terms mean"])
+t_charts, t_insights, t_brands, t_acc, t_redeem, t_takeover, t_projections, t_promo, t_gloss = st.tabs(
+    ["Charts", "Insights", "Brands", "Accessories", "Redemptions", "Takeovers", "Projections", "Promo Lab", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -1737,6 +1737,139 @@ with t_brands:
             fig.update_yaxes(gridcolor="rgba(0,0,0,.07)")
             st.plotly_chart(fig, use_container_width=True, key="deep_pull")
 
+
+
+# -------------------------------------------------------------- accessories
+with t_acc:
+    st.markdown("#### Accessory performance by store")
+    st.markdown(
+        '<div class="howto"><b>How to read this tab.</b> Pick a week and '
+        'compare the stores on how accessories move: how often an accessory '
+        'makes it into a basket, what share of revenue the category earns, '
+        'and the long tail — SKUs that sold exactly one unit, what those '
+        'sales were worth, and SKUs down to their last unit on the sales '
+        'floor (restock candidates).</div>',
+        unsafe_allow_html=True)
+
+    ACC_SHORT = {1: "DTBK", 4: "USQ", 2: "5th AVE", 3: "SoHo"}
+    acc_keys = [k for k in ACC_SHORT if k in keys]
+
+    _wkopts = weeks.copy()
+    _wkopts["wk_date"] = pd.to_datetime(
+        _wkopts.iso_year.astype(str) + "-W"
+        + _wkopts.iso_week.astype(str).str.zfill(2) + "-1",
+        format="%G-W%V-%u", errors="coerce")
+    _wklabels = [
+        f"Week of {d:%b} {d.day}, {d:%Y}" if pd.notna(d)
+        else f"{y} week {w}"
+        for d, y, w in zip(_wkopts.wk_date, _wkopts.iso_year,
+                           _wkopts.iso_week)]
+    acc_pick = st.selectbox("Week", list(range(len(_wkopts))),
+                            format_func=lambda i: _wklabels[i],
+                            index=len(_wkopts) - 1, key="acc_week")
+    wy = int(_wkopts.iso_year.iloc[acc_pick])
+    ww = int(_wkopts.iso_week.iloc[acc_pick])
+    if PARTIAL_WEEK and acc_pick == len(_wkopts) - 1:
+        st.markdown(
+            f'<div class="alert a-warn">This week is still in progress — '
+            f'<b>{PARTIAL_DAYS} trading day'
+            f'{"s" if PARTIAL_DAYS != 1 else ""} so far</b>. Counts and '
+            f'revenue will grow as the week completes; the two percentage '
+            f'rows are already comparable.</div>',
+            unsafe_allow_html=True)
+
+    acc_cat = q(f"""
+        SELECT store_key,
+               SUM(CASE WHEN category ILIKE 'Accessor%' THEN baskets_with
+                        ELSE 0 END) AS acc_baskets,
+               SUM(CASE WHEN category ILIKE 'Accessor%' THEN net
+                        ELSE 0 END) AS acc_net
+        FROM dash_category_week
+        WHERE iso_year = {wy} AND iso_week = {ww} {af}
+        GROUP BY 1
+    """)
+    acc_tot = q(f"""
+        SELECT store_key, SUM(baskets) AS baskets, SUM(net) AS net
+        FROM dash_basket_week
+        WHERE iso_year = {wy} AND iso_week = {ww} {af}
+        GROUP BY 1
+    """)
+
+    # The single-unit rows need product-level detail. Those tables are
+    # published by the refresh on its own schedule, so until they exist the
+    # rows show a dash instead of failing.
+    have_apw = table_exists("dash_acc_product_week")
+    have_api = table_exists("dash_acc_product_inv")
+    acc_single = q(f"""
+        SELECT store_key,
+               COUNT(*) FILTER (units = 1) AS single_skus,
+               COALESCE(SUM(net) FILTER (units = 1), 0) AS single_net
+        FROM dash_acc_product_week
+        WHERE iso_year = {wy} AND iso_week = {ww} {af}
+        GROUP BY 1
+    """) if have_apw else pd.DataFrame()
+    acc_onhand = q(f"""
+        SELECT store_key, COUNT(*) FILTER (qoh = 1) AS single_onhand
+        FROM dash_acc_product_inv
+        WHERE snapshot_date = (SELECT MAX(snapshot_date)
+                               FROM dash_acc_product_inv) {af}
+        GROUP BY 1
+    """) if have_api else pd.DataFrame()
+
+    def acc_lookup(frame: pd.DataFrame, store_key: int, col: str):
+        if frame.empty or "store_key" not in frame.columns:
+            return None
+        hit = frame.loc[frame.store_key == store_key, col]
+        if hit.empty or pd.isna(hit.iloc[0]):
+            return None
+        return float(hit.iloc[0])
+
+    ACC_ROWS = ["% transactions w/ accessory",
+                "% revenue by category",
+                "# single unit skus sold",
+                "revenue of single unit skus sold",
+                "# single unit skus on hand"]
+    acc_tbl = pd.DataFrame(index=ACC_ROWS,
+                           columns=[ACC_SHORT[k] for k in acc_keys])
+    for k in acc_keys:
+        baskets = acc_lookup(acc_tot, k, "baskets")
+        net_tot = acc_lookup(acc_tot, k, "net")
+        acc_b = acc_lookup(acc_cat, k, "acc_baskets")
+        acc_n = acc_lookup(acc_cat, k, "acc_net")
+        s_skus = acc_lookup(acc_single, k, "single_skus")
+        s_net = acc_lookup(acc_single, k, "single_net")
+        s_oh = acc_lookup(acc_onhand, k, "single_onhand")
+        col = ACC_SHORT[k]
+        acc_tbl.loc["% transactions w/ accessory", col] = (
+            f"{acc_b / baskets:.2%}"
+            if acc_b is not None and baskets else "—")
+        acc_tbl.loc["% revenue by category", col] = (
+            f"{acc_n / net_tot:.2%}"
+            if acc_n is not None and net_tot else "—")
+        acc_tbl.loc["# single unit skus sold", col] = (
+            f"{int(s_skus)}" if s_skus is not None else "—")
+        acc_tbl.loc["revenue of single unit skus sold", col] = (
+            f"${s_net:,.0f}" if s_net is not None else "—")
+        acc_tbl.loc["# single unit skus on hand", col] = (
+            f"{int(s_oh)}" if s_oh is not None else "—")
+
+    if acc_keys and not acc_tot.empty:
+        st.dataframe(acc_tbl, use_container_width=True)
+    else:
+        st.caption("No data for the selected stores in this week.")
+
+    st.markdown(
+        '<p class="note"><b>Single unit</b> means exactly one unit: sold '
+        'one unit in the chosen week, or one unit left on the sales floor. '
+        'On-hand counts come from the latest inventory snapshot, so they '
+        'read “right now” rather than as of the chosen week.</p>',
+        unsafe_allow_html=True)
+    if not (have_apw and have_api):
+        st.markdown(
+            '<p class="note">The last three rows light up after the next '
+            'data refresh publishes product-level accessory detail — the '
+            'two percentage rows already run on existing tables.</p>',
+            unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------- redemptions

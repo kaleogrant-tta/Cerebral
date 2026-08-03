@@ -6,3 +6,6 @@ alpine_reports/
 __pycache__/
 
 secrets.toml
+
+secrets.toml
+*.json

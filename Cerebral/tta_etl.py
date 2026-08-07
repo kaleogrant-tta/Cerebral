@@ -520,14 +520,22 @@ class Pipeline:
         cols = ["Product", "category", "Category", "Brand Name", "AvgPricePerUnit", "unit_cost"]
         fl = dispensations.merge(det[cols], on="Product", how="left")
 
-        matched = fl["category"].notna().mean()
-        check("product_join_rate", matched >= THRESHOLDS["product_join_rate"],
-              f"{matched*100:.2f}% of {len(fl):,} lines matched to breakdown")
 
         # Join against the FULL POS set (including sample) so the join-rate check
         # measures genuine orphans rather than deliberate exclusions.
         fl = fl.merge(pos_all[["PosId", "channel", "is_return", "PatientName"]],
                       left_on="ReceiptNo", right_on="PosId", how="left")
+
+        # product_join_rate moved below the POS merge # retail lines only -- see fix_join_rate.py
+        # Wholesale/B2B dispensations never appear in the retail
+        # breakdown and are dropped below; they must not count
+        # against a product-join measurement.
+        _retail = fl["channel"].notna()
+        matched = fl.loc[_retail, "category"].notna().mean()
+        _skipped = int((~_retail).sum())
+        check("product_join_rate", matched >= THRESHOLDS["product_join_rate"],
+              f"{matched*100:.2f}% of {int(_retail.sum()):,} retail lines "
+              f"matched to breakdown ({_skipped:,} non-POS line(s) excluded)")
 
         # Measure the join by RECEIPT, not by line.
         #

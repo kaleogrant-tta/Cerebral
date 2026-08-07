@@ -9,3 +9,16 @@ secrets.toml
 
 secrets.toml
 *.json
+
+# --- PII and working files ---
+*.duckdb
+*.duckdb.wal
+*.bak
+*.prerebuild-*
+*.joinfix-*
+probe*_output.txt
+*-rp.csv
+2260-*.csv
+persona_tiers.parquet
+*Discount*Group*Audit*.xlsx
+__pycache__/

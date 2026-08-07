@@ -38,6 +38,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from glossary import GLOSSARY, SECTIONS, marker, section_note, tip
+from loyalty_tab import render_loyalty
+from retention_tab import render_retention
+from events_tab import render_events
 
 DASH_FILE = "cerebral_dash.duckdb"
 CACHE_MINUTES = 30
@@ -751,8 +754,11 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_acc, t_redeem, t_takeover, t_projections, t_promo, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Accessories", "Redemptions", "Takeovers", "Projections", "Promo Lab", "What the terms mean"])
+t_charts, t_insights, t_brands, t_acc, t_redeem, t_loyalty, t_retention, t_events, \
+    t_takeover, t_projections, t_promo, t_gloss = st.tabs(
+    ["Charts", "Insights", "Brands", "Accessories", "Redemptions", "Loyalty", "Retention", "Events",
+     "Takeovers", "Projections", "Promo Lab",
+     "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -3961,3 +3967,22 @@ with t_promo:
 
 with t_takeover:
     render_takeovers()
+
+
+# ---------------------------------------------------------------- loyalty
+with t_loyalty:
+    render_loyalty(q=q, keys=keys, keep=keep, stores=STORES,
+                   heading=heading, table_exists=table_exists,
+                   partial_week=PARTIAL_WEEK)
+
+
+# ------------------------------------------------ retention
+with t_retention:
+    render_retention(q=q, keys=keys, stores=STORES,
+                     heading=heading, table_exists=table_exists)
+
+
+# --------------------------------------------------- events
+with t_events:
+    render_events(q=q, keys=keys, stores=STORES,
+                  heading=heading, table_exists=table_exists)

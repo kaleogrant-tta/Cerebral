@@ -9,3 +9,22 @@ inbox/
 
 __pycache__/
 *.pyc
+
+# --- PII and working files ---
+*.duckdb
+*.duckdb.wal
+*.bak
+*.joinfix-*
+*.prerebuild-*
+join_debug_*.csv
+redemption_wishlist.csv
+rebooked.csv
+events_lift.csv
+events_onsite.csv
+rebuild_*.log
+probe*_output.txt
+*-rp.csv
+2260-*.csv
+persona_tiers.parquet
+*Discount*Group*Audit*.xlsx
+__pycache__/

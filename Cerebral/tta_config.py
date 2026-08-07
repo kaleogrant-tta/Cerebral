@@ -189,6 +189,7 @@ MAX_HEADER_SCAN_ROWS = 12
 # VALIDATION THRESHOLDS
 # ---------------------------------------------------------------------------
 THRESHOLDS = {
+    'bulk_event_min_lines': 50,
     "product_join_rate":   0.995,   # dispensation lines matched to breakdown
     "receipt_join_rate":   0.995,   # receipts matched to POS register
     "unmapped_category":   0,       # raw category strings not in CATEGORY_MAP

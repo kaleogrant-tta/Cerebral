@@ -41,6 +41,7 @@ from glossary import GLOSSARY, SECTIONS, marker, section_note, tip
 from loyalty_tab import render_loyalty
 from retention_tab import render_retention
 from events_tab import render_events
+from audiences_tab import render_audiences
 
 DASH_FILE = "cerebral_dash.duckdb"
 CACHE_MINUTES = 30
@@ -754,9 +755,9 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_acc, t_redeem, t_loyalty, t_retention, t_events, \
+t_charts, t_insights, t_brands, t_acc, t_redeem, t_loyalty, t_retention, t_events, t_audiences, \
     t_takeover, t_projections, t_promo, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Accessories", "Redemptions", "Loyalty", "Retention", "Events",
+    ["Charts", "Insights", "Brands", "Accessories", "Redemptions", "Loyalty", "Retention", "Events", "Audiences",
      "Takeovers", "Projections", "Promo Lab",
      "What the terms mean"])
 
@@ -3986,3 +3987,9 @@ with t_retention:
 with t_events:
     render_events(q=q, keys=keys, stores=STORES,
                   heading=heading, table_exists=table_exists)
+
+
+# ------------------------------------------- audiences x events
+with t_audiences:
+    render_audiences(q=q, keys=keys, stores=STORES,
+                     heading=heading, table_exists=table_exists)

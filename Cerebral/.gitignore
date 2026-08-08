@@ -28,3 +28,7 @@ probe*_output.txt
 persona_tiers.parquet
 *Discount*Group*Audit*.xlsx
 __pycache__/
+
+*-sl.csv
+data/inbox/
+data/out/

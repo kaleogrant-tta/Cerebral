@@ -906,6 +906,194 @@ with t_charts:
                           showlegend=False)
         st.plotly_chart(fig, use_container_width=True, key="pc2")
 
+    # ---------------------------------------------------- transactions
+    st.divider()
+    heading("Transactions by week", "basket")
+    st.markdown(
+        '<p class="note">One transaction is one completed basket, returns '
+        'excluded. This is the volume line underneath revenue: net sales can '
+        'hold up on a smaller number of larger baskets, and the two need to '
+        'be read together.</p>', unsafe_allow_html=True)
+
+    tx = q(f"""
+        SELECT iso_year, iso_week, SUM(baskets) AS baskets,
+               MAX(days_open) AS days_open
+        FROM dash_basket_week {wfw} GROUP BY 1,2
+    """)
+    if not tx.empty:
+        tx["wk_date"] = pd.to_datetime(
+            tx.iso_year.astype(str) + "-W"
+            + tx.iso_week.astype(str).str.zfill(2) + "-1",
+            format="%G-W%V-%u", errors="coerce")
+        tx = tx.sort_values("wk_date")
+
+        tc1, tc2 = st.columns([3, 1])
+        with tc2:
+            per_day = st.checkbox(
+                "Per trading day", value=bool(PARTIAL_WEEK),
+                help="Divides each week by the days it actually traded. A "
+                     "week in progress, or one containing a closure, "
+                     "otherwise reads as a collapse in volume.")
+        tx["value"] = tx.baskets / tx.days_open if per_day else tx.baskets
+        tx["trend"] = tx["value"].rolling(4, min_periods=2).mean()
+
+        _cur, _prev = tx.iloc[-1], (tx.iloc[-2] if len(tx) > 1 else None)
+        with tc1:
+            m = st.columns(3)
+            m[0].metric(
+                "Transactions per day" if per_day else "Transactions, latest week",
+                f"{_cur.value:,.0f}",
+                f"{(_cur.value / _prev.value - 1) * 100:+.1f}%"
+                if _prev is not None and _prev.value else None)
+            m[1].metric("4-week average", f"{_cur.trend:,.0f}",
+                        help="The latest point of the trend line. Week-to-week "
+                             "movement is mostly noise; this is the level.")
+            m[2].metric("Window total", f"{tx.baskets.sum():,.0f}",
+                        help="Every transaction across the weeks and stores "
+                             "currently selected.")
+
+        fig = go.Figure()
+        fig.add_bar(x=tx.wk_date, y=tx.value, name="Transactions",
+                    marker_color=ACCENT, opacity=.7)
+        fig.add_scatter(x=tx.wk_date, y=tx.trend, name="4-week average",
+                        line=dict(color=MUTED, width=2.4))
+        fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0),
+                          yaxis=dict(title="Transactions per day" if per_day
+                                     else "Transactions",
+                                     tickformat=",.0f",
+                                     gridcolor="rgba(0,0,0,.07)"),
+                          xaxis_title="", hovermode="x unified",
+                          legend=dict(orientation="h", y=1.14, x=0,
+                                      title_text=""),
+                          plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True, key="pc_tx")
+
+    # ---------------------------------------------- new vs returning
+    st.divider()
+    heading("New and returning customers by week")
+
+    _nr_store = ("store_key = 0" if len(keys) == len(STORES)
+                 else f"store_key IN ({','.join(map(str, keys))})")
+    _nr_scope_label = st.radio(
+        "Who counts as a customer",
+        ["Loyalty-identified only", "Everyone in the POS"],
+        horizontal=True, key="nr_scope",
+        help="Customers without a loyalty ID are keyed on a hash of their "
+             "name. Two people sharing a name collapse into one key, and "
+             "every collision turns a genuinely new customer into a "
+             "returning one — so the second option understates new "
+             "customers. Its trend is usable; its level is not.")
+    _nr_scope = ("resolved" if _nr_scope_label.startswith("Loyalty")
+                 else "all")
+
+    nr = q(f"""
+        SELECT iso_year, iso_week, segment,
+               SUM(customers) AS customers, SUM(net) AS net
+        FROM dash_newret_week
+        WHERE id_scope = '{_nr_scope}' AND {_nr_store}
+              {(' AND ' + COND_WEEK) if COND_WEEK else ''}
+        GROUP BY 1,2,3
+    """)
+
+    if nr.empty:
+        st.markdown(
+            '<div class="alert a-warn">This chart needs '
+            '<code>dash_newret_week</code>, which the next scheduled rebuild '
+            'will create. Everything else on this tab is unaffected.</div>',
+            unsafe_allow_html=True)
+    else:
+        nr["wk_date"] = pd.to_datetime(
+            nr.iso_year.astype(str) + "-W"
+            + nr.iso_week.astype(str).str.zfill(2) + "-1",
+            format="%G-W%V-%u", errors="coerce")
+
+        # The first weeks of loaded history have nothing before them, so
+        # every customer in them looks new. Dropping those weeks is the
+        # difference between a trend and a cliff that is an artefact of
+        # where the data starts.
+        _nrm = q("SELECT * FROM dash_newret_meta")
+        _burn = 4
+        _cut = None
+        if not _nrm.empty:
+            _burn = int(_nrm.iloc[0].get("burn_in_weeks", 4) or 4)
+            _cut = pd.to_datetime(_nrm.iloc[0].first_txn) + \
+                pd.Timedelta(weeks=_burn)
+            nr = nr[nr.wk_date >= _cut]
+
+        if nr.empty:
+            st.markdown(
+                f'<p class="note">The selected window sits inside the first '
+                f'{_burn} weeks of loaded history, where everyone counts as '
+                f'new. Widen the window to see this.</p>',
+                unsafe_allow_html=True)
+        else:
+            piv = (nr.pivot_table(index="wk_date", columns="segment",
+                                  values="customers", aggfunc="sum")
+                     .fillna(0).sort_index())
+            for _c in ("New", "Returning"):
+                if _c not in piv.columns:
+                    piv[_c] = 0.0
+            piv["total"] = piv.New + piv.Returning
+            piv["new_share"] = (piv.New / piv.total.replace(0, np.nan)) * 100
+
+            _c2, _p2 = piv.iloc[-1], (piv.iloc[-2] if len(piv) > 1 else None)
+            nm = st.columns(4)
+            nm[0].metric("New customers, latest week", f"{_c2.New:,.0f}",
+                         f"{(_c2.New / _p2.New - 1) * 100:+.1f}%"
+                         if _p2 is not None and _p2.New else None,
+                         help="Customers whose first ever purchase, across "
+                              "the whole loaded history, falls in that week.")
+            nm[1].metric("Returning", f"{_c2.Returning:,.0f}",
+                         f"{(_c2.Returning / _p2.Returning - 1) * 100:+.1f}%"
+                         if _p2 is not None and _p2.Returning else None,
+                         help="Everyone else who shopped that week.")
+            nm[2].metric("New as % of customers", f"{_c2.new_share:,.1f}%",
+                         f"{_c2.new_share - _p2.new_share:+.1f}pp"
+                         if _p2 is not None and pd.notna(_p2.new_share) else None,
+                         help="Acquisition rate. Falling share with flat "
+                              "totals means the base is ageing, not growing.")
+            _half = max(1, len(piv) // 2)
+            _early, _late = piv.New.iloc[:_half].mean(), piv.New.iloc[-_half:].mean()
+            nm[3].metric("New, window trend",
+                         f"{(_late / _early - 1) * 100:+.1f}%" if _early else "—",
+                         help="Average weekly new customers in the second "
+                              "half of the window against the first.")
+
+            fig = go.Figure()
+            fig.add_bar(x=piv.index, y=piv.Returning, name="Returning",
+                        marker_color=MUTED, opacity=.55)
+            fig.add_bar(x=piv.index, y=piv.New, name="New",
+                        marker_color=ACCENT)
+            fig.add_scatter(x=piv.index, y=piv.new_share, name="New %",
+                            yaxis="y2", line=dict(color=WARN, width=2.4))
+            fig.update_layout(barmode="stack", height=380,
+                              margin=dict(l=0, r=0, t=10, b=0),
+                              yaxis=dict(title="Customers", tickformat=",.0f",
+                                         gridcolor="rgba(0,0,0,.07)"),
+                              yaxis2=dict(title="New %", overlaying="y",
+                                          side="right", showgrid=False,
+                                          ticksuffix="%", rangemode="tozero"),
+                              xaxis_title="", hovermode="x unified",
+                              legend=dict(orientation="h", y=1.12, x=0,
+                                          title_text=""),
+                              plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True, key="pc_nr")
+
+            _notes = ["A customer is new in the week of their first ever "
+                      "purchase and returning in every week after it, so the "
+                      "two bars sum to that week's customer count."]
+            if _cut is not None:
+                _notes.append(f"The first {_burn} weeks of history are "
+                              f"excluded — with nothing loaded before them, "
+                              f"everyone in them reads as new.")
+            if len(keys) != len(STORES):
+                _notes.append("With a store filter applied, a customer who "
+                              "shopped two of the selected stores in one week "
+                              "is counted once per store. Select all stores "
+                              "for the exact chain figure.")
+            st.markdown('<p class="note">' + " ".join(_notes) + "</p>",
+                        unsafe_allow_html=True)
+
     st.divider()
     heading("Dollars per 100 baskets", "$/100 baskets")
     howto("per100")

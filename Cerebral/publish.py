@@ -799,6 +799,17 @@ def main() -> int:
     print(f"\n  {size} MB  (from {src_mb:,.0f} MB — {size/src_mb*100:.1f}%)")
     print("  no customer, name, address, phone or basket identifiers included")
 
+    # Audience/event cohorts live in their own database and are added after
+    # the rebuild, since build() drops and recreates every table.
+    try:
+        import publish_audiences
+        publish_audiences.publish(Path("data/cerebral_audiences.duckdb"),
+                                  Path("config/audience_event_mapping.xlsx"),
+                                  Path(args.out))
+        print("  audience tables added")
+    except Exception as e:
+        print(f"  audience tables skipped: {type(e).__name__}: {e}")
+
     if args.upload:
         from tta_env import bootstrap
         from tta_drive import DriveClient

@@ -308,6 +308,7 @@ class Pipeline:
                 basket_lines      INTEGER,
                 distinct_cats     INTEGER,
                 loyalty_redeem    DOUBLE,
+                discount_amt      DOUBLE,
                 used_redemption   BOOLEAN,
                 is_return         BOOLEAN
             );
@@ -412,6 +413,11 @@ class Pipeline:
         """)
         # Basket category flag columns are configuration-driven.
         existing = {r[1] for r in self.con.execute("PRAGMA table_info('fact_basket')").fetchall()}
+        # Basket-level discount from the POS export. Databases built
+        # before this column existed get it added here rather than
+        # needing a full rebuild.
+        if "discount_amt" not in existing:
+            self.con.execute("ALTER TABLE fact_basket ADD COLUMN discount_amt DOUBLE")
         for cat in BASKET_FLAG_CATEGORIES:
             slug = cat.lower().replace("-", "_")
             if f"has_{slug}" not in existing:
@@ -674,6 +680,19 @@ class Pipeline:
         basket["customer_known"] = basket["customer_key"].notna()
         basket["loyalty_redeem"] = basket["basket_id"].map(redeem).fillna(0.0)
         basket["used_redemption"] = basket["loyalty_redeem"] > 0
+
+        # Basket-level discount, straight from the POS export. This is
+        # every discount the till applied -- group and employee
+        # discounts, manual write-downs, promo codes -- NOT only loyalty
+        # offers, which are loyalty_redeem above. The two overlap: a
+        # loyalty redemption also appears here, so they must never be
+        # summed together as "total discount".
+        _pd = pos[~pos["is_return"]] if "is_return" in pos else pos
+        _disc = (pd.to_numeric(_pd.get("DiscountAmt"), errors="coerce")
+                   .fillna(0.0)
+                   .groupby(pd.to_numeric(_pd["PosId"], errors="coerce"))
+                   .sum())
+        basket["discount_amt"] = basket["basket_id"].map(_disc).fillna(0.0)
 
         # has_<cat> / net_ex_<cat>: precomputed so basket-lift analysis needs no self-join
         cat_net = line.pivot_table(index="basket_id", columns="category",

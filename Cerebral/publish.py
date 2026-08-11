@@ -604,6 +604,136 @@ def build(src: str, dest: str) -> dict:
         GROUP BY 1,2,3
     """)
 
+    # --- discounting -------------------------------------------------------
+    # Basket-level discount: the money actually taken off at the till. The
+    # offer tables above carry net_sales only, so before this there was no
+    # published figure for what a discount COST -- only what the customer paid
+    # on a discounted line. Sourced from the POS export's DiscountAmt, which
+    # the ETL carried but never read until wire_discount.py.
+    #
+    # This is EVERY till discount: group and employee discounts, manual
+    # write-downs, promo codes, and loyalty offers. It overlaps loyalty_redeem
+    # rather than excluding it, so the two must never be summed together.
+    has_discount = con.execute("""
+        SELECT COUNT(*) FROM duckdb_columns()
+        WHERE database_name = 'src' AND table_name = 'fact_basket'
+          AND column_name = 'discount_amt'
+    """).fetchone()[0] > 0
+
+    if not has_discount:
+        con.execute("""
+            CREATE TABLE dash_discount_day (
+                store_key INTEGER, day DATE, channel VARCHAR,
+                baskets BIGINT, discounted_baskets BIGINT,
+                gross DOUBLE, discount DOUBLE, net DOUBLE, margin DOUBLE,
+                loyalty_redeem DOUBLE)
+        """)
+        con.execute("""
+            CREATE TABLE dash_discount_brand (
+                store_key INTEGER, brand VARCHAR, category VARCHAR,
+                baskets BIGINT, units DOUBLE,
+                net DOUBLE, discount DOUBLE, margin DOUBLE)
+        """)
+        print("  ! source fact_basket has no discount_amt — run "
+              "wire_discount steps then backfill_discount.py. "
+              "Empty tables created.")
+    else:
+        con.execute("""
+            CREATE TABLE dash_discount_day AS
+            SELECT store_key, CAST(txn_ts AS DATE) AS day, channel,
+                   COUNT(*)                                   AS baskets,
+                   COUNT(*) FILTER (WHERE discount_amt > 0)   AS discounted_baskets,
+                   SUM(basket_net + COALESCE(discount_amt,0)) AS gross,
+                   SUM(COALESCE(discount_amt, 0))             AS discount,
+                   SUM(basket_net)                            AS net,
+                   SUM(basket_margin)                         AS margin,
+                   SUM(COALESCE(loyalty_redeem, 0))           AS loyalty_redeem
+            FROM src.fact_basket
+            WHERE NOT is_return
+            GROUP BY 1,2,3
+        """)
+
+        # Basket discount spread across the basket's lines by net-sales share.
+        # APPROXIMATE BY CONSTRUCTION: the till records a discount against the
+        # basket, not the line, so a single-brand discount on a mixed basket is
+        # smeared across every brand in it. Fine for ranking which brands sit in
+        # discounted baskets; not a per-brand cost figure. dash_discount_day has
+        # no such caveat. The tab says so.
+        con.execute("""
+            CREATE TABLE dash_discount_brand AS
+            WITH b AS (
+                SELECT basket_id, basket_net,
+                       COALESCE(discount_amt, 0) AS disc
+                FROM src.fact_basket
+                WHERE NOT is_return AND COALESCE(discount_amt, 0) > 0
+                  AND basket_net > 0
+            )
+            SELECT l.store_key, l.brand, l.category,
+                   COUNT(DISTINCT l.basket_id)        AS baskets,
+                   SUM(l.units)                       AS units,
+                   SUM(l.net_sales)                   AS net,
+                   SUM(b.disc * l.net_sales / b.basket_net) AS discount,
+                   SUM(l.gross_margin)                AS margin
+            FROM fl l JOIN b ON l.basket_id = b.basket_id
+            WHERE NOT l.is_return
+            GROUP BY 1,2,3
+        """)
+
+    # --- discount groups ---------------------------------------------------
+    # Who the "everything else" discount went to, by name. dim_discount_group_
+    # member comes from the Customer Discount Group Audit via
+    # ingest_discount_groups.py -- the only source that names a discount, since
+    # the POS export records an amount and no reason.
+    #
+    # EVER-MEMBER is the headline: any discounted basket by someone who was
+    # ever in the group. 90% of memberships in the audit are an Added with no
+    # Removed, so windowing mostly just drops baskets from before the add date
+    # while the audit's left-censoring makes those windows untrustworthy
+    # anyway. Both are published; `windowed` is the stricter subset.
+    has_groups = con.execute("""
+        SELECT COUNT(*) FROM duckdb_tables()
+        WHERE database_name = 'src'
+          AND table_name = 'dim_discount_group_member'
+    """).fetchone()[0] > 0
+
+    if not (has_groups and has_discount):
+        con.execute("""
+            CREATE TABLE dash_discount_group (
+                store_key INTEGER, group_name VARCHAR, group_kind VARCHAR,
+                members BIGINT, baskets BIGINT, net DOUBLE,
+                discount DOUBLE, loyalty DOUBLE, other_discount DOUBLE,
+                windowed_baskets BIGINT, windowed_other DOUBLE)
+        """)
+        if not has_groups:
+            print("  ! no dim_discount_group_member — run "
+                  "ingest_discount_groups.py. Empty table created.")
+    else:
+        con.execute("""
+            CREATE TABLE dash_discount_group AS
+            SELECT b.store_key, m.group_name, m.group_kind,
+                   COUNT(DISTINCT m.customer_key)          AS members,
+                   COUNT(DISTINCT b.basket_id)             AS baskets,
+                   SUM(b.basket_net)                       AS net,
+                   SUM(b.discount_amt)                     AS discount,
+                   SUM(COALESCE(b.loyalty_redeem, 0))      AS loyalty,
+                   SUM(b.discount_amt
+                       - COALESCE(b.loyalty_redeem, 0))    AS other_discount,
+                   COUNT(DISTINCT CASE
+                         WHEN b.txn_ts >= m.first_added
+                          AND b.txn_ts <  m.last_removed
+                         THEN b.basket_id END)             AS windowed_baskets,
+                   SUM(CASE
+                       WHEN b.txn_ts >= m.first_added
+                        AND b.txn_ts <  m.last_removed
+                       THEN b.discount_amt - COALESCE(b.loyalty_redeem, 0)
+                       ELSE 0 END)                         AS windowed_other
+            FROM src.dim_discount_group_member m
+            JOIN src.fact_basket b ON b.customer_key = m.customer_key
+            WHERE NOT b.is_return
+              AND COALESCE(b.discount_amt, 0) > 0
+            GROUP BY 1,2,3
+        """)
+
     # --- GWP receipts + suspect lines --------------------------------------
     # The two sides of GWP reconciliation. dash_gwp_receipt is what came in
     # the door; dash_suspect_lines is sale lines whose "product" is a bare
@@ -736,7 +866,9 @@ def build(src: str, dest: str) -> dict:
                     "cat_a", "cat_b", "brand_a", "brand_b", "period",
                     "config_version", "room", "primary_category",
                     "match_method", "offer_name", "product_sku",
-                    "alias", "canonical", "tier", "bin_label", "first_channel", "seq_label", "gap_bucket", "event_name", "event_id", "event_type", "series", "scope", "measure", "group_kind", "group_value", "store_name", "brand_partners", "metric", "id_scope", "segment"}
+                    "alias", "canonical", "tier", "bin_label", "first_channel", "seq_label", "gap_bucket", "event_name", "event_id", "event_type", "series", "scope", "measure", "group_kind", "group_value", "store_name", "brand_partners", "metric", "id_scope", "segment",
+    "group_name", "group_kind",
+}
     leaked = []
     for (t,) in con.execute("SHOW TABLES").fetchall():
         info = con.execute(f"PRAGMA table_info('{t}')").fetchall()

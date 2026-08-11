@@ -29,6 +29,8 @@ from publish_retention import build_retention
 
 from publish_loyalty import build_loyalty
 
+from publish_newret import build_newret
+
 SLIM = "cerebral_dash.duckdb"
 
 # Products with less than this in lifetime net sales are left out of the
@@ -720,6 +722,8 @@ def build(src: str, dest: str) -> dict:
     build_retention(con)
     # --- events: lift, DiD, offsets ---
     build_events(con)
+    # --- new vs returning customers by week ---
+    build_newret(con)
     con.execute("DETACH src")
 
     # --- confirm no identifiers survived ---------------------------------
@@ -732,7 +736,7 @@ def build(src: str, dest: str) -> dict:
                     "cat_a", "cat_b", "brand_a", "brand_b", "period",
                     "config_version", "room", "primary_category",
                     "match_method", "offer_name", "product_sku",
-                    "alias", "canonical", "tier", "bin_label", "first_channel", "seq_label", "gap_bucket", "event_name", "event_id", "event_type", "series", "scope", "measure", "group_kind", "group_value", "store_name", "brand_partners", "metric"}
+                    "alias", "canonical", "tier", "bin_label", "first_channel", "seq_label", "gap_bucket", "event_name", "event_id", "event_type", "series", "scope", "measure", "group_kind", "group_value", "store_name", "brand_partners", "metric", "id_scope", "segment"}
     leaked = []
     for (t,) in con.execute("SHOW TABLES").fetchall():
         info = con.execute(f"PRAGMA table_info('{t}')").fetchall()

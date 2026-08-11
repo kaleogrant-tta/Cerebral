@@ -22,3 +22,7 @@ probe*_output.txt
 persona_tiers.parquet
 *Discount*Group*Audit*.xlsx
 __pycache__/
+
+.streamlit/secrets.toml
+**/secrets.toml
+

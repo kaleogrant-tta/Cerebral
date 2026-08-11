@@ -43,6 +43,60 @@ from retention_tab import render_retention
 from events_tab import render_events
 from audiences_tab import render_audiences
 
+
+# --- rewards menu, for the off-menu picks panel ------------------------
+# (brand substring, category, optional size regex on product)
+# Matched on brand + form, not product name: the menu says "Rythm Infused
+# Pre-Roll 1G" while the POS says "Rythm Remix Infused Pre Roll Multi Pack
+# Strawberry Sour Diesel 5pk".
+# Size is tested only where one brand+category spans two tiers -- Rythm
+# Flower is 3.5g at 1,000 and 28g at 3,000.
+REWARD_MENU = {
+    100: [("travel agency", "Accessory", None)],
+    200: [("nanticoke", "Pre-Roll", None),
+          ("foy", "Edible", None)],
+    500: [("rythm", "Pre-Roll", None),
+          ("rythm", "Edible", None),
+          ("wana", "Edible", None),
+          ("papa", "Topical", None),
+          ("incredibles", "Edible", None)],
+    1000: [("rythm", "Pre-Roll", None),
+           ("rythm", "Flower", r"3\.5"),
+           ("rythm", "Vape", None),
+           ("dark heart", "Flower", r"3\.5")],
+    1500: [("rythm", "Concentrate", None),
+           ("select", "Vape", None)],
+    3000: [("rythm", "Flower", r"\b28")],
+}
+
+
+def _tier_points(offer_name):
+    """Pull the points tier out of 'Travel Club 1000 Points Substitution'."""
+    m = re.search(r"([0-9][0-9,]*)\s*points?", str(offer_name), re.I)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def is_on_menu(offer_name, brand, category, product):
+    """True when the item taken IS the advertised reward for that tier."""
+    pts = _tier_points(offer_name)
+    if pts is None or pts not in REWARD_MENU:
+        return False
+    b = str(brand or "").lower()
+    c = str(category or "")
+    p = str(product or "")
+    for want_brand, want_cat, size_rx in REWARD_MENU[pts]:
+        if want_brand in b and c == want_cat:
+            if size_rx and not re.search(size_rx, p, re.I):
+                continue
+            return True
+    return False
+# --- end rewards menu --------------------------------------------------
+
 DASH_FILE = "cerebral_dash.duckdb"
 CACHE_MINUTES = 30
 BASELINE_WEEKS = 13
@@ -2745,7 +2799,10 @@ with t_redeem:
             'names over time ("Loyalty …", the "Loytaly …" typo, "Travel '
             'Club …"), so rows group by the product, not the offer name. '
             'Where a menu item was swapped at the register, the SKU shown is '
-            'the one the customer actually received.</div>',
+            'the one the customer actually received. A substitution that '
+            'could not be traced to a product is listed as unresolved rather '
+            'than by its offer name, so it is never mistaken for a SKU.'
+            '</div>',
             unsafe_allow_html=True)
 
         brand_opts = sorted(attributed.brand.dropna().unique())
@@ -2757,7 +2814,18 @@ with t_redeem:
         # "Loyalty …", the "Loytaly …" typo — roll up into one row per strain.
         try:
             sku = q(f"""
-                SELECT COALESCE(product, offer_name) AS sku, category,
+                SELECT CASE
+                         WHEN product IS NOT NULL THEN product
+                         WHEN lower(offer_name) LIKE '%substitution%'
+                           THEN 'Not resolved to a product'
+                         ELSE offer_name
+                       END AS sku,
+                       CASE
+                         WHEN product IS NULL
+                          AND lower(offer_name) LIKE '%substitution%'
+                           THEN 'Unresolved'
+                         ELSE category
+                       END AS category,
                        SUM(redemptions) AS redemptions,
                        SUM(redeem_value) AS spend,
                        AVG(avg_basket)  AS avg_basket
@@ -2787,7 +2855,8 @@ with t_redeem:
                 0, float("nan"))
 
             m = st.columns(3)
-            m[0].metric("SKUs redeemed", f"{len(sku):,}")
+            _real = sku[sku.sku.astype(str) != "Not resolved to a product"]
+            m[0].metric("SKUs redeemed", f"{len(_real):,}")
             m[1].metric("Redemptions", f"{int(sku.redemptions.sum()):,}")
             m[2].metric("Redemption $", f"${sku.spend.sum():,.0f}")
 
@@ -2820,41 +2889,98 @@ with t_redeem:
         st.divider()
         st.markdown("##### Chosen instead — off-menu picks")
         st.markdown(
-            '<div class="howto"><b>How to read this.</b> When a redemption '
-            'menu item is out of stock, staff let the customer pick something '
-            'of similar value instead. Those swaps ring up at $0.01, or '
-            'discounted down to just the tax — that price pattern is how '
-            'they are identified here. Ranked by redemption dollars, this is '
-            'a ready-made shortlist of candidates for the menu. One caveat: '
-            'if a customer also bought something genuinely cheap, that can '
-            'occasionally be picked up as the swap — sanity-check an '
-            'unfamiliar row before acting on it.</div>',
+            '<div class="howto"><b>How to read this.</b> A substitution is '
+            'rung when the reward a customer wants is not in stock — they '
+            'pick something of similar value and the discount is written '
+            'down to the price of that item. Because the discount equals '
+            'what they took, the item is identifiable from the amount. Rows '
+            'where the customer received the advertised reward are excluded, '
+            'so what remains is the demand your rewards menu is not serving '
+            '— ranked by redemption dollars, a ready-made shortlist of '
+            'candidates. Not every substitution resolves; the unmatched '
+            'count is shown below.</div>',
             unsafe_allow_html=True)
-        subs = q(f"""
-            SELECT product AS sku, category,
-                   SUM(redemptions)             AS redemptions,
-                   SUM(redeem_value)            AS spend,
-                   COUNT(DISTINCT offer_name)   AS offers
+        subs_raw = q(f"""
+            SELECT offer_name, brand, product AS sku, category,
+                   SUM(redemptions)  AS redemptions,
+                   SUM(redeem_value) AS spend
             FROM dash_offer_performance
-            WHERE match_method = 'substituted-line' {af}
-            GROUP BY 1,2
-            ORDER BY spend DESC
+            WHERE match_method = 'substituted-line'
+              AND lower(offer_name) LIKE '%substitution%'
+              AND product IS NOT NULL {af}
+            GROUP BY 1,2,3,4
         """)
-        if subs.empty:
-            st.info("No substitutions recorded yet. They appear after the "
+        if subs_raw.empty:
+            st.info("No substitutions resolved yet. They appear after the "
                     "next data rebuild, once re-matching has run.")
         else:
-            st.dataframe(pd.DataFrame({
-                "SKU chosen": subs.sku,
-                "Category": subs.category,
-                "Times picked": subs.redemptions,
-                "Redemption $": subs.spend.round(0),
-                "Via # of offers": subs.offers,
-            }), use_container_width=True, hide_index=True, column_config={
-                "Times picked": st.column_config.NumberColumn(format="%d"),
-                "Redemption $": st.column_config.NumberColumn(format="$%d"),
-                "Via # of offers": st.column_config.NumberColumn(format="%d"),
-            })
+            on = subs_raw.apply(
+                lambda r: is_on_menu(r.offer_name, r.brand, r.category, r.sku),
+                axis=1)
+            kept, menu_rows = subs_raw[~on], subs_raw[on]
+
+            subs = (kept.groupby(["sku", "category"], as_index=False)
+                        .agg(redemptions=("redemptions", "sum"),
+                             spend=("spend", "sum"),
+                             offers=("offer_name", "nunique"))
+                        .sort_values("spend", ascending=False))
+
+            if subs.empty:
+                st.info("Every resolved substitution was the advertised "
+                        "reward — no off-menu picks in this window.")
+            else:
+                st.dataframe(pd.DataFrame({
+                    "SKU chosen": subs.sku,
+                    "Category": subs.category,
+                    "Times picked": subs.redemptions,
+                    "Redemption $": subs.spend.round(0),
+                    "Via # of tiers": subs.offers,
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Times picked": st.column_config.NumberColumn(format="%d"),
+                    "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                    "Via # of tiers": st.column_config.NumberColumn(
+                        format="%d"),
+                })
+
+                st.markdown("###### Where the gap is, by tier")
+                tier = (kept.assign(tier=kept.offer_name)
+                            .groupby(["tier", "category"], as_index=False)
+                            .agg(picks=("redemptions", "sum"),
+                                 spend=("spend", "sum"))
+                            .sort_values(["tier", "spend"], ascending=False))
+                st.dataframe(pd.DataFrame({
+                    "Tier": tier.tier,
+                    "Category taken": tier.category,
+                    "Times picked": tier.picks,
+                    "Redemption $": tier.spend.round(0),
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Times picked": st.column_config.NumberColumn(format="%d"),
+                    "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                })
+
+            if len(menu_rows):
+                st.markdown(
+                    f'<p class="note">'
+                    f'{int(menu_rows.redemptions.sum()):,} substitutions were '
+                    f'the advertised reward for their tier and are excluded '
+                    f'above — the discount is also used as the ordinary way '
+                    f'to ring a reward, so substitution volume is an upper '
+                    f'bound on stockouts, not a measure of them.</p>',
+                    unsafe_allow_html=True)
+
+            unres = q(f"""
+                SELECT SUM(redemptions) AS n
+                FROM dash_offer_performance
+                WHERE match_method = 'unmatched'
+                  AND lower(offer_name) LIKE '%substitution%' {af}
+            """)
+            if len(unres) and pd.notna(unres.n.iloc[0]) and unres.n.iloc[0]:
+                st.markdown(
+                    f'<p class="note">{int(unres.n.iloc[0]):,} substitutions '
+                    f'could not be resolved to a product — usually a '
+                    f'redemption worth more than anything in the basket, or a '
+                    f'reward split across items.</p>',
+                    unsafe_allow_html=True)
 
         st.divider()
         st.markdown("##### Spend against basket size")
@@ -3693,8 +3819,14 @@ def render_takeovers():
     has_inwin = False
     if table_exists("dash_offer_performance"):
         st.divider()
-        st.markdown("##### Gift-with-purchase & loyalty redemptions")
+        st.markdown("##### Offer-attached sales for this brand")
 
+        # NB: "redeem_value" in dash_offer_performance is SUM(net_sales) —
+        # what the customer actually paid on a line that had an offer
+        # attached. It is NOT loyalty-point value and NOT the $0.01 cost of
+        # a gift unit. Free GWP stock is reconciled separately below, from
+        # dash_gwp_receipt / dash_gwp_day. Label this section as sales.
+        #
         # Exact in-window counts, once the refresh publishes daily
         # redemptions. The SKU list below stays whole-period either way —
         # the published SKU detail carries no dates.
@@ -3712,29 +3844,36 @@ def render_takeovers():
                      and pd.notna(inwin.redemptions.iloc[0])
                      and inwin.redemptions.iloc[0] > 0)
         if has_inwin:
-            st.markdown('<p class="note">Offers matched to this brand and '
-                        'redeemed <b>during the takeover window</b> — the '
-                        'exact GWP count for the promotion.</p>',
-                        unsafe_allow_html=True)
+            st.markdown('<p class="note">Sales lines for this brand that had '
+                        'an offer or promotion attached <b>during the '
+                        'takeover window</b>. These are paid baskets — an '
+                        'offer here means a discount or promo was applied, '
+                        'not that a customer spent loyalty points. Free GWP '
+                        'units are counted separately in the reconciliation '
+                        'below.</p>', unsafe_allow_html=True)
             g = st.columns(2)
-            g[0].metric("Redemptions in window",
+            g[0].metric("Offer-attached units in window",
                         f"{int(inwin.redemptions.iloc[0]):,}")
-            g[1].metric("Redemption $ in window",
+            g[1].metric("Net sales in window",
                         f"${inwin.spend.iloc[0]:,.0f}")
-            st.markdown('<p class="note">Which items were redeemed (whole '
-                        'loaded period):</p>', unsafe_allow_html=True)
+            st.markdown('<p class="note">Which items (whole loaded '
+                        'period):</p>', unsafe_allow_html=True)
         else:
-            st.markdown('<p class="note">Redeemed offers matched to this '
-                        'brand, from the loyalty data. <b>Heads-up:</b> these '
+            st.markdown('<p class="note">Sales lines for this brand that had '
+                        'an offer or promotion attached. These are paid '
+                        'baskets — an offer here means a discount or promo '
+                        'was applied, not that a customer spent loyalty '
+                        'points, and free GWP units are counted separately '
+                        'in the reconciliation below. <b>Heads-up:</b> these '
                         'tables cover the whole loaded period, not just this '
-                        'window — use them as the size of the GWP programme '
-                        'around the takeover, not an exact in-window count. '
-                        'Exact window counts appear after the next data '
-                        'refresh.</p>', unsafe_allow_html=True)
+                        "window — use them to size the brand's baseline "
+                        'around the takeover, not as an exact in-window '
+                        'count. Exact window figures appear after the next '
+                        'data refresh.</p>', unsafe_allow_html=True)
         try:
             sku = q(f"""
                 SELECT COALESCE(product, offer_name) AS sku,
-                       SUM(redemptions) AS redemptions,
+                       SUM(redemptions) AS units,
                        SUM(redeem_value) AS spend
                 FROM dash_offer_performance
                 WHERE {like} {af}
@@ -3745,26 +3884,35 @@ def render_takeovers():
         except Exception:
             sku = q(f"""
                 SELECT offer_name AS sku,
-                       SUM(redemptions) AS redemptions,
+                       SUM(redemptions) AS units,
                        SUM(redeem_value) AS spend
                 FROM dash_offer_performance
                 WHERE {like} {af}
                 GROUP BY 1 ORDER BY spend DESC LIMIT 12
             """)
         if sku.empty or sku.spend.sum() == 0:
-            st.info(f"No redeemed offers matched to {pick}.")
+            st.info(f"No offer-attached sales matched to {pick}.")
         else:
-            g = st.columns(3)
-            g[0].metric("Redemptions", f"{int(sku.redemptions.sum()):,}")
-            g[1].metric("Redemption $", f"${sku.spend.sum():,.0f}")
-            g[2].metric("SKUs / offers", f"{len(sku):,}")
+            # Avg unit price is the tell: a genuine free good lands at ~$0.01,
+            # a paid basket at full retail. Keeps the two from being confused
+            # again if a real GWP SKU ever appears in this table.
+            _u = sku.units.replace(0, np.nan)
+            g = st.columns(4)
+            g[0].metric("Offer-attached units", f"{int(sku.units.sum()):,}")
+            g[1].metric("Net sales", f"${sku.spend.sum():,.0f}")
+            g[2].metric("Avg unit price",
+                        f"${sku.spend.sum() / max(sku.units.sum(), 1):,.2f}")
+            g[3].metric("SKUs / offers", f"{len(sku):,}")
             st.dataframe(pd.DataFrame({
                 "SKU / Offer": sku.sku,
-                "Redemptions": sku.redemptions,
-                "Redemption $": sku.spend.round(0),
+                "Units": sku.units,
+                "Net sales": sku.spend.round(0),
+                "Avg unit price": (sku.spend / _u).round(2),
             }), use_container_width=True, hide_index=True, column_config={
-                "Redemptions": st.column_config.NumberColumn(format="%d"),
-                "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                "Units": st.column_config.NumberColumn(format="%d"),
+                "Net sales": st.column_config.NumberColumn(format="$%d"),
+                "Avg unit price": st.column_config.NumberColumn(
+                    format="$%.2f"),
             })
 
     # --- GWP reconciliation: received vs processed ---------------------------
@@ -3822,8 +3970,12 @@ def render_takeovers():
             merged[["misrung", "lines", "net"]] = \
                 merged[["misrung", "lines", "net"]].fillna(0)
 
-            redeemed = (float(inwin.redemptions.iloc[0])
-                        if has_inwin else np.nan)
+            # Offer-attached sales lines for the brand in the window. This is
+            # NOT a GWP unit count — it counts paid lines that carried any
+            # promotion — so it is shown as context only and never used as
+            # the out-the-door basis below.
+            offer_lines = (float(inwin.redemptions.iloc[0])
+                           if has_inwin else np.nan)
 
             # Properly-rung GWP: units sold on the promo's own "(GWP)" SKU,
             # published per product per day as dash_gwp_day. Preferred over
@@ -3850,8 +4002,12 @@ def render_takeovers():
             # The headline: how many GWP units left the shop during the
             # window, by whatever route — rung on the GWP SKU (preferred) or
             # loyalty redemptions (fallback) — plus mis-rung lines.
-            basis = rung_tot if has_rung else \
-                (redeemed if pd.notna(redeemed) else 0)
+            # Only units rung on the promo's own "(GWP)" SKU count as a gift
+            # leaving the shop. The brand-level offer count was previously
+            # used as a fallback here, which conflated promo-attached paid
+            # sales with free goods and could put out-the-door in the
+            # thousands against a 100-unit drop.
+            basis = rung_tot if has_rung else 0
             out_door = merged.misrung.sum() + basis
             received_tot = rec.received.sum()
 
@@ -3919,10 +4075,11 @@ def render_takeovers():
                             help="Units rung on the promo's own '(GWP)' "
                                  "item — per SKU, inside the window.")
             else:
-                c[2].metric("Redeemed in window",
-                            f"{int(redeemed):,}" if pd.notna(redeemed) else "—",
-                            help="Brand-level: the published redemption data "
-                                 "is not split by SKU.")
+                c[2].metric("On the GWP SKU", "—",
+                            help="Per-SKU GWP sales (dash_gwp_day) are not "
+                                 "published yet, so only mis-rung lines are "
+                                 "counted above. Out-the-door will read low "
+                                 "until the next refresh.")
             c[3].metric("Mis-rung", f"{int(merged.misrung.sum()):,}",
                         help="Sale lines keyed as a bare SKU number, matched "
                              "to these GWP receipts.")

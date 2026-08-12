@@ -30,6 +30,7 @@ from publish_retention import build_retention
 from publish_loyalty import build_loyalty
 
 from publish_newret import build_newret
+from publish_event_return import build_event_return
 
 SLIM = "cerebral_dash.duckdb"
 
@@ -854,6 +855,8 @@ def build(src: str, dest: str) -> dict:
     build_events(con)
     # --- new vs returning customers by week ---
     build_newret(con)
+    # --- event attendees: 90-day return, new vs regular ---
+    build_event_return(con)
     con.execute("DETACH src")
 
     # --- confirm no identifiers survived ---------------------------------

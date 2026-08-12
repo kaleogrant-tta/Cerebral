@@ -403,6 +403,13 @@ from "a good day was chosen for the event."
                 "comparable with the rest. Filter Scope to one kind at a "
                 "time to compare like with like.")
 
+    # Attendee-level 90-day return. Wrapped so a failure here degrades to
+    # a caption instead of taking down the whole Events tab.
+    try:
+        render_event_return(q, keys, stores, H, table_exists)
+    except Exception as exc:
+        st.caption(f"Attendee return section unavailable: {exc}")
+
     with st.expander("Method, in detail"):
         st.markdown("""
 **Picking the baseline.** For every event day we take the same weekday
@@ -446,3 +453,163 @@ to schedule a few events at random and compare.
 42-day window to build a baseline, so shortening the view would break the
 comparison. The store filter does apply, on the hosting store.
         """)
+
+
+def render_event_return(q, keys, stores, H, table_exists=None):
+    """90-day return by attendee, new versus regular.
+
+    Deliberately leads with how little of the roster can be measured. The
+    return rate is computed on attendees who bought at all, and most did
+    not -- reporting the rate without that context would overstate what
+    events achieve by a wide margin.
+    """
+    if table_exists and not table_exists("dash_event_return"):
+        st.info(
+            "Attendee return analysis has not been published yet. Fill in "
+            "`event_audience_map.csv`, then run `publish.py`.")
+        return
+
+    df = q("SELECT * FROM dash_event_return")
+    if df.empty:
+        st.info("No mapped events with measurable attendees yet.")
+        return
+    meta = q("SELECT * FROM dash_event_return_meta")
+    win = int(meta.iloc[0].window_days) if not meta.empty else 90
+    min_n = int(meta.iloc[0].min_measurable) if not meta.empty else 10
+
+    st.divider()
+    H(f"Did attendees come back? ({win}-day return)")
+
+    all_stores = not keys or len(keys) == len(stores)
+    if not all_stores:
+        df = df[df.store_key.isin(list(keys)) | (df.store_key == 0)]
+        if df.empty:
+            st.info("No mapped events at the selected stores.")
+            return
+
+    mature = df[df.mature]
+    immature = df[~df.mature]
+
+    # --- the funnel, before any rate ------------------------------------
+    per_ev = (df.groupby("event_id")
+                .agg(roster=("roster_members", "max"),
+                     matched=("pos_matched", "max"))
+                .reset_index())
+    roster_tot = int(per_ev.roster.sum())
+    matched_tot = int(per_ev.matched.sum())
+    buyers_tot = int(mature.buyers.sum())
+    ret_tot = int(mature.returned.sum())
+
+    st.markdown(
+        f'<p class="note">Most attendees cannot be followed into '
+        f'transactions. A roster member with no POS record has never bought '
+        f'anything at TTA — that is a result, not a data gap. The return '
+        f'rate below is computed only on those who did buy, so read it '
+        f'alongside the funnel, never on its own.</p>',
+        unsafe_allow_html=True)
+
+    f = st.columns(4)
+    f[0].metric("On the rosters", f"{roster_tot:,}",
+                help="Everyone captured across all mapped events.")
+    f[1].metric("Have a POS record", f"{matched_tot:,}",
+                f"{matched_tot / max(roster_tot, 1) * 100:.0f}% of roster",
+                help="Have ever transacted at TTA and can be resolved to a "
+                     "customer identity.")
+    f[2].metric("Bought after the event", f"{buyers_tot:,}",
+                f"{buyers_tot / max(roster_tot, 1) * 100:.0f}% of roster",
+                help="Made at least one purchase on or after the event "
+                     "date. This is the denominator of the return rate.")
+    f[3].metric(f"Returned within {win}d", f"{ret_tot:,}",
+                f"{ret_tot / max(buyers_tot, 1) * 100:.0f}% of buyers",
+                help="Bought again within the window, measured from their "
+                     "first purchase on or after the event.")
+
+    if not immature.empty:
+        n_imm = immature.event_id.nunique()
+        st.caption(
+            f"{n_imm} event{'s' if n_imm > 1 else ''} held within the last "
+            f"{win} days {'are' if n_imm > 1 else 'is'} excluded — there has "
+            f"not been time for a return to happen yet.")
+
+    if mature.empty:
+        st.info("No mapped event is old enough to measure yet.")
+        return
+
+    # --- new versus regular ----------------------------------------------
+    seg = (mature.groupby("segment")
+                 .agg(buyers=("buyers", "sum"), returned=("returned", "sum"))
+                 .reindex(["New", "Regular"]).fillna(0).reset_index())
+    seg["rate"] = seg.returned / seg.buyers.replace(0, np.nan) * 100
+
+    st.markdown("**New attendees against regulars**")
+    st.caption(
+        "**New** — the attendee's first ever purchase was on or after the "
+        "event, so they met TTA there. **Regular** — they were already a "
+        "customer and happened to attend. Both are measured from their "
+        f"first purchase on or after the event, so neither gets a head "
+        f"start on the {win}-day window.")
+
+    sc = st.columns(2)
+    for i, row in seg.iterrows():
+        if pd.isna(row.rate):
+            continue
+        sc[i].metric(f"{row.segment} attendees",
+                     f"{row.rate:.0f}% returned",
+                     f"{int(row.returned):,} of {int(row.buyers):,}")
+
+    if seg.rate.notna().all() and len(seg) == 2:
+        gap = seg.loc[seg.segment == "New", "rate"].iloc[0] - \
+              seg.loc[seg.segment == "Regular", "rate"].iloc[0]
+        st.markdown(
+            f'<p class="note">First-timers return at '
+            f'{abs(gap):.0f}pp {"above" if gap > 0 else "below"} the rate of '
+            f'existing customers who attended. A gap below zero is the '
+            f'normal case and not a failure — established customers return '
+            f'more readily than anyone meeting the brand for the first '
+            f'time. What matters is the size of the gap and whether it '
+            f'moves.</p>', unsafe_allow_html=True)
+
+    # --- per event ---------------------------------------------------------
+    piv = (mature.pivot_table(index=["event_id", "event_name", "event_date",
+                                     "roster_members", "pos_matched"],
+                              columns="segment",
+                              values=["buyers", "returned"],
+                              aggfunc="sum")
+                 .fillna(0).reset_index())
+    piv.columns = ["_".join(c).strip("_") if isinstance(c, tuple) else c
+                   for c in piv.columns]
+    for s in ("New", "Regular"):
+        for m in ("buyers", "returned"):
+            if f"{m}_{s}" not in piv.columns:
+                piv[f"{m}_{s}"] = 0
+    piv["measurable"] = piv.buyers_New + piv.buyers_Regular
+    piv["rate_all"] = ((piv.returned_New + piv.returned_Regular)
+                       / piv.measurable.replace(0, np.nan) * 100)
+    piv["rate_new"] = (piv.returned_New
+                       / piv.buyers_New.replace(0, np.nan) * 100)
+    piv = piv.sort_values("event_date", ascending=False)
+
+    # A rate on three people is not a rate. Suppressing it is more useful
+    # than printing a number nobody should act on.
+    def _fmt(rate, n):
+        if pd.isna(rate) or n < min_n:
+            return "—"
+        return f"{rate:.0f}%"
+
+    st.markdown("**By event**")
+    _wide(st.dataframe, pd.DataFrame({
+        "Event": piv.event_name,
+        "Date": pd.to_datetime(piv.event_date).dt.strftime("%b %d, %Y"),
+        "Roster": piv.roster_members.astype(int),
+        "Bought": piv.measurable.astype(int),
+        "New": piv.buyers_New.astype(int),
+        "Returned": (piv.returned_New + piv.returned_Regular).astype(int),
+        f"{win}d return": [_fmt(r, n) for r, n
+                           in zip(piv.rate_all, piv.measurable)],
+        "New return": [_fmt(r, n) for r, n
+                       in zip(piv.rate_new, piv.buyers_New)],
+    }), hide_index=True)
+    st.caption(
+        f"A dash means fewer than {min_n} measurable attendees — too few for "
+        f"a rate to mean anything. Those events still count towards the "
+        f"totals above.")

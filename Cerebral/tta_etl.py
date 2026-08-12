@@ -875,6 +875,16 @@ class Pipeline:
         self.con.execute("INSERT INTO fact_line SELECT * FROM ldf")
         self.con.execute("INSERT INTO fact_basket SELECT * FROM bdf")
 
+        # The loader is incremental, so baskets written before the ETL
+        # started reading DiscountAmt still carry zero. Repair them from any
+        # archived POS export that is reachable. Does nothing in CI, where
+        # no archive exists -- the publish-time guard covers that case.
+        try:
+            from etl_discount import backfill_discount
+            backfill_discount(self.con, verbose=False)
+        except Exception as exc:  # never fail a load over a repair
+            print(f"  discount backfill skipped: {exc}")
+
         self.con.execute(
             f"DELETE FROM fact_redemption WHERE store_key = {res.store_key} "
             f"AND date_key IN ({','.join(map(str, dates))})")

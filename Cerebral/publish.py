@@ -29,6 +29,7 @@ from publish_retention import build_retention
 
 from publish_loyalty import build_loyalty
 
+from etl_discount import assert_discount_sane
 from publish_newret import build_newret
 from publish_event_return import build_event_return
 
@@ -854,6 +855,9 @@ def build(src: str, dest: str) -> dict:
     # --- events: lift, DiD, offsets ---
     build_events(con)
     # --- new vs returning customers by week ---
+    # discount_amt is easy to leave half-populated; say so
+    # before publishing tables derived from it.
+    assert_discount_sane(con, table='src.fact_basket')
     build_newret(con)
     # --- event attendees: 90-day return, new vs regular ---
     build_event_return(con)

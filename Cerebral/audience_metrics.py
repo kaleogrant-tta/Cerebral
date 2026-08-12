@@ -65,6 +65,12 @@ class CohortMetrics:
     returned_90d: int
     revenue_90d: float
 
+    # 90-day outcomes split by whether the attendee was already a customer
+    new_returned_90d: int
+    new_revenue_90d: float
+    existing_returned_90d: int
+    existing_revenue_90d: float
+
     detected_peak_date: date | None
     peak_customers: int
     date_check: str
@@ -187,6 +193,29 @@ def compute_cohort(
         [audience_id, event_date, event_date + timedelta(days=90)],
     )
 
+    # Split the 90-day window by whether the attendee had already bought from us
+    # before the event. `firsts` above already classifies every purchaser, so the
+    # cut is on that list rather than a second pass over the sales table.
+    new_r90 = new_rev90 = ex_r90 = ex_rev90 = 0
+    if not firsts.empty:
+        new_ids = firsts.loc[firsts["first_purchase"] >= event_date, "contact_id"].tolist()
+        ex_ids = firsts.loc[firsts["first_purchase"] < event_date, "contact_id"].tolist()
+        window = con.execute(
+            """
+            SELECT contact_id, COALESCE(SUM(price), 0) AS spend
+            FROM audience_sales
+            WHERE audience_id = ? AND CAST(sold_at AS DATE) > ?
+              AND CAST(sold_at AS DATE) <= ?
+            GROUP BY 1
+            """,
+            [audience_id, event_date, event_date + timedelta(days=90)],
+        ).df()
+        if not window.empty:
+            new_w = window[window["contact_id"].isin(new_ids)]
+            ex_w = window[window["contact_id"].isin(ex_ids)]
+            new_r90, new_rev90 = len(new_w), float(new_w["spend"].sum())
+            ex_r90, ex_rev90 = len(ex_w), float(ex_w["spend"].sum())
+
     peak_date, peak_n = detect_event_date(con, audience_id)
     if peak_n < PEAK_MIN_CUSTOMERS:
         date_check = "insufficient"
@@ -224,6 +253,10 @@ def compute_cohort(
         returned_60d=returns[60],
         returned_90d=returns[90],
         revenue_90d=round(rev90, 2),
+        new_returned_90d=new_r90,
+        new_revenue_90d=round(new_rev90, 2),
+        existing_returned_90d=ex_r90,
+        existing_revenue_90d=round(ex_rev90, 2),
         detected_peak_date=peak_date,
         peak_customers=peak_n,
         date_check=date_check,
@@ -307,6 +340,10 @@ def rollup_by_campaign(cohorts: pd.DataFrame, campaigns: pd.DataFrame) -> pd.Dat
             same_day_buyers=("same_day_buyers", "sum"),
             returned_90d=("returned_90d", "sum"),
             revenue_90d=("revenue_90d", "sum"),
+            new_returned_90d=("new_returned_90d", "sum"),
+            new_revenue_90d=("new_revenue_90d", "sum"),
+            existing_returned_90d=("existing_returned_90d", "sum"),
+            existing_revenue_90d=("existing_revenue_90d", "sum"),
         )
         .reset_index()
     )

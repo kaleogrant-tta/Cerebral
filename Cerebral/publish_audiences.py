@@ -11,6 +11,18 @@ Writes into the published dashboard database:
     dash_audience_returns    return curve, one row per event x day offset
     dash_audience_meta       coverage and caveats for the tab header
 
+Snapshot fallback
+-----------------
+The scheduled refresh runs publish.py from a clean checkout, where neither the
+audiences database nor its source exports exist -- both are local-only and hold
+PII. So every successful local run also writes a PII-free CSV snapshot to
+config/audience_snapshot/, which IS committed. When the source database is
+absent, publish() loads that snapshot instead, and the scheduled refresh
+publishes the same tables it would have built.
+
+The snapshot is aggregate-only: no contact ids, no phones, no emails, no POS
+ids. Refresh it by re-running this script locally after ingesting new events.
+
 NO PII is published. Contact ids, phones, emails and POS ids stay in the local
 audiences database and never reach the dashboard. The published tables are
 aggregates only.
@@ -35,6 +47,8 @@ import audience_metrics as am
 log = logging.getLogger(__name__)
 
 RETURN_DAYS = 90
+SNAPSHOT_DIR = Path("config/audience_snapshot")
+TABLES = ("cohorts", "campaigns", "returns", "meta")
 
 
 def build_returns(con: duckdb.DuckDBPyConnection, mapping: pd.DataFrame) -> pd.DataFrame:
@@ -71,7 +85,45 @@ def build_returns(con: duckdb.DuckDBPyConnection, mapping: pd.DataFrame) -> pd.D
     return pd.concat(frames, ignore_index=True)
 
 
+def _write_snapshot(frames: dict[str, pd.DataFrame], where: Path = SNAPSHOT_DIR) -> None:
+    where.mkdir(parents=True, exist_ok=True)
+    for name, df in frames.items():
+        df.to_csv(where / f"{name}.csv", index=False)
+    log.info("snapshot refreshed at %s", where)
+
+
+def _read_snapshot(where: Path = SNAPSHOT_DIR) -> dict[str, pd.DataFrame] | None:
+    if not all((where / f"{n}.csv").exists() for n in TABLES):
+        return None
+    out = {n: pd.read_csv(where / f"{n}.csv") for n in TABLES}
+    for col in ("event_date",):
+        if col in out["cohorts"]:
+            out["cohorts"][col] = pd.to_datetime(out["cohorts"][col]).dt.date
+    log.info("using committed snapshot from %s", where)
+    return out
+
+
+def _write(dash: Path, frames: dict[str, pd.DataFrame]) -> None:
+    out = duckdb.connect(str(dash))
+    for short, df in frames.items():
+        name = f"dash_audience_{short}"
+        out.register("_stage", df)
+        out.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM _stage")
+        out.unregister("_stage")
+        log.info("wrote %s (%d rows)", name, len(df))
+    out.close()
+
+
 def publish(src: Path, mapping_path: Path, dash: Path) -> dict:
+    if not Path(src).exists() or not Path(mapping_path).exists():
+        snap = _read_snapshot()
+        if snap is None:
+            raise FileNotFoundError(
+                f"no source at {src} and no snapshot at {SNAPSHOT_DIR}"
+            )
+        _write(dash, snap)
+        return {k: len(v) for k, v in snap.items()}
+
     cohorts = am.build(src, mapping_path)
     campaigns = am.rollup_by_campaign(cohorts, am.load_campaigns(mapping_path))
 
@@ -96,24 +148,12 @@ def publish(src: Path, mapping_path: Path, dash: Path) -> dict:
         "date_max": str(cohorts["event_date"].max()),
     }])
 
-    out = duckdb.connect(str(dash))
-    for name, df in (
-        ("dash_audience_cohorts", cohorts),
-        ("dash_audience_campaigns", campaigns),
-        ("dash_audience_returns", returns),
-        ("dash_audience_meta", meta),
-    ):
-        out.register("_stage", df)
-        out.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM _stage")
-        out.unregister("_stage")
-        log.info("wrote %s (%d rows)", name, len(df))
-    out.close()
+    frames = {"cohorts": cohorts, "campaigns": campaigns,
+              "returns": returns, "meta": meta}
+    _write(dash, frames)
+    _write_snapshot(frames)
 
-    return {
-        "cohorts": len(cohorts),
-        "campaigns": len(campaigns),
-        "returns": len(returns),
-    }
+    return {k: len(v) for k, v in frames.items()}
 
 
 if __name__ == "__main__":

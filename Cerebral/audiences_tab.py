@@ -101,16 +101,63 @@ def _kpis(meta) -> None:
 def _event_table(cohorts: pd.DataFrame) -> None:
     df = cohorts.copy()
     df["Transacted"] = (df["pos_record_rate"] * 100).round(0).astype(int).astype(str) + "%"
-    df["Revenue 90d"] = df["revenue_90d"].map(lambda v: f"${v:,.0f}")
+    for c in ("new_revenue_90d", "existing_revenue_90d"):
+        df[c] = df[c].map(lambda v: f"${v:,.0f}")
     show = df[[
         "event_date", "event_name", "store", "roster", "Transacted",
-        "new_customers", "same_day_buyers", "returned_90d", "Revenue 90d", "date_check",
+        "new_customers", "new_returned_90d", "new_revenue_90d",
+        "existing_customers", "existing_returned_90d", "existing_revenue_90d",
     ]].rename(columns={
         "event_date": "Date", "event_name": "Event", "store": "Store",
-        "roster": "Attendees", "new_customers": "New", "same_day_buyers": "Bought that day",
-        "returned_90d": "Returned 90d", "date_check": "Date check",
+        "roster": "Attendees",
+        "new_customers": "New",
+        "new_returned_90d": "New returned 90d",
+        "new_revenue_90d": "New rev 90d",
+        "existing_customers": "Existing",
+        "existing_returned_90d": "Existing returned 90d",
+        "existing_revenue_90d": "Existing rev 90d",
     })
     st.dataframe(show, use_container_width=True, hide_index=True)
+    st.caption(
+        "**New** = first-ever purchase on or after the event day. **Existing** = had "
+        "already bought from us before it. Attendees who have never transacted appear "
+        "in neither column, which is why New + Existing is well below Attendees. "
+        "The 90-day figures cover the window after the event only."
+    )
+
+    n_new = int(cohorts["new_customers"].sum())
+    n_ex = int(cohorts["existing_customers"].sum())
+    r_new = float(cohorts["new_revenue_90d"].sum())
+    r_ex = float(cohorts["existing_revenue_90d"].sum())
+    ret_new = int(cohorts["new_returned_90d"].sum())
+    ret_ex = int(cohorts["existing_returned_90d"].sum())
+
+    st.markdown(f"""
+    <div style="display:flex;gap:14px;margin-top:14px;">
+      <div style="flex:1;padding:14px 18px;background:{CREAM};border-left:3px solid {TEAL};">
+        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+                    color:{MUTED};margin-bottom:6px;">New customers</div>
+        <div style="font-family:{MONO};font-size:25px;font-weight:600;color:{TEAL};">
+          {n_new:,}</div>
+        <div style="font-size:12px;color:{BROWN_MID};margin-top:4px;">
+          {ret_new:,} returned within 90 days &middot; ${r_new:,.0f}</div>
+      </div>
+      <div style="flex:1;padding:14px 18px;background:{CREAM};border-left:3px solid {BROWN};">
+        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+                    color:{MUTED};margin-bottom:6px;">Existing customers</div>
+        <div style="font-family:{MONO};font-size:25px;font-weight:600;color:{BROWN};">
+          {n_ex:,}</div>
+        <div style="font-size:12px;color:{BROWN_MID};margin-top:4px;">
+          {ret_ex:,} returned within 90 days &middot; ${r_ex:,.0f}</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    if r_new + r_ex:
+        share = 100 * r_ex / (r_new + r_ex)
+        st.caption(
+            f"Existing customers account for {share:.0f}% of the 90-day revenue that "
+            "follows an activation. Acquisition and revenue are not the same story."
+        )
 
 
 def _returns_chart(returns: pd.DataFrame, cohorts: pd.DataFrame) -> None:
@@ -213,12 +260,8 @@ def render_audiences(q, keys=None, stores=None, heading=None,
     nothing to show.
     """
     if heading:
-        heading("Audiences &times; Events")
-        st.markdown(
-            f"<div style='color:{MUTED};font-size:13px;margin:-6px 0 18px;'>"
-            f"What activations do for customer acquisition</div>",
-            unsafe_allow_html=True,
-        )
+        heading("Audiences &times; Events",
+                "What activations do for customer acquisition")
     else:
         st.markdown(
             f"<h2 style='color:{BROWN};margin-bottom:2px;'>Audiences &times; Events</h2>"

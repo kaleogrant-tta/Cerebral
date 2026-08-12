@@ -16,6 +16,9 @@ event happened. Observed lag across 31 audiences: 1 to 47 days, and one case of
 103 days ("11/15-Event", created in February for a November event). Using
 Created as the event date silently misdates every metric.
 
+Return windows anchor on each attendee's first purchase on or after the event,
+matching publish_event_return.py. See the comment in compute_cohort().
+
 `detect_event_date()` recovers the date independently — the day the most
 distinct roster members transacted. Where a cohort has enough purchasers this
 lands exactly on the calendar event, so it doubles as a check on the mapping.
@@ -173,48 +176,76 @@ def compute_cohort(
         [audience_id, event_date],
     ).fetchone()
 
-    returns = {}
-    for w in RETURN_WINDOWS:
-        returns[w] = int(_scalar(
-            con,
-            """
-            SELECT COUNT(DISTINCT contact_id) FROM audience_sales
-            WHERE audience_id = ? AND CAST(sold_at AS DATE) > ? AND CAST(sold_at AS DATE) <= ?
-            """,
-            [audience_id, event_date, event_date + timedelta(days=w)],
-        ))
-
-    rev90 = _scalar(
-        con,
+    # ------------------------------------------------------------------
+    # Return behaviour, anchored on each attendee's own first visit
+    # ------------------------------------------------------------------
+    # The window opens at the attendee's first purchase on or after the event,
+    # not at the event date. Anchoring on the event date gives an existing
+    # customer who reappears three weeks later only 69 usable days while a
+    # same-day buyer gets 90 -- which depresses the existing-customer rate for
+    # no reason other than the definition. This matches publish_event_return.py
+    # so the two tabs report the same rate.
+    #
+    # An attendee with no purchase on or after the event has no anchor and is
+    # absent from every return figure. They are still counted in the roster.
+    anchors = con.execute(
         """
-        SELECT COALESCE(SUM(price), 0) FROM audience_sales
-        WHERE audience_id = ? AND CAST(sold_at AS DATE) > ? AND CAST(sold_at AS DATE) <= ?
+        SELECT contact_id, MIN(CAST(sold_at AS DATE)) AS anchor_day
+        FROM audience_sales
+        WHERE audience_id = ? AND sold_at IS NOT NULL
+          AND CAST(sold_at AS DATE) >= ?
+        GROUP BY 1
         """,
-        [audience_id, event_date, event_date + timedelta(days=90)],
-    )
+        [audience_id, event_date],
+    ).df()
 
-    # Split the 90-day window by whether the attendee had already bought from us
-    # before the event. `firsts` above already classifies every purchaser, so the
-    # cut is on that list rather than a second pass over the sales table.
+    returns = {w: 0 for w in RETURN_WINDOWS}
+    rev90 = 0.0
     new_r90 = new_rev90 = ex_r90 = ex_rev90 = 0
-    if not firsts.empty:
-        new_ids = firsts.loc[firsts["first_purchase"] >= event_date, "contact_id"].tolist()
-        ex_ids = firsts.loc[firsts["first_purchase"] < event_date, "contact_id"].tolist()
-        window = con.execute(
+
+    if not anchors.empty:
+        anchors["anchor_day"] = pd.to_datetime(anchors["anchor_day"]).dt.date
+        sales = con.execute(
             """
-            SELECT contact_id, COALESCE(SUM(price), 0) AS spend
+            SELECT contact_id, CAST(sold_at AS DATE) AS day,
+                   COALESCE(SUM(price), 0) AS spend
             FROM audience_sales
-            WHERE audience_id = ? AND CAST(sold_at AS DATE) > ?
-              AND CAST(sold_at AS DATE) <= ?
-            GROUP BY 1
+            WHERE audience_id = ? AND sold_at IS NOT NULL
+            GROUP BY 1, 2
             """,
-            [audience_id, event_date, event_date + timedelta(days=90)],
+            [audience_id],
         ).df()
-        if not window.empty:
-            new_w = window[window["contact_id"].isin(new_ids)]
-            ex_w = window[window["contact_id"].isin(ex_ids)]
-            new_r90, new_rev90 = len(new_w), float(new_w["spend"].sum())
-            ex_r90, ex_rev90 = len(ex_w), float(ex_w["spend"].sum())
+        sales["day"] = pd.to_datetime(sales["day"]).dt.date
+        joined = sales.merge(anchors, on="contact_id", how="inner")
+        joined["offset"] = [
+            (d - a).days for d, a in zip(joined["day"], joined["anchor_day"])
+        ]
+
+        for w in RETURN_WINDOWS:
+            in_w = joined[(joined["offset"] > 0) & (joined["offset"] <= w)]
+            returns[w] = int(in_w["contact_id"].nunique())
+
+        w90 = joined[(joined["offset"] > 0) & (joined["offset"] <= 90)]
+        rev90 = float(w90["spend"].sum())
+
+        if not firsts.empty:
+            new_ids = set(firsts.loc[firsts["first_purchase"] >= event_date, "contact_id"])
+            ex_ids = set(firsts.loc[firsts["first_purchase"] < event_date, "contact_id"])
+            n_w = w90[w90["contact_id"].isin(new_ids)]
+            e_w = w90[w90["contact_id"].isin(ex_ids)]
+            new_r90 = int(n_w["contact_id"].nunique())
+            new_rev90 = float(n_w["spend"].sum())
+            ex_r90 = int(e_w["contact_id"].nunique())
+            ex_rev90 = float(e_w["spend"].sum())
+
+        # Maturity now runs from the last anchor, since that is the last point
+        # at which a 90-day window could have opened.
+        last_anchor = max(anchors["anchor_day"])
+        if (date.today() - last_anchor).days < 90:
+            warnings.append(
+                f"the latest attendee anchor is {last_anchor}; 90-day figures "
+                "are still accruing for the slowest returners"
+            )
 
     peak_date, peak_n = detect_event_date(con, audience_id)
     if peak_n < PEAK_MIN_CUSTOMERS:

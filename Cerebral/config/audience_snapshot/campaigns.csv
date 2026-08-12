@@ -1,13 +1,13 @@
 campaign,events,attendees,mean_pos_rate,new_customers,same_day_buyers,returned_90d,revenue_90d,new_returned_90d,new_revenue_90d,existing_returned_90d,existing_revenue_90d,gross_cost,net_cost_to_tta,cost_per_new_customer,cost_per_returner,revenue_per_dollar,cost_note
-(none),6,467,0.6463333333333333,28,47,200,91999.19,14,1320.77,186,90678.42,,,,,,
-420,3,811,0.301,22,59,110,30451.82,13,772.25,97,29679.57,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-All Things Go,1,2268,0.166,91,8,117,13594.71,49,4239.9,68,9354.81,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-Artist Events,1,210,0.205,5,9,17,3014.7,3,303.0,14,2711.7,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-Cali Sober Sips,2,772,0.2955,10,23,111,40439.479999999996,4,84.0,107,40355.479999999996,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-Clear for Takeoff,2,40,0.2555,4,4,2,386.31,0,0.0,2,386.31,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-High Notes Live,2,224,0.29600000000000004,2,6,18,2286.72,2,311.0,16,1975.7199999999998,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-House of High,1,103,0.709,29,7,62,12643.82,26,1420.0,36,11223.82,,,,,,
-Open Book Club,2,143,0.1705,14,16,3,594.0,2,544.0,1,50.0,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-Planet Brooklyn,1,227,0.229,23,10,20,3286.05,10,1541.02,10,1745.03,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-Tray Tables Up,1,90,0.133,1,0,2,80.0,1,30.0,1,50.0,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
-Witchcraft,4,57,0.75425,7,32,34,13577.76,2,298.0,32,13279.76,,,,,,
+(none),6,467,0.6463333333333333,28,47,171,87212.08,6,654.01,165,86558.07,,,,,,
+420,3,811,0.301,22,59,83,28510.820000000003,6,394.01,77,28116.81,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+All Things Go,1,2268,0.166,91,8,67,10350.0,23,3110.0,44,7240.0,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+Artist Events,1,210,0.205,5,9,19,5570.35,2,289.0,17,5281.35,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+Cali Sober Sips,2,772,0.2955,10,23,99,38368.32,0,0.0,99,38368.32,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+Clear for Takeoff,2,40,0.2555,4,4,1,241.2,0,0.0,1,241.2,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+High Notes Live,2,224,0.29600000000000004,2,6,7,1029.09,1,162.0,6,867.0899999999999,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+House of High,1,103,0.709,29,7,32,10040.36,3,182.0,29,9858.36,,,,,,
+Open Book Club,2,143,0.1705,14,16,2,564.0,1,514.0,1,50.0,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+Planet Brooklyn,1,227,0.229,23,10,11,2606.04,5,1042.01,6,1564.03,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+Tray Tables Up,1,90,0.133,1,0,0,0.0,0,0.0,0,0.0,,,,,,most attendees never transacted; cost is spread over a mostly non-purchasing audience
+Witchcraft,4,57,0.75425,7,32,32,13253.93,1,50.0,31,13203.93,,,,,,

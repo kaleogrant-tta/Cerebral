@@ -122,7 +122,9 @@ def _event_table(cohorts: pd.DataFrame) -> None:
         "**New** = first-ever purchase on or after the event day. **Existing** = had "
         "already bought from us before it. Attendees who have never transacted appear "
         "in neither column, which is why New + Existing is well below Attendees. "
-        "The 90-day figures cover the window after the event only."
+        "The 90-day window opens at each attendee's own first visit on or after the "
+        "event, not at the event date -- so someone who reappears three weeks later "
+        "still gets a full 90 days to come back."
     )
 
     n_new = int(cohorts["new_customers"].sum())

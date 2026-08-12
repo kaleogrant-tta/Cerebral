@@ -322,6 +322,32 @@ def load_campaigns(path: Path) -> pd.DataFrame:
     return df
 
 
+def dedupe_events(cohorts: pd.DataFrame) -> pd.DataFrame:
+    """Collapse audiences that map to the same event.
+
+    Several audiences can describe one activation -- the 420 launch has both a
+    guest list and a photobooth list, Clear for Takeoff has a sheet and a
+    backfill. Reporting them as separate rows double-counts anyone captured
+    twice: 706 + 80 for the 420 launch is 786, but the union is 762.
+
+    Counting people once requires the member lists, so this is an upper bound
+    corrected only where the same (event_date, store) pair repeats. Use
+    dash_event_return for exact unioned counts; use this for the per-event
+    view where the split by audience is itself informative.
+    """
+    key = ["event_date", "store", "event_name"]
+    dupes = cohorts.duplicated(subset=["event_date", "store"], keep=False)
+    if dupes.any():
+        pairs = cohorts.loc[dupes, ["event_date", "store"]].drop_duplicates()
+        log.warning(
+            "%d event(s) have more than one audience; attendee counts across "
+            "those rows overlap and must not be summed: %s",
+            len(pairs),
+            ", ".join(f"{r.event_date} {r.store}" for r in pairs.itertuples()),
+        )
+    return cohorts
+
+
 def rollup_by_campaign(cohorts: pd.DataFrame, campaigns: pd.DataFrame) -> pd.DataFrame:
     """Aggregate cohorts to campaign level and attach cost per acquired customer.
 
@@ -384,6 +410,7 @@ def build(db_path: Path, mapping_path: Path) -> pd.DataFrame:
     con.close()
 
     out = pd.DataFrame(rows).sort_values("event_date").reset_index(drop=True)
+    out = dedupe_events(out)
     for w in out[out["warnings"] != ""].itertuples():
         log.warning("%s (%s): %s", w.event_name or w.audience_id, w.event_date, w.warnings)
     return out

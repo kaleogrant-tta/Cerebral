@@ -1,0 +1,259 @@
+event_id,event_name,event_date,event_type,store_key,is_offsite
+20250501-0-2,Airwaves @ Fifth May 1,2025-05-01,In-Store Activation,2,False
+20250501-1-2,Catbird + TTA Sip & Style,2025-05-01,Community Programming,2,False
+20250501-2-1,Charli xcx May 1 (Street Team),2025-05-01,Street Team,1,False
+20250503-0-1,Charli xcx May 3 (Street Team),2025-05-03,Street Team,1,False
+20250504-0-4,Secret Film Night w/NYCFF,2025-05-04,Community Programming,4,False
+20250504-1-1,Charli xcx May 4 (Street Team),2025-05-04,Street Team,1,False
+20250507-0-3,SoHo Ribbon Cutting,2025-05-07,In-Store Activation,3,False
+20250508-0-0,TTA + The Other Half Art Fair,2025-05-08,Community Programming,0,True
+20250508-1-2,Airwaves @ Fifth May 8,2025-05-08,In-Store Activation,2,False
+20250508-2-3,Rythm - Soho,2025-05-08,In-Store Activation,3,False
+20250508-3-0,Austim Awareness community Event,2025-05-08,Community Programming,0,True
+20250508-4-1,BAM: Live Music Thursday (Street Team),2025-05-08,Street Team,1,False
+20250509-0-0,Mysha #MotherYourself 2025,2025-05-09,TTA Brand Event,0,True
+20250509-1-2,Rythm - Fifth Ave,2025-05-09,In-Store Activation,2,False
+20250509-2-1,Liberty PreSeason (Sun @ Liberty 7pm) (Street Team),2025-05-09,Street Team,1,False
+20250509-3-1,Her Highness TTA In-Store Activation- DTBK 5/9,2025-05-09,In-Store Activation,1,False
+20250510-0-4,FlowersforFlower: A floral pop up with Brooklyn Blooms,2025-05-10,In-Store Activation,4,False
+20250510-1-1,FlowersforFlower: A floral pop up with Brooklyn Blooms,2025-05-10,In-Store Activation,1,False
+20250510-2-2,FlowersforFlower: A floral pop up with Brooklyn Blooms,2025-05-10,In-Store Activation,2,False
+20250510-3-3,FlowersforFlower: A floral pop up with Brooklyn Blooms,2025-05-10,In-Store Activation,3,False
+20250511-0-0,Weed Auntie Hemp Jumpsuit Launch,2025-05-11,Community Programming,0,True
+20250514-0-1,Rythm - DTBK,2025-05-14,In-Store Activation,1,False
+20250515-0-1,Good Neighbors of Park Slope (salesfloor tour),2025-05-15,In-Store Activation,1,False
+20250515-1-2,Airwaves @ Fifth May 15,2025-05-15,In-Store Activation,2,False
+20250515-2-4,Rythm - USQ,2025-05-15,In-Store Activation,4,False
+20250515-3-0,The Mother Code Launch Event @ The Center for Fiction,2025-05-15,TTA Brand Event,0,True
+20250517-0-1,Liberty Season Opener (Aces @ Liberty 1pm) (Street Team),2025-05-17,Street Team,1,False
+20250521-0-4,Pax TTA In-Store Activation- USQ,2025-05-21,In-Store Activation,4,False
+20250522-0-2,Airwaves @ Fifth May 22,2025-05-22,In-Store Activation,2,False
+20250522-1-1,Pax TTA In-Store Activation- DTBK,2025-05-22,In-Store Activation,1,False
+20250523-0-2,Pax TTA In-Store Activation- Fifth Ave,2025-05-23,In-Store Activation,2,False
+20250524-0-1,Dance Africa (Street Team),2025-05-24,Street Team,1,False
+20250527-0-1,Liberty vs Valkyries @ 7pm (Street Team),2025-05-27,Street Team,1,False
+20250529-0-2,Airwaves @ Fifth May 29,2025-05-29,In-Store Activation,2,False
+20250529-1-1,Liberty vs Valkyries @ 7pm (Street Team),2025-05-29,Street Team,1,False
+20250531-0-3,Airways @ SoHo,2025-05-31,In-Store Activation,3,False
+20250601-0-1,Liberty vs Sun @ 3pm (Street Team),2025-06-01,Street Team,1,False
+20250603-0-2,Buds & Blooms Jun 3 w. Fifth Ave Association,2025-06-03,In-Store Activation,2,False
+20250604-0-3,Road to Relief:SoHo,2025-06-04,In-Store Activation,3,False
+20250604-1-1,Flamer & Sasha Colby Meet & Ki,2025-06-04,TTA Brand Event,1,False
+20250610-0-2,Buds & Blooms Jun 10 w. Fifth Ave Association,2025-06-10,In-Store Activation,2,False
+20250610-1-1,Liberty vs Sky @ 8pm (Street Team),2025-06-10,Street Team,1,False
+20250612-0-4,Road to Relief:USQ,2025-06-12,In-Store Activation,4,False
+20250612-1-0,Ace Hotel Pride Influencer Dinner,2025-06-12,TTA Brand Event,0,True
+20250614-0-1,Brooklyn Pride (Street Team),2025-06-14,Street Team,1,False
+20250614-1-2,Buds & Blooms Jun 14 w. Fifth Ave Association,2025-06-14,In-Store Activation,2,False
+20250617-0-2,Buds & Blooms Jun 17 w. Fifth Ave Association,2025-06-17,In-Store Activation,2,False
+20250617-1-1,Liberty vs Dream @ 7pm (Street Team),2025-06-17,Street Team,1,False
+20250617-2-4,Fireside Chat: Impactful Womxn NYC x TTA,2025-06-17,In-Store Activation,4,False
+20250619-0-2,Road to Relief:FIFTH,2025-06-19,In-Store Activation,2,False
+20250619-1-1,Liberty vs Mercury @ 7pm (Street Team),2025-06-19,Street Team,1,False
+20250621-0-0,Stoner Pride,2025-06-21,TTA Brand Event,0,True
+20250621-1-2,Buds & Blooms Jun 21 w. Fifth Ave Association,2025-06-21,In-Store Activation,2,False
+20250622-0-2,Buds & Blooms Jun 22 w. Fifth Ave Association,2025-06-22,In-Store Activation,2,False
+20250623-0-4,Off the Strength podcast x TTA:Fab5 (USQ),2025-06-23,In-Store Activation,4,False
+20250624-0-2,Buds & Blooms Jun 24 w. Fifth Ave Association,2025-06-24,In-Store Activation,2,False
+20250625-0-1,Off the Strength podcast x TTA:Arana (DTBK),2025-06-25,In-Store Activation,1,False
+20250626-0-1,Road to Relief:BK,2025-06-26,In-Store Activation,1,False
+20250627-0-4,In-flight Film w/Joseph Patel PLACEHOLDER,2025-06-27,In-Store Activation,4,False
+20250628-0-2,Buds & Blooms Jun 28 w. Fifth Ave Association,2025-06-28,In-Store Activation,2,False
+20250629-0-2,NY Pride (Street Team),2025-06-29,Street Team,2,False
+20250629-1-0,NYC Pride: FoodFest,2025-06-29,TTA Brand Event,0,True
+20250629-2-2,Buds & Blooms Jun 29 w. Fifth Ave Association,2025-06-29,In-Store Activation,2,False
+20250703-0-1,Liberty vs Sparks @ 7pm (Street Team),2025-07-03,In-Store Activation,1,False
+20250716-0-1,Liberty vs Fever @ 7:30pm (Street Team),2025-07-16,In-Store Activation,1,False
+20250718-0-1,Earlybirds Club,2025-07-18,In-Store Activation,1,False
+20250719-0-1,The Queen's Quest: A Juice Box Romp,2025-07-19,Community Programming,1,False
+20250722-0-4,Get Lost: SoHo VIP,2025-07-22,TTA Brand Event,4,False
+20250722-1-1,Get Lost: SoHo VIP,2025-07-22,TTA Brand Event,1,False
+20250722-2-2,Get Lost: SoHo VIP,2025-07-22,TTA Brand Event,2,False
+20250722-3-3,Get Lost: SoHo VIP,2025-07-22,TTA Brand Event,3,False
+20250722-4-3,Get Lost: SoHo,2025-07-22,In-Store Activation,3,False
+20250722-5-1,Liberty vs Fever GAME 2 @ 8pm (Street Team),2025-07-22,Street Team,1,False
+20250723-0-4,Get Lost: USQ,2025-07-23,In-Store Activation,4,False
+20250724-0-1,Get Lost: DTBK,2025-07-24,In-Store Activation,1,False
+20250724-1-0,Rooftop Films x A24,2025-07-24,TTA Brand Event,0,True
+20250725-0-2,Get Lost: Fifth Ave,2025-07-25,In-Store Activation,2,False
+20250823-0-1,Doll Invasion - In-Store,2025-08-23,In-Store Activation,1,False
+20250823-1-1,Doll Invasion - Fire Island,2025-08-23,TTA Brand Event,1,False
+20250823-2-2,Doll Invasion - Fire Island,2025-08-23,TTA Brand Event,2,False
+20250823-3-4,Doll Invasion - Fire Island,2025-08-23,TTA Brand Event,4,False
+20250823-4-3,Doll Invasion - Fire Island,2025-08-23,TTA Brand Event,3,False
+20250823-5-1,Planet Brooklyn 2-day Music Festival,2025-08-23,TTA Brand Event,1,False
+20250904-0-4,Back to Cool x Cloud Bar USQ,2025-09-04,In-Store Activation,4,False
+20250912-0-1,Back to Cool x Cloud Bar DTBK,2025-09-12,In-Store Activation,1,False
+20250912-1-0,One Year Re-Opening Anniversary Party UCB,2025-09-12,Community Programming,0,True
+20250913-0-3,CANCELLED Catbird + TTA Sip & Style SOHO August,2025-09-13,Untyped,3,False
+20250917-0-1,FOGO de Chao tasting,2025-09-17,In-Store Activation,1,False
+20250917-1-0,All-Star Karaoke @ Sapoara (Hosted by: Patrick L. Riley),2025-09-17,Community Programming,0,True
+20250918-0-3,Back to Cool x Cloud Bar SoHo,2025-09-18,In-Store Activation,3,False
+20250919-0-0,Tray Tables Up Sept 19,2025-09-19,TTA Brand Event,0,True
+20250920-0-0,Puff & Paint,2025-09-20,Community Programming,0,True
+20250923-0-0,Marie Faustin's Birthday Party,2025-09-23,TTA Brand Event,0,True
+20250925-0-2,Back to Cool x Cloud Bar Fifth,2025-09-25,In-Store Activation,2,False
+20250926-0-0,All Things Go Festival Day #1,2025-09-26,TTA Brand Event,0,True
+20250927-0-0,All Things Go Festival Day #2,2025-09-27,TTA Brand Event,0,True
+20250928-0-0,All Things Go Festival Day #3,2025-09-28,TTA Brand Event,0,True
+20250929-0-0,New York Film Festival: Evidence Screening,2025-09-29,TTA Brand Event,0,True
+20250930-0-0,"New York Film Festival:  Evidence, Hair Paper Water, Dracula Screenings",2025-09-30,TTA Brand Event,0,True
+20251001-0-0,"New York Film Festival: Ecce Mole, Hair Paper Water, Drunken Noodles Screenings",2025-10-01,TTA Brand Event,0,True
+20251002-0-0,New York Film Festival: Centerpiece After Party & Mare's Nest Screening,2025-10-02,TTA Brand Event,0,True
+20251004-0-1,Earlybirds Club Oct,2025-10-04,In-Store Activation,1,False
+20251009-0-4,Witchcraft In-Store: Ithaca Organics,2025-10-09,In-Store Activation,4,False
+20251015-0-3,Witchcraft In-Store: Umamii,2025-10-15,In-Store Activation,3,False
+20251020-0-0,BOYS CLUB Series Premiere,2025-10-20,Community Programming,0,True
+20251021-0-0,Talib Kweli 50th Birthday Celebration,2025-10-21,Community Programming,0,True
+20251023-0-1,Witchcraft In-Store: Dada @ DTBK,2025-10-23,In-Store Activation,1,False
+20251026-0-0,Witchcraft Faire,2025-10-26,Loyalty,0,True
+20251028-0-0,Tray Tables Up Oct 28  The Kitchn.,2025-10-28,TTA Brand Event,0,True
+20251029-0-2,Witchcraft In-Store: Ravensview @ FIFTH,2025-10-29,In-Store Activation,2,False
+20251029-1-0,Sessions 'Meet N Talk' Presents: The Pregame at the Ace DTBK,2025-10-29,Community Programming,0,True
+20251030-0-0,"Julio Torres Presents: ""The Cursed Amulet""",2025-10-30,TTA Brand Event,0,True
+20251101-0-0,UCBLK,2025-11-01,Community Programming,0,True
+20251106-0-0,Lower Eastside Girls Club’s Fall Fling,2025-11-06,Community Programming,0,True
+20251106-1-3,House of High: Opening Party,2025-11-06,TTA Brand Event,3,False
+20251107-0-3,House of High: A Cannabis Imaginarium,2025-11-07,In-Store Activation,3,False
+20251107-1-0,Tray Tables Up Nov 7,2025-11-07,TTA Brand Event,0,True
+20251107-2-0,First Novel Friday Series: Center for Fiction,2025-11-07,TTA Brand Event,0,True
+20251109-0-0,Big Apple Sports Classic,2025-11-09,Community Programming,0,True
+20251115-0-4,Ghostface Killah Listening Party,2025-11-15,TTA Brand Event,4,False
+20251115-1-2,Ghostface Killah Listening Party,2025-11-15,TTA Brand Event,2,False
+20251115-2-3,Ghostface Killah Listening Party,2025-11-15,TTA Brand Event,3,False
+20251115-3-1,Ghostface Killah Listening Party,2025-11-15,TTA Brand Event,1,False
+20251120-0-0,"BAM: Hanif Abduraqib’s I Guess it was my Destiny to Live (Nov 18—Nov 21, 2025)",2025-11-20,TTA Brand Event,0,True
+20251122-0-3,Veterans Day Panel (Heros & Healing),2025-11-22,In-Store Activation,3,False
+20251203-0-2,2025 Rockefeller Center Christmas Tree - no event yet FIFTH,2025-12-03,Untyped,2,False
+20251205-0-0,Tray Tables Up Dec 5,2025-12-05,TTA Brand Event,0,True
+20251206-0-3,High for Holidays: cookie butter popcorn,2025-12-06,In-Store Activation,3,False
+20251209-0-0,Center for Fiction: Annual Awards Benefit,2025-12-09,TTA Brand Event,0,True
+20251209-1-0,"BAM Member Bash December 9, 2025",2025-12-09,TTA Brand Event,0,True
+20251211-0-2,High for Holidays: spacepoppers demo,2025-12-11,In-Store Activation,2,False
+20251215-0-0,Tray Tables Up Dec 15,2025-12-15,TTA Brand Event,0,True
+20251230-0-3,Artist Events: Andy Frasco (@andyfrasco) - Dec 30,2025-12-30,In-Store Activation,3,False
+20260113-0-0,TrailBLAZER Awards: Employee Party,2026-01-13,Untyped,0,True
+20260115-0-3,Cali Sober Sips 2026: SoHo,2026-01-15,In-Store Activation,3,False
+20260115-1-0,"BAM: What to Wear (Jan 15—Jan 16, 2026)",2026-01-15,TTA Brand Event,0,True
+20260121-0-4,StayMelo Home Court Advantage (Knicks home game),2026-01-21,In-Store Activation,4,False
+20260121-1-1,StayMelo Home Court Advantage (Knicks home game),2026-01-21,In-Store Activation,1,False
+20260121-2-2,StayMelo Home Court Advantage (Knicks home game),2026-01-21,In-Store Activation,2,False
+20260121-3-3,StayMelo Home Court Advantage (Knicks home game),2026-01-21,In-Store Activation,3,False
+20260122-0-1,Cali Sober Sips 2026: DTBK,2026-01-22,In-Store Activation,1,False
+20260127-0-4,StayMelo Home Court Advantage (Knicks home game),2026-01-27,In-Store Activation,4,False
+20260127-1-1,StayMelo Home Court Advantage (Knicks home game),2026-01-27,In-Store Activation,1,False
+20260127-2-2,StayMelo Home Court Advantage (Knicks home game),2026-01-27,In-Store Activation,2,False
+20260127-3-3,StayMelo Home Court Advantage (Knicks home game),2026-01-27,In-Store Activation,3,False
+20260129-0-2,Cali Sober Sips 2026: Fifth,2026-01-29,In-Store Activation,2,False
+20260130-0-4,StayMelo Home Court Advantage (Knicks home game),2026-01-30,In-Store Activation,4,False
+20260130-1-1,StayMelo Home Court Advantage (Knicks home game),2026-01-30,In-Store Activation,1,False
+20260130-2-2,StayMelo Home Court Advantage (Knicks home game),2026-01-30,In-Store Activation,2,False
+20260130-3-3,StayMelo Home Court Advantage (Knicks home game),2026-01-30,In-Store Activation,3,False
+20260201-0-4,StayMelo Home Court Advantage (Knicks home game),2026-02-01,In-Store Activation,4,False
+20260201-1-1,StayMelo Home Court Advantage (Knicks home game),2026-02-01,In-Store Activation,1,False
+20260201-2-2,StayMelo Home Court Advantage (Knicks home game),2026-02-01,In-Store Activation,2,False
+20260201-3-3,StayMelo Home Court Advantage (Knicks home game),2026-02-01,In-Store Activation,3,False
+20260204-0-4,StayMelo Home Court Advantage (Knicks home game),2026-02-04,In-Store Activation,4,False
+20260204-1-1,StayMelo Home Court Advantage (Knicks home game),2026-02-04,In-Store Activation,1,False
+20260204-2-2,StayMelo Home Court Advantage (Knicks home game),2026-02-04,In-Store Activation,2,False
+20260204-3-3,StayMelo Home Court Advantage (Knicks home game),2026-02-04,In-Store Activation,3,False
+20260210-0-4,StayMelo Home Court Advantage (Knicks home game),2026-02-10,In-Store Activation,4,False
+20260210-1-1,StayMelo Home Court Advantage (Knicks home game),2026-02-10,In-Store Activation,1,False
+20260210-2-2,StayMelo Home Court Advantage (Knicks home game),2026-02-10,In-Store Activation,2,False
+20260210-3-3,StayMelo Home Court Advantage (Knicks home game),2026-02-10,In-Store Activation,3,False
+20260211-0-0,TRAY TABLES UP w. Nicole Johnson,2026-02-11,TTA Brand Event,0,True
+20260219-0-4,StayMelo Home Court Advantage (Knicks home game),2026-02-19,In-Store Activation,4,False
+20260219-1-1,StayMelo Home Court Advantage (Knicks home game),2026-02-19,In-Store Activation,1,False
+20260219-2-2,StayMelo Home Court Advantage (Knicks home game),2026-02-19,In-Store Activation,2,False
+20260219-3-3,StayMelo Home Court Advantage (Knicks home game),2026-02-19,In-Store Activation,3,False
+20260221-0-4,StayMelo Home Court Advantage (Knicks home game),2026-02-21,In-Store Activation,4,False
+20260221-1-1,StayMelo Home Court Advantage (Knicks home game),2026-02-21,In-Store Activation,1,False
+20260221-2-2,StayMelo Home Court Advantage (Knicks home game),2026-02-21,In-Store Activation,2,False
+20260221-3-3,StayMelo Home Court Advantage (Knicks home game),2026-02-21,In-Store Activation,3,False
+20260221-4-0,TRAY TABLES UP w. Victoria Garcia,2026-02-21,TTA Brand Event,0,True
+20260226-0-0,Cannabis In Black NY Launch,2026-02-26,Community Programming,0,True
+20260301-0-4,StayMelo Home Court Advantage (Knicks home game),2026-03-01,In-Store Activation,4,False
+20260301-1-1,StayMelo Home Court Advantage (Knicks home game),2026-03-01,In-Store Activation,1,False
+20260301-2-2,StayMelo Home Court Advantage (Knicks home game),2026-03-01,In-Store Activation,2,False
+20260301-3-3,StayMelo Home Court Advantage (Knicks home game),2026-03-01,In-Store Activation,3,False
+20260304-0-4,StayMelo Home Court Advantage (Knicks home game),2026-03-04,In-Store Activation,4,False
+20260304-1-1,StayMelo Home Court Advantage (Knicks home game),2026-03-04,In-Store Activation,1,False
+20260304-2-2,StayMelo Home Court Advantage (Knicks home game),2026-03-04,In-Store Activation,2,False
+20260304-3-3,StayMelo Home Court Advantage (Knicks home game),2026-03-04,In-Store Activation,3,False
+20260304-4-0,"TRAY TABLES UP w. PureWow & PopSugar  Deena Campbell, Pure Wow +  Jessica Andrews, PopSugar",2026-03-04,TTA Brand Event,0,True
+20260306-0-3,Fernway Fern20 - SOHO,2026-03-06,In-Store Activation,3,False
+20260313-0-1,Fernway Fern20 DTBK,2026-03-13,In-Store Activation,1,False
+20260315-0-4,StayMelo Home Court Advantage (Knicks home game),2026-03-15,In-Store Activation,4,False
+20260315-1-1,StayMelo Home Court Advantage (Knicks home game),2026-03-15,In-Store Activation,1,False
+20260315-2-2,StayMelo Home Court Advantage (Knicks home game),2026-03-15,In-Store Activation,2,False
+20260315-3-3,StayMelo Home Court Advantage (Knicks home game),2026-03-15,In-Store Activation,3,False
+20260317-0-4,StayMelo Home Court Advantage (Knicks home game),2026-03-17,In-Store Activation,4,False
+20260317-1-1,StayMelo Home Court Advantage (Knicks home game),2026-03-17,In-Store Activation,1,False
+20260317-2-2,StayMelo Home Court Advantage (Knicks home game),2026-03-17,In-Store Activation,2,False
+20260317-3-3,StayMelo Home Court Advantage (Knicks home game),2026-03-17,In-Store Activation,3,False
+20260320-0-4,Fernway Fern20 USQ,2026-03-20,In-Store Activation,4,False
+20260321-0-3,Buds on the Move: Spring Equinox Walk (ft. FLAMER),2026-03-21,Community Programming,3,False
+20260322-0-4,StayMelo Home Court Advantage (Knicks home game),2026-03-22,In-Store Activation,4,False
+20260322-1-1,StayMelo Home Court Advantage (Knicks home game),2026-03-22,In-Store Activation,1,False
+20260322-2-2,StayMelo Home Court Advantage (Knicks home game),2026-03-22,In-Store Activation,2,False
+20260322-3-3,StayMelo Home Court Advantage (Knicks home game),2026-03-22,In-Store Activation,3,False
+20260323-0-3,Open Book Club x TTA (Read & Unwind),2026-03-23,In-Store Activation,3,False
+20260324-0-4,StayMelo Home Court Advantage (Knicks home game),2026-03-24,In-Store Activation,4,False
+20260324-1-1,StayMelo Home Court Advantage (Knicks home game),2026-03-24,In-Store Activation,1,False
+20260324-2-2,StayMelo Home Court Advantage (Knicks home game),2026-03-24,In-Store Activation,2,False
+20260324-3-3,StayMelo Home Court Advantage (Knicks home game),2026-03-24,In-Store Activation,3,False
+20260326-0-0,TRAY TABLES UP w. Kayla Greaves,2026-03-26,TTA Brand Event,0,True
+20260327-0-2,Fernway Fern20 Fifth,2026-03-27,In-Store Activation,2,False
+20260403-0-4,StayMelo Home Court Advantage (Knicks home game),2026-04-03,In-Store Activation,4,False
+20260403-1-1,StayMelo Home Court Advantage (Knicks home game),2026-04-03,In-Store Activation,1,False
+20260403-2-2,StayMelo Home Court Advantage (Knicks home game),2026-04-03,In-Store Activation,2,False
+20260403-3-3,StayMelo Home Court Advantage (Knicks home game),2026-04-03,In-Store Activation,3,False
+20260409-0-4,StayMelo Home Court Advantage (Knicks home game),2026-04-09,In-Store Activation,4,False
+20260409-1-1,StayMelo Home Court Advantage (Knicks home game),2026-04-09,In-Store Activation,1,False
+20260409-2-2,StayMelo Home Court Advantage (Knicks home game),2026-04-09,In-Store Activation,2,False
+20260409-3-3,StayMelo Home Court Advantage (Knicks home game),2026-04-09,In-Store Activation,3,False
+20260410-0-4,StayMelo Home Court Advantage (Knicks home game),2026-04-10,In-Store Activation,4,False
+20260410-1-1,StayMelo Home Court Advantage (Knicks home game),2026-04-10,In-Store Activation,1,False
+20260410-2-2,StayMelo Home Court Advantage (Knicks home game),2026-04-10,In-Store Activation,2,False
+20260410-3-3,StayMelo Home Court Advantage (Knicks home game),2026-04-10,In-Store Activation,3,False
+20260412-0-4,StayMelo Home Court Advantage (Knicks home game),2026-04-12,In-Store Activation,4,False
+20260412-1-1,StayMelo Home Court Advantage (Knicks home game),2026-04-12,In-Store Activation,1,False
+20260412-2-2,StayMelo Home Court Advantage (Knicks home game),2026-04-12,In-Store Activation,2,False
+20260412-3-3,StayMelo Home Court Advantage (Knicks home game),2026-04-12,In-Store Activation,3,False
+20260415-0-4,StayMelo ticket Drawing,2026-04-15,In-Store Activation,4,False
+20260415-1-1,StayMelo ticket Drawing,2026-04-15,In-Store Activation,1,False
+20260415-2-2,StayMelo ticket Drawing,2026-04-15,In-Store Activation,2,False
+20260415-3-3,StayMelo ticket Drawing,2026-04-15,In-Store Activation,3,False
+20260416-0-3,420 2026 OnlyNY Launch Party,2026-04-16,In-Store Activation,3,False
+20260420-0-3,420 2026 Food Drops & DJ April 20,2026-04-20,In-Store Activation,3,False
+20260420-1-4,420 2026 Food Drops & DJ April 20,2026-04-20,In-Store Activation,4,False
+20260420-2-1,420 2026 Food Drops & DJ April 20,2026-04-20,In-Store Activation,1,False
+20260420-3-2,420 2026 Food Drops & DJ April 20,2026-04-20,In-Store Activation,2,False
+20260423-0-0,StayMelo Playoff Game Watch Party,2026-04-23,TTA Brand Event,0,True
+20260509-0-4,Cause Medic Mothers Day Event,2026-05-09,In-Store Activation,4,False
+20260509-1-1,Cause Medic Mothers Day Event,2026-05-09,In-Store Activation,1,False
+20260509-2-2,Cause Medic Mothers Day Event,2026-05-09,In-Store Activation,2,False
+20260509-3-3,Cause Medic Mothers Day Event,2026-05-09,In-Store Activation,3,False
+20260511-0-3,TRAY TABLES UP w. Simi,2026-05-11,TTA Brand Event,3,False
+20260514-0-0,TRAY TABLES UP w. Adeola Ajala,2026-05-14,TTA Brand Event,0,True
+20260518-0-0,Open Book Club x TTA: A Night  — Anais Wine Bar,2026-05-18,Community Programming,0,True
+20260521-0-0,TRAY TABLES UP w. Robert (@robertcadizs),2026-05-21,TTA Brand Event,0,True
+20260529-0-0,NEW FEST: Partnership,2026-05-29,TTA Brand Event,0,True
+20260529-1-3,Bumping Uglies (Soho Music Event),2026-05-29,In-Store Activation,3,False
+20260604-0-0,Chef Dinner (timeless brand partner loyalty),2026-06-04,Loyalty,0,True
+20260605-0-0,TTU: Kelsey Armstrong (haricotvert),2026-06-05,Untyped,0,True
+20260606-0-0,Bright Eyes Show Tabling (Contest Prize),2026-06-06,Loyalty,0,True
+20260608-0-0,"TRAY TABLES UP w. Litclub Founder, Kelly",2026-06-08,TTA Brand Event,0,True
+20260608-1-3,High Notes Live #1 — Fifth Ave,2026-06-08,In-Store Activation,3,False
+20260616-0-2,FILMING INSTORE: Ethan Zohn x Fernway - High Times,2026-06-16,In-Store Activation,2,False
+20260616-1-3,Airwaves Roots of Black Music Residency (Night 1),2026-06-16,In-Store Activation,3,False
+20260616-2-0,The Wing Coworking 2026 Reunion Sponsorship,2026-06-16,Community Programming,0,True
+20260617-0-3,Buds on the Move x TTA x Florette: Summer Welcome Walk,2026-06-17,Community Programming,3,False
+20260617-1-3,Airwaves Roots of Black Music Residency Night 2,2026-06-17,In-Store Activation,3,False
+20260618-0-3,Airwaves Roots of Black Music Residency Night 3,2026-06-18,In-Store Activation,3,False
+20260619-0-3,Airwaves Roots of Black Music Residency Night 4,2026-06-19,In-Store Activation,3,False
+20260620-0-3,Airwaves Roots of Black Music Residency Night 5,2026-06-20,In-Store Activation,3,False
+20260621-0-3,Airwaves Roots of Black Music Residency Night 6,2026-06-21,In-Store Activation,3,False
+20260625-0-3,In-Store PRE-STONED PRIDE,2026-06-25,In-Store Activation,3,False
+20260627-0-3,Clear for Takeoff Returns with Whitfit (soho),2026-06-27,In-Store Activation,3,False
+20260629-0-4,High Notes Live #2 — USQ,2026-06-29,In-Store Activation,4,False

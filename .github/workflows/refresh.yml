@@ -1,7 +1,6 @@
 name: Cerebral refresh
-
+on:
   workflow_dispatch:
-
 concurrency:
   group: cerebral-refresh
   cancel-in-progress: false

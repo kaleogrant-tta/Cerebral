@@ -41,6 +41,28 @@ SLIM = "cerebral_dash.duckdb"
 # size for rows nobody looks at.
 PRODUCT_WEEK_MIN_NET = 250
 
+# --- brand efficiency index -------------------------------------------------
+# Trailing sales window paired with the point-in-time inventory snapshot.
+# Four weeks is long enough to be stable and short enough that the snapshot
+# still describes roughly what was on the shelf during it.
+BEI_WINDOW_DAYS = 28
+
+# Floors for appearing at all: a brand needs to have either sold or been
+# stocked enough to be worth a row.
+BEI_MIN_SALES = 500
+BEI_MIN_INV_COST = 250
+
+# Floors for computing a RATIO, which is a higher bar. Below these the
+# denominator is too small to divide by and the result would be noise
+# dressed as insight.
+BEI_MIN_DENOM_COST = 200
+BEI_MIN_DENOM_QOH = 5
+
+# Categories whose brand attribution is worse than this are published but
+# should not be shown as ratios.
+BEI_MIN_COVERAGE = 0.90
+
+
 # How many minutes earlier than usual a store's last transaction has to be
 # before that day is treated as a truncated export rather than a slow night.
 # Two hours is loose enough to survive an ordinary quiet close and tight
@@ -903,6 +925,168 @@ def build(src: str, dest: str) -> dict:
         GROUP BY store_key, product, snapshot_date
     """)
 
+    # --- brand efficiency index ------------------------------------------
+    # Sales share over inventory share, within store x category. Inventory is
+    # the latest sellable snapshot; sales are the trailing window ending on
+    # that snapshot, so the numerator and denominator describe the same
+    # moment.
+    con.execute(f"""
+        CREATE TABLE dash_bei AS
+        WITH snap AS (
+            SELECT MAX(snapshot_date) AS d FROM src.fact_inventory
+        ),
+        prod_brand AS (
+            -- fact_inventory carries no brand. Recover it from the product
+            -- name, most frequent brand wins so a single mis-keyed line
+            -- cannot rename a product.
+            SELECT product, brand FROM (
+                SELECT product, brand, COUNT(*) AS n
+                FROM fl
+                WHERE brand IS NOT NULL AND product IS NOT NULL
+                  AND NOT is_return
+                GROUP BY 1, 2
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY product ORDER BY n DESC) = 1
+            )
+        ),
+        inv AS (
+            SELECT i.store_key, i.category,
+                   COALESCE(pb.brand, '(unmatched)') AS brand,
+                   SUM(i.ext_cost)           AS inv_cost,
+                   SUM(i.ext_retail)         AS inv_retail,
+                   SUM(i.qty_on_hand)        AS qoh,
+                   COUNT(DISTINCT i.product) AS skus
+            FROM src.fact_inventory i
+            LEFT JOIN prod_brand pb ON pb.product = i.product
+            WHERE i.sellable
+              AND i.snapshot_date = (SELECT d FROM snap)
+              AND i.category IS NOT NULL
+              AND i.qty_on_hand > 0
+            GROUP BY 1, 2, 3
+        ),
+        sales AS (
+            SELECT l.store_key, l.category, l.brand,
+                   SUM(l.net_sales)    AS net,
+                   SUM(l.gross_margin) AS gm,
+                   SUM(l.units)        AS units
+            FROM fl l
+            WHERE NOT l.is_return
+              AND l.brand IS NOT NULL
+              AND l.category IS NOT NULL
+              AND CAST(l.txn_ts AS DATE) >  (SELECT d FROM snap)
+                                            - {BEI_WINDOW_DAYS}
+              AND CAST(l.txn_ts AS DATE) <= (SELECT d FROM snap)
+            GROUP BY 1, 2, 3
+        ),
+        joined AS (
+            -- FULL OUTER so both failures stay visible: stock that did not
+            -- sell, and brands that sold out. An inner join hides exactly
+            -- the rows worth looking at.
+            SELECT COALESCE(i.store_key, s.store_key) AS store_key,
+                   COALESCE(i.category,  s.category)  AS category,
+                   COALESCE(i.brand,     s.brand)     AS brand,
+                   COALESCE(i.inv_cost,   0) AS inv_cost,
+                   COALESCE(i.inv_retail, 0) AS inv_retail,
+                   COALESCE(i.qoh,        0) AS qoh,
+                   COALESCE(i.skus,       0) AS skus,
+                   COALESCE(s.net,        0) AS net,
+                   COALESCE(s.gm,         0) AS gm,
+                   COALESCE(s.units,      0) AS units
+            FROM inv i
+            FULL OUTER JOIN sales s
+              ON  i.store_key = s.store_key
+              AND i.category  = s.category
+              AND i.brand     = s.brand
+        ),
+        shares AS (
+            SELECT *,
+                   SUM(net)      OVER w AS cat_net,
+                   SUM(gm)       OVER w AS cat_gm,
+                   SUM(units)    OVER w AS cat_units,
+                   SUM(inv_cost) OVER w AS cat_inv_cost,
+                   SUM(qoh)      OVER w AS cat_qoh,
+                   SUM(skus)     OVER w AS cat_skus
+            FROM joined
+            WINDOW w AS (PARTITION BY store_key, category)
+        )
+        SELECT store_key, category, brand,
+               ROUND(net, 2)        AS net,
+               ROUND(gm, 2)         AS gm,
+               units,
+               ROUND(inv_cost, 2)   AS inv_cost,
+               ROUND(inv_retail, 2) AS inv_retail,
+               qoh, skus,
+               ROUND(net      / NULLIF(cat_net, 0), 4)      AS sales_share,
+               ROUND(gm       / NULLIF(cat_gm, 0), 4)       AS gm_share,
+               ROUND(inv_cost / NULLIF(cat_inv_cost, 0), 4) AS capital_share,
+               ROUND(qoh      / NULLIF(cat_qoh, 0), 4)      AS unit_share,
+               ROUND(skus     / NULLIF(cat_skus, 0), 4)     AS assort_share,
+               -- Ratios only where the denominator can carry one. A brand
+               -- that sold out is flagged, not given a huge number.
+               CASE WHEN inv_cost >= {BEI_MIN_DENOM_COST}
+                    THEN ROUND((net / NULLIF(cat_net, 0))
+                         / NULLIF(inv_cost / NULLIF(cat_inv_cost, 0), 0), 3)
+               END AS bei_capital,
+               CASE WHEN inv_cost >= {BEI_MIN_DENOM_COST}
+                    THEN ROUND((gm / NULLIF(cat_gm, 0))
+                         / NULLIF(inv_cost / NULLIF(cat_inv_cost, 0), 0), 3)
+               END AS bei_margin,
+               CASE WHEN qoh >= {BEI_MIN_DENOM_QOH}
+                    THEN ROUND((units / NULLIF(cat_units, 0))
+                         / NULLIF(qoh / NULLIF(cat_qoh, 0), 0), 3)
+               END AS bei_unit,
+               CASE WHEN skus >= 1
+                    THEN ROUND((net / NULLIF(cat_net, 0))
+                         / NULLIF(skus / NULLIF(cat_skus, 0), 0), 3)
+               END AS bei_assort,
+               -- Days of supply at the window's own selling rate. BEI says
+               -- whether the mix is right; this says how urgent it is.
+               CASE WHEN units > 0
+                    THEN ROUND(qoh / (units / {BEI_WINDOW_DAYS}.0), 1)
+               END AS dos,
+               (net > 0 AND inv_cost < {BEI_MIN_DENOM_COST}) AS stocked_out,
+               (SELECT d FROM snap) AS snapshot_date,
+               {BEI_WINDOW_DAYS} AS window_days
+        FROM shares
+        WHERE net >= {BEI_MIN_SALES} OR inv_cost >= {BEI_MIN_INV_COST}
+    """)
+
+    # How much of each category's inventory could be attributed to a brand at
+    # all. Below BEI_MIN_COVERAGE the ratios in that category are not worth
+    # showing, and the app hides it rather than quietly misleading.
+    con.execute("""
+        CREATE TABLE dash_bei_coverage AS
+        WITH snap AS (
+            SELECT MAX(snapshot_date) AS d FROM src.fact_inventory
+        ),
+        prod_brand AS (
+            SELECT product, brand FROM (
+                SELECT product, brand, COUNT(*) AS n
+                FROM fl
+                WHERE brand IS NOT NULL AND product IS NOT NULL
+                  AND NOT is_return
+                GROUP BY 1, 2
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY product ORDER BY n DESC) = 1
+            )
+        )
+        SELECT i.category,
+               COUNT(*) AS inv_rows,
+               SUM(CASE WHEN pb.brand IS NULL THEN 1 ELSE 0 END)
+                   AS unmatched_rows,
+               ROUND(SUM(CASE WHEN pb.brand IS NOT NULL
+                              THEN i.ext_cost ELSE 0 END)
+                     / NULLIF(SUM(i.ext_cost), 0), 4) AS cost_coverage,
+               ROUND(SUM(i.ext_cost), 2) AS inv_cost
+        FROM src.fact_inventory i
+        LEFT JOIN prod_brand pb ON pb.product = i.product
+        WHERE i.sellable
+          AND i.snapshot_date = (SELECT d FROM snap)
+          AND i.qty_on_hand > 0
+          AND i.category IS NOT NULL
+        GROUP BY 1
+    """)
+
     # --- load log and metadata -------------------------------------------
     con.execute("""
         CREATE TABLE dash_load_log AS
@@ -934,10 +1118,12 @@ def build(src: str, dest: str) -> dict:
     # --- new vs returning customers by week ---
     # discount_amt is easy to leave half-populated; say so
     # before publishing tables derived from it.
-    assert_discount_sane(con, table='fb')
+    assert_discount_sane(con, table='src.fact_basket')
     build_newret(con)
     # --- event attendees: 90-day return, new vs regular ---
     build_event_return(con)
+    con.execute("DROP VIEW IF EXISTS fb")
+    con.execute("DROP VIEW IF EXISTS complete_only")
     con.execute("DETACH src")
 
     # --- confirm no identifiers survived ---------------------------------

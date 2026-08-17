@@ -43,6 +43,7 @@ from retention_tab import render_retention
 from events_tab import render_events
 from audiences_tab import render_audiences
 from discounting_tab import render_discounting
+from bei_tab import render_bei
 
 
 # --- rewards menu, for the off-menu picks panel ------------------------
@@ -810,12 +811,12 @@ st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_acc, t_redeem, t_discount, \
+t_charts, t_insights, t_brands, t_bei, t_acc, t_redeem, t_discount, \
     t_loyalty, t_retention, t_events, t_audiences, \
     t_takeover, t_projections, t_promo, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Accessories", "Redemptions",
-     "Discounting", "Loyalty", "Retention", "Events", "Audiences",
-     "Takeovers", "Projections", "Promo Lab",
+    ["Charts", "Insights", "Brands", "Brand Efficiency", "Accessories",
+     "Redemptions", "Discounting", "Loyalty", "Retention", "Events",
+     "Audiences", "Takeovers", "Projections", "Promo Lab",
      "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
@@ -4284,3 +4285,10 @@ with t_discount:
     render_discounting(q=q, keys=keys, keep=keep, stores=STORES,
                        heading=heading, table_exists=table_exists,
                        accent=ACCENT, series=SERIES)
+
+
+# -------------------------------------------------------- brand efficiency
+with t_bei:
+    render_bei(q=q, keys=keys, stores=STORES,
+               heading=heading, table_exists=table_exists,
+               accent=ACCENT, series=SERIES)

@@ -41,6 +41,16 @@ SLIM = "cerebral_dash.duckdb"
 # size for rows nobody looks at.
 PRODUCT_WEEK_MIN_NET = 250
 
+# How many minutes earlier than usual a store's last transaction has to be
+# before that day is treated as a truncated export rather than a slow night.
+# Two hours is loose enough to survive an ordinary quiet close and tight
+# enough to catch a mid-afternoon export.
+CLOSE_TOLERANCE_MIN = 120
+
+# Days of history used to establish what "usual" closing time means.
+NORM_WINDOW_DAYS = 28
+
+
 
 # --------------------------------------------------------------- brand names
 # The same brand arrives under more than one spelling depending on which
@@ -116,10 +126,77 @@ def build(src: str, dest: str) -> dict:
     # Every rollup below reads `fl` rather than src.fact_line, so brand
     # consolidation happens once, before any grouping. Doing it per-table
     # would mean any table added later quietly misses it.
+
+    # --- complete days only ----------------------------------------------
+    # An export pulled mid-day lands a partial day. Left alone it is
+    # indistinguishable from a bad day, and every per-day average, weekly
+    # total and trend picks it up. Detected here once and excluded from the
+    # views everything else reads.
+    #
+    # Only a store's LAST day is a candidate: an early close earlier in the
+    # record is a real early close, not a truncated export.
+    con.execute(f"""
+        CREATE TABLE dash_incomplete_days AS
+        WITH close AS (
+            SELECT store_key, CAST(txn_ts AS DATE) AS day,
+                   date_diff('minute',
+                             CAST(CAST(txn_ts AS DATE) AS TIMESTAMP),
+                             MAX(txn_ts)) AS close_min,
+                   COUNT(*) AS baskets
+            FROM src.fact_basket
+            WHERE NOT is_return
+            GROUP BY 1, 2
+        ),
+        last_day AS (
+            SELECT store_key, MAX(day) AS day FROM close GROUP BY 1
+        ),
+        usual AS (
+            SELECT c.store_key, MEDIAN(c.close_min) AS typical_close
+            FROM close c JOIN last_day l USING (store_key)
+            WHERE c.day < l.day AND c.day >= l.day - {NORM_WINDOW_DAYS}
+            GROUP BY 1
+        )
+        SELECT c.store_key, c.day, c.baskets,
+               c.close_min, u.typical_close,
+               u.typical_close - c.close_min AS short_by_min
+        FROM close c
+        JOIN last_day l USING (store_key)
+        JOIN usual   u USING (store_key)
+        WHERE c.day = l.day
+          AND c.close_min < u.typical_close - {CLOSE_TOLERANCE_MIN}
+    """)
+    _inc = con.execute("SELECT COUNT(*) FROM dash_incomplete_days").fetchone()[0]
+    if _inc:
+        for r in con.execute("""
+                SELECT store_key, day, baskets, short_by_min
+                FROM dash_incomplete_days ORDER BY store_key""").fetchall():
+            print(f"    excluding incomplete day: store {r[0]} {r[1]} "
+                  f"({r[2]:,} baskets, closed {int(r[3])} min early)")
+
+    con.execute("""
+        CREATE VIEW complete_only AS
+        SELECT store_key, day FROM dash_incomplete_days
+    """)
     con.execute(f"""
         CREATE VIEW fl AS
         SELECT * REPLACE ({_canon_brand_sql('brand')} AS brand)
-        FROM src.fact_line
+        FROM src.fact_line l
+        WHERE NOT EXISTS (
+            SELECT 1 FROM complete_only x
+            WHERE x.store_key = l.store_key
+              AND x.day = CAST(l.txn_ts AS DATE))
+    """)
+
+    # Basket-level twin of fl. Tables that count baskets or customers read
+    # this rather than src.fact_basket, so the same days are excluded on
+    # both sides and the two can never disagree.
+    con.execute("""
+        CREATE VIEW fb AS
+        SELECT * FROM src.fact_basket b
+        WHERE NOT EXISTS (
+            SELECT 1 FROM complete_only x
+            WHERE x.store_key = b.store_key
+              AND x.day = CAST(b.txn_ts AS DATE))
     """)
 
     has_redemption = con.execute("""
@@ -164,7 +241,7 @@ def build(src: str, dest: str) -> dict:
                    COUNT(DISTINCT date_key)    AS days_open,
                    SUM(basket_net)             AS net_all,
                    AVG(basket_lines)           AS avg_lines
-            FROM src.fact_basket WHERE NOT is_return
+            FROM fb WHERE NOT is_return
             GROUP BY 1,2,3,4
         ),
         cw AS (
@@ -192,7 +269,7 @@ def build(src: str, dest: str) -> dict:
                SUM(CASE WHEN used_redemption THEN 1 ELSE 0 END)  AS redeem_baskets,
                SUM(loyalty_redeem)             AS redeem_value,
                COUNT(DISTINCT date_key)        AS days_open
-        FROM src.fact_basket WHERE NOT is_return
+        FROM fb WHERE NOT is_return
         GROUP BY 1,2,3,4
     """)
 
@@ -343,7 +420,7 @@ def build(src: str, dest: str) -> dict:
         CREATE TABLE dash_brand_week AS
         WITH firsts AS (
             SELECT customer_key, MIN(txn_ts) AS first_ts
-            FROM src.fact_basket
+            FROM fb
             WHERE NOT is_return AND customer_key IS NOT NULL
             GROUP BY 1
         ),
@@ -403,7 +480,7 @@ def build(src: str, dest: str) -> dict:
         CREATE TABLE dash_brand_scorecard AS
         WITH firsts AS (
             SELECT customer_key, MIN(txn_ts) AS first_ts
-            FROM src.fact_basket
+            FROM fb
             WHERE NOT is_return AND customer_key IS NOT NULL
             GROUP BY 1
         ),
@@ -439,7 +516,7 @@ def build(src: str, dest: str) -> dict:
         CREATE TABLE dash_customer_totals AS
         WITH f AS (
             SELECT customer_key, MIN(txn_ts) AS first_ts
-            FROM src.fact_basket WHERE NOT is_return AND customer_key IS NOT NULL
+            FROM fb WHERE NOT is_return AND customer_key IS NOT NULL
             GROUP BY 1
         )
         SELECT COUNT(*) AS total_customers,
@@ -485,7 +562,7 @@ def build(src: str, dest: str) -> dict:
         CREATE TABLE dash_brand_redemption AS
         WITH f AS (
             SELECT customer_key, MIN(txn_ts) AS first_ts
-            FROM src.fact_basket WHERE NOT is_return AND customer_key IS NOT NULL
+            FROM fb WHERE NOT is_return AND customer_key IS NOT NULL
             GROUP BY 1
         )
         SELECT r.store_key,
@@ -650,7 +727,7 @@ def build(src: str, dest: str) -> dict:
                    SUM(basket_net)                            AS net,
                    SUM(basket_margin)                         AS margin,
                    SUM(COALESCE(loyalty_redeem, 0))           AS loyalty_redeem
-            FROM src.fact_basket
+            FROM fb
             WHERE NOT is_return
             GROUP BY 1,2,3
         """)
@@ -666,7 +743,7 @@ def build(src: str, dest: str) -> dict:
             WITH b AS (
                 SELECT basket_id, basket_net,
                        COALESCE(discount_amt, 0) AS disc
-                FROM src.fact_basket
+                FROM fb
                 WHERE NOT is_return AND COALESCE(discount_amt, 0) > 0
                   AND basket_net > 0
             )
@@ -730,7 +807,7 @@ def build(src: str, dest: str) -> dict:
                        THEN b.discount_amt - COALESCE(b.loyalty_redeem, 0)
                        ELSE 0 END)                         AS windowed_other
             FROM src.dim_discount_group_member m
-            JOIN src.fact_basket b ON b.customer_key = m.customer_key
+            JOIN fb b ON b.customer_key = m.customer_key
             WHERE NOT b.is_return
               AND COALESCE(b.discount_amt, 0) > 0
             GROUP BY 1,2,3
@@ -857,7 +934,7 @@ def build(src: str, dest: str) -> dict:
     # --- new vs returning customers by week ---
     # discount_amt is easy to leave half-populated; say so
     # before publishing tables derived from it.
-    assert_discount_sane(con, table='src.fact_basket')
+    assert_discount_sane(con, table='fb')
     build_newret(con)
     # --- event attendees: 90-day return, new vs regular ---
     build_event_return(con)

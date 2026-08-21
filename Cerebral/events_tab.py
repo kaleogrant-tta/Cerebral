@@ -49,12 +49,23 @@ def _wide(fn, obj, **kw):
 
 
 def _ci_text(r):
-    if pd.isna(r.ci_lo):
+    """Bracket beside a median must be the median's own interval.
+
+    Falls back to the mean columns so the tab still renders against a
+    published file built before this change.
+    """
+    def has(c):
+        return c in r.index and pd.notna(r[c])
+
+    lo = r.ci_lo_med if has("ci_lo_med") else r.ci_lo
+    hi = r.ci_hi_med if has("ci_hi_med") else r.ci_hi
+    ez = r.excludes_zero_med if has("excludes_zero_med") else r.excludes_zero
+    if pd.isna(lo):
         return "--"
-    s = f"[{r.ci_lo * 100:+.1f}%, {r.ci_hi * 100:+.1f}%]"
+    s = f"[{lo * 100:+.1f}%, {hi * 100:+.1f}%]"
     if not r.reliable:
         s += "  n small"
-    elif r.excludes_zero:
+    elif ez:
         s += "  ✓"
     return s
 
@@ -248,9 +259,15 @@ from "a good day was chosen for the event."
     if not off_curve.empty:
         off_curve["off"] = off_curve.group_value.astype(int)
         off_curve = off_curve.sort_values("off")
+        clo = (off_curve["ci_lo_med"] if "ci_lo_med" in off_curve
+               else off_curve["ci_lo"])
+        chi = (off_curve["ci_hi_med"] if "ci_hi_med" in off_curve
+               else off_curve["ci_hi"])
+        # clip: a mean interval sitting above the median sends the lower
+        # whisker negative, which plotly draws upside down.
         fig = px.bar(off_curve, x="off", y="median",
-                     error_y=off_curve.ci_hi - off_curve["median"],
-                     error_y_minus=off_curve["median"] - off_curve.ci_lo,
+                     error_y=(chi - off_curve["median"]).clip(lower=0),
+                     error_y_minus=(off_curve["median"] - clo).clip(lower=0),
                      labels={"median": "Median lift", "off": "Days from event"})
         fig.update_traces(marker_color="#00FFD4")
         fig.update_layout(height=300, margin=dict(t=10, b=10, l=0, r=0),

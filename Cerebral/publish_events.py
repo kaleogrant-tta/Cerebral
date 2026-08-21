@@ -110,14 +110,20 @@ def _lift(series, day, blocked):
     return series.loc[day] / base - 1, len(c)
 
 
-def _ci(x, n=BOOT, seed=SEED):
+def _ci(x, n=BOOT, seed=SEED, stat="mean"):
+    """Bootstrap interval for the mean or the median of x.
+
+    The tab quotes the median, so a mean interval next to it can exclude
+    the very number it is printed beside. SEED is fixed, so both intervals
+    reproduce run to run.
+    """
     x = np.asarray([v for v in x if np.isfinite(v)])
     if len(x) < 3:
         return (np.nan, np.nan)
     rng = np.random.default_rng(seed)
-    return tuple(np.percentile(
-        rng.choice(x, size=(n, len(x)), replace=True).mean(axis=1),
-        [2.5, 97.5]))
+    draws = rng.choice(x, size=(n, len(x)), replace=True)
+    s = draws.mean(axis=1) if stat == "mean" else np.median(draws, axis=1)
+    return tuple(np.percentile(s, [2.5, 97.5]))
 
 
 def _detail_for_metric(ev, sd, chain, metric):
@@ -196,15 +202,19 @@ def _summaries(detail):
                 if len(x) < MIN_GROUP:
                     continue
                 lo, hi = _ci(x)
+                mlo, mhi = _ci(x, stat="median")
                 out.append({
                     "metric": metric, "scope": scope, "group_kind": kind,
                     "group_value": str(name), "measure": col,
                     "n": len(x), "mean": float(np.mean(x)),
                     "median": float(np.median(x)),
                     "ci_lo": lo, "ci_hi": hi,
+                    "ci_lo_med": mlo, "ci_hi_med": mhi,
                     "reliable": bool(len(x) >= TRUST_N),
                     "excludes_zero": bool(np.isfinite(lo) and
                                           (lo > 0 or hi < 0)),
+                    "excludes_zero_med": bool(np.isfinite(mlo) and
+                                              (mlo > 0 or mhi < 0)),
                 })
     return pd.DataFrame(out)
 

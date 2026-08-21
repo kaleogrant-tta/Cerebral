@@ -559,6 +559,110 @@ def _render_groups(q, where, H, accent, pal, table_exists):
             "- **Refresh** by re-exporting the audit and re-running "
             "`ingest_discount_groups.py` then `publish.py`.")
 
+    _render_group_lift(q, H, table_exists)
+
+
+
+def _render_group_lift(q, H, table_exists=None):
+    """Spend per member either side of enrolment.
+
+    Replaces basket size as the way to judge a discount group. Basket size
+    is not a behavioural measure here: a group whose members carry offers on
+    most of their baskets will show a large basket whether or not membership
+    changed anything. This measures the member against their own prior
+    quarter instead.
+
+    No store filter. The comparison is per member around that member's own
+    enrolment date, so faceting by store would split one member's window.
+    """
+    if table_exists and not table_exists("dash_group_lift"):
+        return
+    d = q("SELECT * FROM dash_group_lift ORDER BY members DESC")
+    if d.empty:
+        return
+    meta = q("SELECT * FROM dash_group_lift_meta")
+    win = int(meta.iloc[0].window_days) if not meta.empty else 90
+    minm = int(meta.iloc[0].min_members) if not meta.empty else 30
+
+    st.divider()
+    H(f"Did membership change spending? ({win} days either side)")
+    st.markdown(
+        f'<p class="note"><b>Why not basket size.</b> Groups with generous '
+        f'offers carry a discount on most of their baskets, and a basket '
+        f'with an offer on it looks bigger. That makes basket size a '
+        f'statement about offer attachment rather than about spending. This '
+        f'section compares each member against <i>themselves</i>: total '
+        f'spend in the {win} days before they joined against the {win} days '
+        f'after. Members who had not been customers for at least {win} days '
+        f'before joining are excluded — their "before" window would be '
+        f'partly pre-customer and would invent a lift.</p>',
+        unsafe_allow_html=True)
+
+    if "interpretable" in d.columns:
+        skip = d[~d.interpretable.astype(bool)]
+        d = d[d.interpretable.astype(bool)]
+    else:
+        skip = d.iloc[0:0]
+    if d.empty:
+        return
+
+    d["extra_disc"] = d.discount_post - d.discount_pre
+    d["ci"] = [
+        "--" if pd.isna(r.ci_lo) else
+        f"[{r.ci_lo:+,.0f}, {r.ci_hi:+,.0f}]"
+        + ("  \u2713" if r.excludes_zero else "")
+        for _, r in d.iterrows()]
+
+    st.dataframe(pd.DataFrame({
+        "Group": d.group_name,
+        "Members": d.members,
+        f"Spend, prior {win}d": d.spend_pre.round(0),
+        f"Spend, next {win}d": d.spend_post.round(0),
+        "Median change": d.median_change.round(0),
+        "95% interval": d.ci,
+        "% who spent more": d.pct_increased.round(0),
+        "Visits before": d.visits_pre.round(1),
+        "Visits after": d.visits_post.round(1),
+        "Extra discount": d.extra_disc.round(0),
+        "Median margin change": d.median_margin_change.round(0),
+    }), hide_index=True, use_container_width=True)
+
+    st.caption(
+        f"Per member, averaged. **Median change** is the typical member's "
+        f"change in net spend, with a bootstrap interval beside it — a check "
+        f"mark means the interval excludes zero. Use the median rather than "
+        f"the difference of the two averages: a handful of large members "
+        f"move an average a long way.  \n"
+        f"**Extra discount** is what the group cost per member over the same "
+        f"window. Read it against **median margin change**, not against the "
+        f"spend change — spend is already net of discount, so comparing the "
+        f"two would count the discount twice.  \n"
+        f"Groups with fewer than {minm} measurable members are not shown. "
+        f"Members who predate the audit window are excluded throughout.  \n"
+        f"**Travel Club Frequent Flyer** appears here despite being "
+        f"classified as a loyalty tier: it is a paid membership rather than "
+        f"an earned tier, so before-and-after enrolment is a meaningful "
+        f"comparison for it in a way it is not for a tier someone reaches "
+        f"by spending.")
+
+    if not skip.empty:
+        with st.expander("Staff and friends-and-family groups "
+                         f"({len(skip)} not shown)"):
+            st.caption(
+                "Membership in these groups tracks employment, so a member "
+                "who leaves the group is usually someone who left the job. "
+                "A spend decline reads as attrition rather than as a change "
+                "in shopping, and the before-and-after comparison cannot "
+                "separate the two. Shown for completeness only.")
+            st.dataframe(pd.DataFrame({
+                "Group": skip.group_name,
+                "Members": skip.members,
+                f"Spend, prior {win}d": skip.spend_pre.round(0),
+                f"Spend, next {win}d": skip.spend_post.round(0),
+                "Median change": skip.median_change.round(0),
+                "Visits before": skip.visits_pre.round(1),
+                "Visits after": skip.visits_post.round(1),
+            }), hide_index=True, use_container_width=True)
 
 
 # ------------------------------------------------- local-only: policing view

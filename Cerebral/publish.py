@@ -32,6 +32,7 @@ from publish_loyalty import build_loyalty
 from etl_discount import assert_discount_sane
 from publish_newret import build_newret
 from publish_event_return import build_event_return
+from publish_group_lift import build_group_lift
 
 SLIM = "cerebral_dash.duckdb"
 
@@ -1122,6 +1123,10 @@ def build(src: str, dest: str) -> dict:
     build_newret(con)
     # --- event attendees: 90-day return, new vs regular ---
     build_event_return(con)
+    # --- discount groups: spend either side of enrolment ---
+    # Basket size by group measures offer attachment, not spending.
+    # This compares each member against their own prior quarter.
+    build_group_lift(con)
     con.execute("DROP VIEW IF EXISTS fb")
     con.execute("DROP VIEW IF EXISTS complete_only")
     con.execute("DETACH src")

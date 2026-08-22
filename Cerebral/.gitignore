@@ -32,3 +32,29 @@ __pycache__/
 *-sl.csv
 data/inbox/
 data/out/
+
+*.bak-*
+
+
+# --- database backups (250MB+, never commit)
+*.duckdb
+*.duckdb.bak-*
+*.bak
+
+# --- scratch: probes, one-shot patchers, wiring scripts
+check_*.py
+diag_*.py
+probe_*.py
+sub_*.py
+patch_*.py
+wire_*.py
+fix_*.py
+explore_*.py
+run_discount_backfill.py
+identity_*.py
+discount_gap.py
+discount_probe.py
+dbg_publish.py
+week_gaps.py
+wq.py
+*.log

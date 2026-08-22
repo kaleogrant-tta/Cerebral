@@ -78,22 +78,31 @@ TYPE_ORDER = [
 ]
 
 TYPE_NOTE = {
-    "Loyalty brand offer":
-        "Brand-partner offers on a named SKU. The 3P Reward Program: a "
-        "partner funds a discount on its own product.",
-    "Travel Club reward":
-        "Tier rewards on a named SKU, earned through the loyalty programme "
-        "rather than funded by a brand.",
+    "Loyalty reward":
+        "The loyalty menu. Customers spend points on a set list of SKUs, and "
+        "the brands supplying those SKUs rebate them. Points accrue at "
+        "$0.05 on the dollar, so a redemption costs far less than its face "
+        "value. Offer names carried a \"Loyalty \" prefix until March 2026 "
+        "and a \"Travel Club \" prefix after; that was a rename, not a "
+        "change of programme, and both sit in this row.",
     "Point substitution":
-        "The customer's chosen reward was out of stock, so staff swapped in "
-        "something of similar value and wrote the discount down to it.",
+        "Same programme, stock workaround: the customer's chosen reward was "
+        "out, so staff swapped in something of similar value and wrote the "
+        "discount down to it.",
     "Secret Drop":
-        "The April mystery-promo series. No brand of its own, tracked as its "
-        "own family.",
+        "The April 2026 mystery-promo series. No brand of its own, tracked "
+        "as its own family.",
     "Other":
-        "Offers that match none of the naming conventions above. A growing "
-        "row here means a new campaign type needs classifying.",
+        "Offers matching none of the naming conventions above. A growing row "
+        "here means a new campaign type needs classifying.",
 }
+
+# What a redeemed dollar actually costs TTA. Points are accrued at
+# $0.05 on the dollar, and the SKUs on the loyalty menu are rebated by the
+# brands that supply them -- so redemption value is a liability figure, not
+# an expense. Displaying redemption value alone overstates the cost of the
+# programme by roughly twenty times.
+POINT_COST_RATE = 0.05
 
 _SUB_RE = re.compile(r"[0-9]+\s*points?\s+substitution", re.I)
 
@@ -965,18 +974,30 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
     mix["avg_unit"] = mix.spend / mix.units.replace(0, np.nan)
     mix = _order_types(mix)
 
+    mix["cost"] = mix.spend * POINT_COST_RATE
+
     m = st.columns(4)
-    m[0].metric("Discounted units", f"{int(mix.units.sum()):,}")
-    m[1].metric("Net sales on discounted lines", _money(mix.spend.sum()))
-    m[2].metric("Distinct offers", f"{int(mix.offers.sum()):,}")
-    m[3].metric("Discount types", f"{len(mix):,}")
+    m[0].metric("Redeemed units", f"{int(mix.units.sum()):,}")
+    m[1].metric("Redemption value", _money(mix.spend.sum()),
+                help="Face value of what customers redeemed. This is what "
+                     "the reward was worth to them, not what it cost us.")
+    m[2].metric("Cost to TTA", _money(mix.cost.sum()),
+                help=f"Redemption value at ${POINT_COST_RATE:.2f} on the "
+                     f"dollar, the rate points accrue at. The redeemed SKUs "
+                     f"are also rebated by the supplying brands, so this is "
+                     f"an upper bound on what the programme costs.")
+    m[3].metric("Distinct offers", f"{int(mix.offers.sum()):,}")
 
     st.markdown(
-        '<p class="note">Net sales is what the customer <b>paid</b> on a line '
-        'that carried an offer — not the value of the discount and not '
-        'loyalty points. Free gift-with-purchase units are excluded here; '
-        'they carry their own "(GWP)" SKU and are reconciled on the Takeovers '
-        'tab.</p>', unsafe_allow_html=True)
+        f'<p class="note"><b>Redemption value</b> is the face value of what '
+        f'customers took off the loyalty menu — what the reward was worth to '
+        f'them. It is not revenue and it is not what we spent. Points accrue '
+        f'at <b>${POINT_COST_RATE:.2f} on the dollar</b>, and the SKUs on the '
+        f'menu are rebated by the brands that supply them, so <b>cost to '
+        f'TTA</b> is the figure to compare against other discounting. '
+        f'Gift-with-purchase from takeovers is not here; it carries its own '
+        f'"(GWP)" SKU and is reconciled on the Takeovers tab.</p>',
+        unsafe_allow_html=True)
 
     cL, cR = st.columns([3, 2])
     with cL:
@@ -984,15 +1005,17 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
             "Discount type": mix["Discount type"],
             "Offers": mix.offers,
             "Units": mix.units,
-            "Net sales": mix.spend.round(0),
-            "Share of $": mix.share.round(1),
-            "Avg unit price": mix.avg_unit.round(2),
+            "Redemption value": mix.spend.round(0),
+            "Cost to TTA": mix.cost.round(0),
+            "Share of value": mix.share.round(1),
+            "Avg value / unit": mix.avg_unit.round(2),
         }), use_container_width=True, hide_index=True, column_config={
             "Offers": st.column_config.NumberColumn(format="%d"),
             "Units": st.column_config.NumberColumn(format="%d"),
-            "Net sales": st.column_config.NumberColumn(format="$%d"),
-            "Share of $": st.column_config.NumberColumn(format="%.1f%%"),
-            "Avg unit price": st.column_config.NumberColumn(format="$%.2f"),
+            "Redemption value": st.column_config.NumberColumn(format="$%d"),
+            "Cost to TTA": st.column_config.NumberColumn(format="$%d"),
+            "Share of value": st.column_config.NumberColumn(format="%.1f%%"),
+            "Avg value / unit": st.column_config.NumberColumn(format="$%.2f"),
         })
     with cR:
         fig = px.pie(mix, values="spend", names="Discount type", hole=.55,
@@ -1011,9 +1034,10 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
     H("Offers and SKUs")
     st.markdown(
         '<p class="note">Offer-level detail: the specific campaign and the '
-        'product the customer actually received. Filter by type to compare '
-        'like with like — a point substitution and a brand-funded offer are '
-        'not the same instrument.</p>', unsafe_allow_html=True)
+        'product the customer actually received. Nearly all of this is the '
+        'loyalty menu; a Secret Drop is a different instrument and is worth '
+        'filtering out before reading the rest.</p>',
+        unsafe_allow_html=True)
 
     pick = st.multiselect(
         "Discount type", options=list(mix["Discount type"]),
@@ -1038,15 +1062,18 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
             "Type": det["Discount type"],
             "SKUs": det.skus,
             "Units": det.units,
-            "Net sales": det.spend.round(0),
-            "Avg unit price": det.avg_unit.round(2),
+            "Redemption value": det.spend.round(0),
+            "Cost to TTA": (det.spend * POINT_COST_RATE).round(0),
+            "Avg value / unit": det.avg_unit.round(2),
             "First seen": pd.to_datetime(det.first_seen).dt.date,
             "Last seen": pd.to_datetime(det.last_seen).dt.date,
         }), use_container_width=True, hide_index=True, height=420,
             column_config={
                 "SKUs": st.column_config.NumberColumn(format="%d"),
                 "Units": st.column_config.NumberColumn(format="%d"),
-                "Net sales": st.column_config.NumberColumn(format="$%d"),
+                "Redemption value": st.column_config.NumberColumn(
+                    format="$%d"),
+                "Cost to TTA": st.column_config.NumberColumn(format="$%d"),
                 "Avg unit price": st.column_config.NumberColumn(
                     format="$%.2f"),
         })

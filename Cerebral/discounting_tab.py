@@ -72,8 +72,7 @@ import streamlit as st
 # shows up as a row instead of silently disappearing into a bucket.
 TYPE_ORDER = [
     "Point substitution",
-    "Travel Club reward",
-    "Loyalty brand offer",
+    "Loyalty reward",
     "Secret Drop",
     "Other",
 ]
@@ -117,10 +116,12 @@ def _classify(name) -> str:
         return "Secret Drop"
     if _SUB_RE.search(low):
         return "Point substitution"
-    if low.startswith("travel club"):
-        return "Travel Club reward"
-    if low.startswith("loyalty"):
-        return "Loyalty brand offer"
+    # One type, not two. The prefix changed on 2026-03-16 -- "Loyalty
+    # TTA Lighter" became "Travel Club TTA Lighter" mid-run -- so splitting
+    # on it reads a rename as a programme ending and another starting.
+    # Which tier funded the redemption comes from dash_redemption_tier.
+    if low.startswith(("travel club", "loyalty")):
+        return "Loyalty reward"
     return "Other"
 
 

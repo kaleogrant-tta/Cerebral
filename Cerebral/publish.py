@@ -129,6 +129,48 @@ def _family_sql(offer_col: str, brand_col: str) -> str:
     END"""
 
 
+
+RECENT_WEEKS = 6
+
+
+def assert_discount_current(con, table: str = "src.fact_basket",
+                            weeks: int = RECENT_WEEKS) -> None:
+    """Stop the build if the discount backfill has fallen behind.
+
+    assert_discount_sane() measures coverage over the whole loaded period,
+    so a few recent weeks with no discount barely move it. This looks only
+    at recent complete weeks and tests the one thing that cannot happen for
+    a real reason: loyalty redeemed with no discount recorded against it.
+    """
+    rows = con.execute(f"""
+        WITH wk AS (
+            SELECT date_trunc('week', txn_ts)::DATE AS wk,
+                   COUNT(DISTINCT txn_ts::DATE)              AS days,
+                   SUM(COALESCE(discount_amt, 0))            AS discount,
+                   SUM(COALESCE(loyalty_redeem, 0))          AS loyalty
+            FROM {table}
+            WHERE NOT is_return
+            GROUP BY 1
+        )
+        SELECT wk, discount, loyalty FROM wk
+        WHERE days = 7 AND loyalty > 0 AND discount < loyalty
+          AND wk >= (SELECT MAX(wk) FROM wk) - INTERVAL {weeks} WEEK
+        ORDER BY wk
+    """).fetchall()
+
+    if not rows:
+        return
+
+    lines = [f"    {w}  discount ${d:,.0f} < loyalty ${l:,.0f}"
+             for w, d, l in rows]
+    raise RuntimeError(
+        "discount backfill is behind: every loyalty redemption is also a "
+        "discount, so these weeks cannot be right.\n"
+        + "\n".join(lines)
+        + "\n  Fix: python run_discount_backfill.py --apply, then rebuild."
+    )
+
+
 def build(src: str, dest: str) -> dict:
     """Build the published file atomically.
 
@@ -643,6 +685,38 @@ def build(src: str, dest: str) -> dict:
         GROUP BY 1,2,3,4
       """)
 
+      # Redemptions by the tier that funded them. The "Loyalty " /
+      # "Travel Club " prefix on an offer name is a rename boundary, not a
+      # tier: everything before 2026-03-16 carries one prefix and everything
+      # after carries the other, whoever redeemed it. The funding tier lives
+      # on the customer, so it is joined from dim_customer_tier.
+      _has_tier = con.execute("""
+          SELECT COUNT(*) FROM duckdb_tables()
+          WHERE database_name = 'src' AND table_name = 'dim_customer_tier'
+      """).fetchone()[0] > 0
+      if _has_tier:
+        con.execute(f"""
+          CREATE TABLE dash_redemption_tier AS
+          SELECT r.store_key, r.iso_year, r.iso_week,
+                 COALESCE(t.tier, 'Unknown')                      AS tier,
+                 {_family_sql('r.offer_name', 'r.matched_brand')} AS brand,
+                 COUNT(*)                       AS redemptions,
+                 SUM(r.redeem_amt)              AS redeem_value,
+                 COUNT(DISTINCT r.customer_key) AS customers
+          FROM fr r
+          LEFT JOIN src.dim_customer_tier t
+                 ON t.customer_key = r.customer_key
+          GROUP BY 1,2,3,4,5
+        """)
+      else:
+        print("  ! no src.dim_customer_tier - dash_redemption_tier empty.")
+        con.execute("""
+          CREATE TABLE dash_redemption_tier (
+            store_key INTEGER, iso_year INTEGER, iso_week INTEGER,
+            tier VARCHAR, brand VARCHAR, redemptions BIGINT,
+            redeem_value DOUBLE, customers BIGINT)
+        """)
+
 
     # --- promo lab: privacy-safe churn aggregates --------------------------
     # Per-customer behaviour reduced to counts per store x category / brand.
@@ -1120,6 +1194,7 @@ def build(src: str, dest: str) -> dict:
     # discount_amt is easy to leave half-populated; say so
     # before publishing tables derived from it.
     assert_discount_sane(con, table='src.fact_basket')
+    assert_discount_current(con, table='src.fact_basket')
     build_newret(con)
     # --- event attendees: 90-day return, new vs regular ---
     build_event_return(con)

@@ -880,17 +880,31 @@ with t_charts:
                     marker_color=ACCENT, opacity=.75)
         fig.add_scatter(x=wk.wk_date, y=wk.baskets, name="Baskets", yaxis="y2",
                         line=dict(color=MUTED, width=2))
+        # fixedrange on both y-axes: y2 overlays y, and plotly rescales
+        # them independently, so any zoom or pan detaches the Baskets line
+        # from the bars it is drawn against.
         fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
+                          xaxis=dict(fixedrange=True),
                           yaxis=dict(title="Net $", tickformat="$~s",
-                                     gridcolor="rgba(0,0,0,.07)"),
+                                     gridcolor="rgba(0,0,0,.07)",
+                                     fixedrange=True),
                           yaxis2=dict(title="Baskets", overlaying="y",
                                       side="right", showgrid=False,
-                                      tickformat=",.0f"),
+                                      tickformat=",.0f", fixedrange=True),
                           hovermode="x unified",
                           legend=dict(orientation="h", y=1.12, x=0,
                                       title_text=""),
                           plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True, key="pc1")
+        # Toolbar stays, minus every button that changes an axis range:
+        # with fixedrange set they would do nothing, and a dead button is
+        # worse than no button. scrollZoom off so the wheel scrolls the
+        # page rather than the plot.
+        st.plotly_chart(fig, use_container_width=True, key="pc1",
+                        config={"scrollZoom": False, "displaylogo": False,
+                                "modeBarButtonsToRemove": [
+                                    "zoom2d", "pan2d", "select2d", "lasso2d",
+                                    "zoomIn2d", "zoomOut2d", "autoScale2d",
+                                    "resetScale2d"]})
 
     with R:
         st.markdown("##### Category share of revenue")

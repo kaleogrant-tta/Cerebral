@@ -881,7 +881,7 @@ with t_charts:
         fig.add_scatter(x=wk.wk_date, y=wk.baskets, name="Baskets", yaxis="y2",
                         line=dict(color=MUTED, width=2))
         fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
-                          yaxis=dict(title="Net $", tickformat="$,.0s",
+                          yaxis=dict(title="Net $", tickformat="$~s",
                                      gridcolor="rgba(0,0,0,.07)"),
                           yaxis2=dict(title="Baskets", overlaying="y",
                                       side="right", showgrid=False,
@@ -2688,7 +2688,7 @@ with t_redeem:
             fig.add_scatter(x=red.wk_date, y=red.redeem_rate*100, name="Redemption rate %",
                             yaxis="y2", line=dict(color=WARN, width=2))
             fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
-                              yaxis=dict(title="Redemption $", tickformat="$,.0s",
+                              yaxis=dict(title="Redemption $", tickformat="$~s",
                                          gridcolor="rgba(0,0,0,.07)"),
                               yaxis2=dict(title="Rate %", overlaying="y", side="right",
                                           showgrid=False, tickformat=".1f",
@@ -2717,7 +2717,7 @@ with t_redeem:
                                   coloraxis_colorbar=dict(title="Rate %",
                                                           ticksuffix="%"),
                                   plot_bgcolor="rgba(0,0,0,0)")
-                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
                 st.plotly_chart(fig, use_container_width=True, key="pc9")
                 st.markdown('<p class="note"><b>Bar height</b> = total redemption '
                             'dollars. <b>Color</b> = redemption rate (darker green '
@@ -2790,7 +2790,7 @@ with t_redeem:
                                       xaxis_title="Redemption $",
                                       yaxis_title="",
                                       xaxis=dict(gridcolor="rgba(0,0,0,.07)",
-                                                 tickformat="$,.0s"),
+                                                 tickformat="$~s"),
                                       plot_bgcolor="rgba(0,0,0,0)")
                     st.plotly_chart(fig, use_container_width=True,
                                     key="pc_channel")
@@ -3074,7 +3074,7 @@ with t_redeem:
                               margin=dict(l=0, r=0, t=10, b=0),
                               yaxis=dict(autorange="reversed"),
                               plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
             st.plotly_chart(fig, use_container_width=True, key="pc17")
 
         # --- Off-menu picks: what redeemers chose instead -------------------
@@ -3293,7 +3293,7 @@ with t_projections:
                         line=dict(color=WARN, width=2, dash="dash"),
                         marker=dict(size=5))
         fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0),
-                          yaxis=dict(title="Net $", tickformat="$,.0s",
+                          yaxis=dict(title="Net $", tickformat="$~s",
                                      gridcolor="rgba(0,0,0,.07)"),
                           xaxis_title="", hovermode="x unified",
                           legend=dict(orientation="h", y=1.12, x=0,
@@ -3356,7 +3356,7 @@ with t_projections:
                             name="Projected 13 wks", marker_color=WARN,
                             opacity=.7)
                 fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0),
-                                  yaxis=dict(title="Net $", tickformat="$,.0s",
+                                  yaxis=dict(title="Net $", tickformat="$~s",
                                              gridcolor="rgba(0,0,0,.07)"),
                                   xaxis_title="", barmode="group",
                                   hovermode="x unified",
@@ -3977,7 +3977,7 @@ def render_takeovers():
                       annotation_position="top right")
     fig.update_layout(height=340, margin=dict(l=0, r=0, t=20, b=0),
                       plot_bgcolor="rgba(0,0,0,0)", showlegend=False)
-    fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+    fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
     st.plotly_chart(fig, use_container_width=True, key="tk_chart")
 
     # --- top products during the window (local detail only) ------------------
@@ -4292,3 +4292,4 @@ with t_bei:
     render_bei(q=q, keys=keys, stores=STORES,
                heading=heading, table_exists=table_exists,
                accent=ACCENT, series=SERIES)
+

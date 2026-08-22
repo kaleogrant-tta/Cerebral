@@ -272,7 +272,7 @@ def _render_cost(q, where, keep, H, accent, pal, table_exists):
         barmode="stack", height=340,
         margin=dict(l=0, r=0, t=10, b=0),
         plot_bgcolor="rgba(0,0,0,0)",
-        yaxis=dict(title="Discount $", tickformat="$,.0s",
+        yaxis=dict(title="Discount $", tickformat="$~s",
                    gridcolor="rgba(0,0,0,.07)"),
         yaxis2=dict(title="Rate %", overlaying="y", side="right",
                     showgrid=False),
@@ -401,7 +401,7 @@ def _render_cost(q, where, keep, H, accent, pal, table_exists):
             fig.update_layout(height=max(300, 32 * len(top)),
                               margin=dict(l=0, r=0, t=10, b=0),
                               plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
             st.plotly_chart(fig, use_container_width=True, key="disc_brand")
 
 
@@ -1084,7 +1084,7 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
                           margin=dict(l=0, r=0, t=10, b=0),
                           plot_bgcolor="rgba(0,0,0,0)",
                           legend=dict(orientation="h", y=-.12))
-        fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+        fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
         st.plotly_chart(fig, use_container_width=True, key="disc_offers")
 
         # SKU drill-down for one offer, so a campaign can be opened up.
@@ -1235,7 +1235,7 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
             fig.update_layout(height=max(260, 34 * len(pc)),
                               margin=dict(l=0, r=0, t=10, b=0),
                               plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
             st.plotly_chart(fig, use_container_width=True, key="disc_cat")
 
     # --- 5. loyalty offer x tier ------------------------------------------
@@ -1281,5 +1281,6 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
                          labels={"spend": "Net sales $", "tier": ""})
             fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                               plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0s")
+            fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
             st.plotly_chart(fig, use_container_width=True, key="disc_tier")
+

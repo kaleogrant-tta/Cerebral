@@ -2701,17 +2701,27 @@ with t_redeem:
                         marker_color=ACCENT, opacity=.75)
             fig.add_scatter(x=red.wk_date, y=red.redeem_rate*100, name="Redemption rate %",
                             yaxis="y2", line=dict(color=WARN, width=2))
+            # fixedrange on both y-axes: y2 overlays y and plotly rescales
+            # them independently, so a zoom or pan detaches the rate line
+            # from the bars.
             fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
+                              xaxis=dict(fixedrange=True),
                               yaxis=dict(title="Redemption $", tickformat="$~s",
-                                         gridcolor="rgba(0,0,0,.07)"),
+                                         gridcolor="rgba(0,0,0,.07)",
+                                         fixedrange=True),
                               yaxis2=dict(title="Rate %", overlaying="y", side="right",
                                           showgrid=False, tickformat=".1f",
-                                          ticksuffix="%"),
+                                          ticksuffix="%", fixedrange=True),
                               hovermode="x unified",
                               legend=dict(orientation="h", y=1.12, x=0,
                                           title_text=""),
                               plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True, key="pc8")
+            st.plotly_chart(fig, use_container_width=True, key="pc8",
+                            config={"scrollZoom": False, "displaylogo": False,
+                                    "modeBarButtonsToRemove": [
+                                        "zoom2d", "pan2d", "select2d",
+                                        "lasso2d", "zoomIn2d", "zoomOut2d",
+                                        "autoScale2d", "resetScale2d"]})
 
         with R:
             st.markdown("##### Redemption by store")

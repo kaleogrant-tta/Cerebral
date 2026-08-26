@@ -68,12 +68,18 @@ def usable_name(name):
 
 def _find(globs):
     roots = [".", os.path.expanduser("~/Downloads"), os.path.expanduser("~")]
-    hits = []
-    for r in roots:
-        for g in globs:
+    # Globs are tried IN ORDER, and size only breaks ties WITHIN a glob.
+    # Pooling every glob and sorting by size alone let a 2.2 GB "-sl" sales
+    # export outrank the 241 MB persona roster, because both match the
+    # catch-all "2260-*.csv". The specific patterns must win outright.
+    for g in globs:
+        hits = []
+        for r in roots:
             hits.extend(glob.glob(os.path.join(r, "**", g), recursive=True))
-    hits = sorted(set(hits), key=os.path.getsize, reverse=True)
-    return hits[0] if hits else None
+        hits = sorted(set(hits), key=os.path.getsize, reverse=True)
+        if hits:
+            return hits[0]
+    return None
 
 
 def read_personas(path):

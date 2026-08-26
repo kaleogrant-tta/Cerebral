@@ -58,3 +58,12 @@ dbg_publish.py
 week_gaps.py
 wq.py
 *.log
+*.duckdb
+*.duckdb.bak*
+*.duckdb.pre-boundary
+*.bak
+rebuild_*.log
+.rebuild_state.json
+desktop.ini
+secrets.toml
+.streamlit/secrets.toml

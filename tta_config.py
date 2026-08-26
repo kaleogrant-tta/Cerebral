@@ -193,6 +193,11 @@ THRESHOLDS = {
     "receipt_join_rate":   0.995,   # receipts matched to POS register
     "unmapped_category":   0,       # raw category strings not in CATEGORY_MAP
     "unknown_channel":     0,       # registers the rules could not classify
+    # A receipt with no POS transaction and at least this many lines is a
+    # bulk adjustment -- an inventory movement, transfer or audit -- not a
+    # lost sale. Informational only: reported in the validation block,
+    # never a failure.
+    "bulk_event_min_lines": 20,
     # Reconciliation is banded. Dispensations and the Breakdown are produced by
     # different Dutchie subsystems and never agree perfectly: the Breakdown runs
     # slightly high (period-boundary and void handling differ). Small drift is

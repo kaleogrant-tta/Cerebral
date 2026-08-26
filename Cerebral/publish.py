@@ -36,6 +36,13 @@ from publish_group_lift import build_group_lift
 
 SLIM = "cerebral_dash.duckdb"
 
+# Must match tta_etl.WEEK_BOUNDARY_HOUR. The business week runs Monday 01:00
+# -> Monday 01:00, so anywhere this file buckets weeks itself (rather than
+# reading the iso_year/iso_week columns the ETL already wrote) it has to shift
+# the clock the same way, or the two disagree for orders in the 00:00-01:00
+# hour on a Monday.
+WEEK_BOUNDARY_HOUR = 1
+
 # Products with less than this in lifetime net sales are left out of the
 # week-level product table. Without a floor that table is every SKU the chain
 # has ever sold times every week times every store, which is most of the file
@@ -141,28 +148,35 @@ def assert_discount_current(con, table: str = "src.fact_basket",
     so a few recent weeks with no discount barely move it. This looks only
     at recent complete weeks and tests the one thing that cannot happen for
     a real reason: loyalty redeemed with no discount recorded against it.
+
+    Grouped PER STORE. Chain-wide, a gap confined to one store is diluted by
+    the other three and never trips: Soho is ~15% of chain volume, so it
+    could lose its entire discount feed and the chain total would still
+    exceed chain loyalty.
     """
     rows = con.execute(f"""
         WITH wk AS (
-            SELECT date_trunc('week', txn_ts)::DATE AS wk,
+            SELECT date_trunc('week',
+                   txn_ts - INTERVAL {WEEK_BOUNDARY_HOUR} HOUR)::DATE AS wk,
+                   store_key,
                    COUNT(DISTINCT txn_ts::DATE)              AS days,
                    SUM(COALESCE(discount_amt, 0))            AS discount,
                    SUM(COALESCE(loyalty_redeem, 0))          AS loyalty
             FROM {table}
             WHERE NOT is_return
-            GROUP BY 1
+            GROUP BY 1, 2
         )
-        SELECT wk, discount, loyalty FROM wk
+        SELECT wk, store_key, discount, loyalty FROM wk
         WHERE days = 7 AND loyalty > 0 AND discount < loyalty
           AND wk >= (SELECT MAX(wk) FROM wk) - INTERVAL {weeks} WEEK
-        ORDER BY wk
+        ORDER BY wk, store_key
     """).fetchall()
 
     if not rows:
         return
 
-    lines = [f"    {w}  discount ${d:,.0f} < loyalty ${l:,.0f}"
-             for w, d, l in rows]
+    lines = [f"    {w}  store {sk}  discount ${d:,.0f} < loyalty ${l:,.0f}"
+             for w, sk, d, l in rows]
     raise RuntimeError(
         "discount backfill is behind: every loyalty redemption is also a "
         "discount, so these weeks cannot be right.\n"
@@ -468,6 +482,33 @@ def build(src: str, dest: str) -> dict:
           AND category ILIKE 'Accessor%'
           AND product IS NOT NULL
         GROUP BY 1,2,3,4
+    """)
+
+    # --- top products per category x store x week --------------------------
+    # dash_acc_product_week above covers Accessories only, so nothing in the
+    # published file could answer "what were Soho's top five Flower products
+    # last week". The GM scorecard needs exactly that for five categories,
+    # which is 75 of its 85 auto-fillable fields.
+    #
+    # Ranked and capped at 10 per category-store-week rather than published
+    # whole: the full product grain is ~19x larger and nothing reads past the
+    # top few. rank_in_cat is kept so a consumer can take the top N it wants
+    # without re-ranking.
+    con.execute("""
+        CREATE TABLE dash_product_week AS
+        SELECT * FROM (
+            SELECT store_key, iso_year, iso_week, category, brand, product,
+                   SUM(units)                AS units,
+                   SUM(net_sales)            AS net,
+                   SUM(gross_margin)         AS gm,
+                   COUNT(DISTINCT basket_id) AS baskets,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY store_key, iso_year, iso_week, category
+                       ORDER BY SUM(net_sales) DESC)  AS rank_in_cat
+            FROM fl
+            WHERE NOT is_return AND product IS NOT NULL
+            GROUP BY 1,2,3,4,5,6
+        ) WHERE rank_in_cat <= 10
     """)
 
     # --- brand x week ------------------------------------------------------

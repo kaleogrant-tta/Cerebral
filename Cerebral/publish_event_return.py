@@ -234,6 +234,12 @@ def build_event_return(con, map_path: str | Path = MAP_FILE) -> None:
                 WHERE NOT mature) AS events_immature
     """)
 
+    # These views reference src, and publish detaches src before the leak
+    # check scans every object in the database. Leaving them behind makes
+    # that scan fail on a view it cannot resolve.
+    for v in ("ev_att", "ev_first", "ev_map"):
+        con.execute(f"DROP VIEW IF EXISTS {v}")
+
     n = con.execute("SELECT COUNT(*) FROM dash_event_return").fetchone()[0]
     ev_n = con.execute(
         "SELECT COUNT(DISTINCT event_id) FROM dash_event_return").fetchone()[0]

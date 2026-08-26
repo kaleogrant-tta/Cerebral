@@ -16,6 +16,9 @@ Design notes
   the product-name join measured 100% in 2024, 2025 and 2026.
 * Validation runs on every load and FAILS LOUD. A silent bad load is far more
   expensive than a refused one.
+* The business week runs Monday 01:00 -> Monday 01:00 (WEEK_BOUNDARY_HOUR).
+  iso_year/iso_week honour that; date_key and day_of_week stay on true local
+  time because Dutchie attributes days by calendar date. See the constant.
 """
 
 from __future__ import annotations
@@ -121,6 +124,21 @@ def strip_totals(df: pd.DataFrame) -> pd.DataFrame:
             out = out[out[col].astype(str).str.strip() != "Total"]
     return out
 
+
+# The business week runs Monday 01:00 -> Monday 01:00, matching the window
+# Dutchie's closing report uses. An order rung at 00:20 on a Monday belongs to
+# the week that is closing, not the one opening, so the week is derived from a
+# timestamp shifted back by this many hours.
+#
+# Days are NOT shifted. Dutchie attributes each order to its calendar date
+# regardless of the hour: on the week of 2026-08-17, DTBK had six orders
+# between 00:00 and 00:20 and every one was booked to its own calendar day,
+# with daily gross matching PosDate exactly. Shifting date_key would break
+# that tie-out. Only the week boundary differs, and only for orders in the
+# 00:00-01:00 hour on a Monday.
+#
+# Set to 0 to revert to midnight-to-midnight weeks.
+WEEK_BOUNDARY_HOUR = 1
 
 STOPWORDS = {"travel", "club", "tta", "the", "and", "for", "with", "free",
              "off", "deal", "offer", "promo", "special", "pack", "pk",
@@ -574,7 +592,9 @@ class Pipeline:
         fl = fl[fl["channel"].notna() & (fl["channel"] != "EXCLUDE")].copy()
 
         ts = pd.to_datetime(fl["ReceiptDate"])
-        iso = ts.dt.isocalendar()
+        # Week comes off the shifted clock, day off the real one. See
+        # WEEK_BOUNDARY_HOUR for why the two differ.
+        iso = (ts - pd.Timedelta(hours=WEEK_BOUNDARY_HOUR)).dt.isocalendar()
 
         # AvgPricePerUnit is NET of discount (validated: derived revenue matched
         # breakdown NetSales to 0.03% on June 2026). Line-level values are a

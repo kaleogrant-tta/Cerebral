@@ -17,6 +17,21 @@ Retention deliberately ignores the weeks slider. A customer's repeat rate is
 a property of their whole history, not of a 26-week window: slice it and a
 customer whose second order falls outside the window reads as never having
 returned. The store filter DOES apply, on the store of the FIRST order.
+
+IDENTITY SCOPE
+--------------
+publish_retention now writes every table twice, tagged with id_scope, so
+EVERY query here must filter on it or the two populations stack and each
+figure doubles.
+
+    resolved  customers with a confirmed identity only
+    bounded   plus name-hash keys carrying exactly one basket
+
+A name hash can collapse several people into one record, which invents
+repeat visits - hence 'resolved'. But a hash with ONE basket cannot fake a
+repeat, and those customers are real one-timers. Dropping them removes only
+non-repeaters from the denominator, so 'resolved' overstates repeat rate.
+'bounded' is the lower bound and the default; the truth is between them.
 """
 
 from __future__ import annotations
@@ -91,6 +106,32 @@ def _derive(df):
     return d
 
 
+SCOPE_LABELS = {
+    "bounded": "Include one-time unmatched customers",
+    "resolved": "Confirmed identities only",
+}
+
+
+def _scopes(q):
+    """Which id_scope values the published file carries.
+
+    Returns [] for a file built before scopes existed, in which case every
+    query below runs unfiltered exactly as it used to.
+    """
+    try:
+        df = q("SELECT DISTINCT id_scope FROM dash_retention_meta")
+        return [x for x in df.id_scope.tolist() if x]
+    except Exception:
+        return []
+
+
+def _where(scope, extra=None):
+    """Scope predicate, plus an optional extra condition."""
+    parts = ([f"id_scope = '{scope}'"] if scope else []) + \
+            ([extra] if extra else [])
+    return (" WHERE " + " AND ".join(parts)) if parts else ""
+
+
 def render_retention(q, keys, stores, heading=None, table_exists=None,
                      howto=None):
     """Render the Retention tab. See module docstring for wiring."""
@@ -105,26 +146,61 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
     if howto:
         howto("retention")
 
-    # ---- scope banner --------------------------------------------------
-    meta = q("SELECT * FROM dash_retention_meta")
+    # ---- identity scope -------------------------------------------------
+    # Two populations are published. Which one is on screen changes every
+    # number below, so it is a visible control rather than a silent default.
+    scopes = _scopes(q)
+    scope = None
+    if len(scopes) > 1:
+        order = [s_ for s_ in ("bounded", "resolved") if s_ in scopes]
+        order += [s_ for s_ in scopes if s_ not in order]
+        scope = st.radio(
+            "Which customers to count",
+            order,
+            format_func=lambda s_: SCOPE_LABELS.get(s_, s_),
+            horizontal=True, key="ret_scope",
+        )
+    elif scopes:
+        scope = scopes[0]
+
+    meta = q(f"SELECT * FROM dash_retention_meta{_where(scope)}")
     if not meta.empty:
         m = meta.iloc[0]
         share = m.customers / max(m.all_customers, 1)
-        st.caption(
-            f"Based on {int(m.customers):,} customers with a confirmed "
-            f"identity ({share * 100:.0f}% of all transacting customers), "
-            f"{m.cov_start} to {m.cov_end}. Customers matched only on name "
-            f"are excluded — common names collapse several people into one "
-            f"record and would invent repeat visits."
+        base = (f"Based on {int(m.customers):,} customers "
+                f"({share * 100:.0f}% of all transacting customers), "
+                f"{m.cov_start} to {m.cov_end}. ")
+        excl = m.get("excluded_multi_hash")
+        tail = (
+            "Customers matched only on name are excluded — common names "
+            "collapse several people into one record and would invent "
+            "repeat visits."
+            if scope == "resolved" else
+            "Includes name-matched customers with a single purchase: one "
+            "basket cannot invent a repeat visit, and leaving them out drops "
+            "genuine one-timers from the denominator, which flatters the "
+            "repeat rate."
         )
+        if excl is not None and not pd.isna(excl):
+            tail += (f" Still excluded: {int(excl):,} name-matched records "
+                     f"with several purchases, which may be more than one "
+                     f"person.")
+        st.caption(base + tail)
+        if len(scopes) > 1:
+            st.caption(
+                "The true figures sit between the two views: one omits real "
+                "one-time customers, the other may merge distinct people. "
+                "Neither is wrong — compare like with like over time."
+            )
 
     if all_stores:
-        summ = _derive(_order(q("SELECT * FROM dash_retention_summary")))
+        summ = _derive(_order(q(
+            f"SELECT * FROM dash_retention_summary{_where(scope)}")))
     else:
         # Rebuild the headline from the cohort table for the chosen stores.
         ks = ",".join(str(k) for k in keys)
-        coh = q(f"SELECT * FROM dash_retention_cohort "
-                f"WHERE first_store IN ({ks})")
+        coh = q("SELECT * FROM dash_retention_cohort"
+                + _where(scope, f"first_store IN ({ks})"))
         if coh.empty:
             st.info("No retention data for the selected stores.")
             return
@@ -214,7 +290,8 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
 
     # ---- first three baskets -------------------------------------------
     if not table_exists or table_exists("dash_retention_sequence"):
-        seq = q("SELECT * FROM dash_retention_sequence ORDER BY seq")
+        seq = q(f"SELECT * FROM dash_retention_sequence"
+                f"{_where(scope)} ORDER BY seq")
         if not seq.empty:
             H("The first three baskets")
             base = (seq[seq.seq == 1].set_index("first_channel")
@@ -273,7 +350,8 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
 
     # ---- rolling six-month visit frequency ------------------------------
     if not table_exists or table_exists("dash_retention_rolling"):
-        roll = q("SELECT * FROM dash_retention_rolling ORDER BY month")
+        roll = q(f"SELECT * FROM dash_retention_rolling"
+                 f"{_where(scope)} ORDER BY month")
         if not roll.empty:
             H("Visits per customer, rolling six months")
             roll["month"] = pd.to_datetime(roll.month)
@@ -350,7 +428,8 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
 
     # ---- gap distribution ----------------------------------------------
     if not table_exists or table_exists("dash_retention_gaps"):
-        gp = q("SELECT * FROM dash_retention_gaps ORDER BY bucket_order")
+        gp = q(f"SELECT * FROM dash_retention_gaps"
+               f"{_where(scope)} ORDER BY bucket_order")
         if not gp.empty:
             H("When customers come back")
             gp["share"] = gp.gaps / gp.groupby("first_channel").gaps \
@@ -372,7 +451,7 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
     if not table_exists or table_exists("dash_retention_cohort"):
         where = "first_store = 0" if all_stores else \
             "first_store IN (%s)" % ",".join(str(k) for k in keys)
-        coh = q(f"SELECT * FROM dash_retention_cohort WHERE {where}")
+        coh = q("SELECT * FROM dash_retention_cohort" + _where(scope, where))
         if not coh.empty:
             H("By acquisition cohort")
             st.caption(

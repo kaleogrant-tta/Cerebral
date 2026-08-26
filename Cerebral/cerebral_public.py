@@ -44,6 +44,7 @@ from events_tab import render_events
 from audiences_tab import render_audiences
 from discounting_tab import render_discounting
 from bei_tab import render_bei
+from brand_roi import render_brand_roi
 
 
 # --- rewards menu, for the off-menu picks panel ------------------------
@@ -3548,7 +3549,17 @@ def render_promo_lab():
                  "Promo cost $": "${:,.0f}", "Net gain $": "${:,.0f}",
                  "ROI %": "{:,.0f}%", "Real margin": "{:.0%}"}
 
-    tab1, tab2, tab3 = st.tabs(["Churn Map (Categories)", "Store Opportunities", "Brand Promos"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Churn Map (Categories)", "Store Opportunities", "Brand Promos",
+         "Brand Discount ROI"])
+
+    # Declared here, rendered here. Tab ORDER comes from the list above, so
+    # this block sitting ahead of `with tab1:` costs nothing and keeps the
+    # three original blocks untouched.
+    with tab4:
+        render_brand_roi(q=q, keys=keys, stores=STORES,
+                         heading=None, table_exists=table_exists,
+                         accent=ACCENT, series=SERIES)
 
     with tab1:
         st.markdown('<p class="note"><b>What you are looking at.</b> Each row is a product category across all stores. <b>Churn %</b> is the share of that category customers who have not come back within the lapse window. <b>Real margin</b> comes straight from your sales data, not a guess. <b>Targetable</b> is how many lapsed customers you could actually send an offer to. The greener the Net gain column, the more sense a discount makes there.</p>', unsafe_allow_html=True)

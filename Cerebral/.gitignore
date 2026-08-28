@@ -2,16 +2,11 @@
 *.json
 .env
 *.duckdb
-
-
 history/
 inbox/
-
 __pycache__/
 *.pyc
-
 # --- PII and working files ---
-*.duckdb
 *.duckdb.wal
 *.bak
 *.joinfix-*
@@ -27,20 +22,12 @@ probe*_output.txt
 2260-*.csv
 persona_tiers.parquet
 *Discount*Group*Audit*.xlsx
-__pycache__/
-
 *-sl.csv
 data/inbox/
 data/out/
-
 *.bak-*
-
-
 # --- database backups (250MB+, never commit)
-*.duckdb
 *.duckdb.bak-*
-*.bak
-
 # --- scratch: probes, one-shot patchers, wiring scripts
 check_*.py
 diag_*.py
@@ -58,12 +45,11 @@ dbg_publish.py
 week_gaps.py
 wq.py
 *.log
-*.duckdb
 *.duckdb.bak*
 *.duckdb.pre-boundary
-*.bak
-rebuild_*.log
 .rebuild_state.json
 desktop.ini
 secrets.toml
 .streamlit/secrets.toml
+*.duckdb.*
+*.pre-boundary

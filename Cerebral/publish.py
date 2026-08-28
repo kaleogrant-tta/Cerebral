@@ -1284,8 +1284,12 @@ def build(src: str, dest: str) -> dict:
     stats = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for (t,) in con.execute("SHOW TABLES").fetchall()}
 
+    # dash_product_week is required rather than optional because the GM
+    # scorecard prefills 75 of its fields from it. If a build silently drops
+    # it the form falls back to manual and nobody finds out for a week.
     required = {"dash_meta", "dash_category_week", "dash_basket_week",
-                "dash_brand_week", "dash_brand_product_week"}
+                "dash_brand_week", "dash_brand_product_week",
+                "dash_product_week"}
     missing = required - set(stats)
     con.close()
     if missing:

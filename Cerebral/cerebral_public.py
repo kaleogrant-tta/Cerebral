@@ -45,6 +45,9 @@ from audiences_tab import render_audiences
 from discounting_tab import render_discounting
 from bei_tab import render_bei
 from brand_roi import render_brand_roi
+from channel_promo import render_channel_promo
+import scorecard_tab
+from scorecard_prefill import fetch_prefill
 
 
 # --- rewards menu, for the off-menu picks panel ------------------------
@@ -814,11 +817,11 @@ st.caption(f"Category analytics · The Travel Agency · {label}")
 
 t_charts, t_insights, t_brands, t_bei, t_acc, t_redeem, t_discount, \
     t_loyalty, t_retention, t_events, t_audiences, \
-    t_takeover, t_projections, t_promo, t_gloss = st.tabs(
+    t_takeover, t_projections, t_promo, t_scorecard, t_gloss = st.tabs(
     ["Charts", "Insights", "Brands", "Brand Efficiency", "Accessories",
      "Redemptions", "Discounting", "Loyalty", "Retention", "Events",
      "Audiences", "Takeovers", "Projections", "Promo Lab",
-     "What the terms mean"])
+     "GM Scorecard", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
 with t_charts:
@@ -3549,9 +3552,17 @@ def render_promo_lab():
                  "Promo cost $": "${:,.0f}", "Net gain $": "${:,.0f}",
                  "ROI %": "{:,.0f}%", "Real margin": "{:.0%}"}
 
-    tab1, tab2, tab3, tab4 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         ["Churn Map (Categories)", "Store Opportunities", "Brand Promos",
-         "Brand Discount ROI"])
+         "Brand Discount ROI", "Channel & Day Promo"])
+
+    # Declared here, rendered here. Tab ORDER comes from the list above, so
+    # this block sitting ahead of `with tab1:` costs nothing and leaves the
+    # existing blocks alone.
+    with tab5:
+        render_channel_promo(q=q, keys=keys, stores=STORES,
+                             heading=None, table_exists=table_exists,
+                             accent=ACCENT, series=SERIES)
 
     # Declared here, rendered here. Tab ORDER comes from the list above, so
     # this block sitting ahead of `with tab1:` costs nothing and keeps the
@@ -4327,4 +4338,51 @@ with t_bei:
     render_bei(q=q, keys=keys, stores=STORES,
                heading=heading, table_exists=table_exists,
                accent=ACCENT, series=SERIES)
+
+
+# ------------------------------------------------------------ GM scorecard
+# The one WRITING tab. Submissions cannot live in cerebral_dash.duckdb:
+# publish.py replaces that file wholesale on every refresh, the app opens it
+# read_only, and on Cloud it is a re-downloaded copy in the temp directory.
+# They go to their own file, and prefill reads the published one separately.
+SCORECARD_DB = str(Path(__file__).resolve().parent / "cerebral_scorecard.duckdb")
+
+
+@st.cache_resource
+def scorecard_con():
+    """Write connection to the submissions file, opened once per process.
+
+    DuckDB allows one writer per file. That holds fine for a single local
+    session; two GMs on separate Cloud sessions would contend, which is why
+    this is not a multi-store deployment yet.
+    """
+    con = duckdb.connect(SCORECARD_DB)
+    scorecard_tab.ensure_schema(con)
+    return con
+
+
+def scorecard_prefill(_con, store, week_start):
+    """Prefill from the published file, not the submissions file.
+
+    render() hands its own write connection to prefill_fn; that connection
+    knows nothing about dash_* tables, so this ignores it and opens the
+    published copy read-only for the duration of the lookup.
+    """
+    path = load_db()
+    if not path:
+        return {}
+    dash = duckdb.connect(path, read_only=True)
+    try:
+        return fetch_prefill(dash, store, week_start)
+    finally:
+        dash.close()
+
+
+with t_scorecard:
+    try:
+        scorecard_tab.render(scorecard_con(), user_email=None,
+                             prefill_fn=scorecard_prefill)
+    except Exception as exc:
+        st.error(f"The scorecard tab failed to load — {type(exc).__name__}: {exc}")
+        st.caption("Every other tab is read-only and unaffected.")
 

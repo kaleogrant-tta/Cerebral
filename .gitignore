@@ -26,3 +26,11 @@ __pycache__/
 .streamlit/secrets.toml
 **/secrets.toml
 
+
+# --- warehouse snapshots and scratch output ---
+*.duckdb.*
+*.pre-boundary
+*.log
+wyld_out/
+bei_output.csv
+breadth_*.csv

@@ -125,7 +125,7 @@ def publish(src: Path, mapping_path: Path, dash: Path) -> dict:
         return {k: len(v) for k, v in snap.items()}
 
     cohorts = am.build(src, mapping_path)
-    campaigns = am.rollup_by_campaign(cohorts, am.load_campaigns(mapping_path))
+    campaigns = am.rollup_by_campaign(cohorts, am.load_campaigns(mapping_path, src))
 
     con = duckdb.connect(str(src), read_only=True)
     mapping = am.load_mapping(mapping_path)

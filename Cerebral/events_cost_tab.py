@@ -196,6 +196,16 @@ def render_events_cost(q, H, table_exists=None, howto=None):
                 "same events",
                 help="Half of controlled events did better than this.")
 
+    if "realloc_delta" in d.columns:
+        moved = d[d.realloc_delta.fillna(0) != 0]
+        if not moved.empty:
+            st.caption(
+                f"**Shared costs re-split:** {len(moved)} events carry a "
+                f"larger share of a shared budget line than marketing's "
+                f"export shows, because a cancelled or declined event that "
+                f"was attached to the same line has been removed from the "
+                f"split. ${moved.realloc_delta.sum():,.0f} in total; the "
+                f"export's figure is kept alongside for audit.")
     st.caption(
         "**$ / new customer** here is net cost divided by the new customers "
         "the lift model attributes to the event day - people whose first "
@@ -308,6 +318,14 @@ retainers. Across the calendar that was about $477K of phantom cost. The
 corrected figure splits each shared line evenly across the events it
 covers, adds the event's own direct costs, and subtracts anything a brand
 partner reimbursed.
+
+**Cancelled events give their share back.** Marketing's export splits a
+shared line across every event attached to it, including ones that were
+cancelled or declined. Here the split is redone across the events that
+were not excluded, so a flowers order shared with ten events, one of
+which was cancelled, is carried by the nine that ran. Planned events
+keep their share; they will happen. The export's own figure is kept in
+the published file alongside the corrected one.
 
 **Even split is a convention, not a fact.** A monthly retainer split
 across four dinners charges each dinner the same whether it was a

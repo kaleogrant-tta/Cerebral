@@ -36,6 +36,9 @@ from pathlib import Path
 
 import pandas as pd
 
+# An Airtable record ID embedded in the audience name maps directly.
+REC_ID = re.compile(r"\b(rec[A-Za-z0-9]{14})\b")
+
 # dim_event.store_key, decoded from the event names it carries
 STORE_KEY = {"DTBK": 1, "FIFTH": 2, "SOHO": 3, "USQ": 4}
 CHAIN_KEY = 0
@@ -69,6 +72,37 @@ def build(workbook: Path, dim_event: Path, out: Path) -> pd.DataFrame:
         aid = str(r.audience_id).strip()
         if not aid or aid == "nan":
             continue
+        # Record ID in the audience name: exact, no scoring, no date needed.
+        # Purchase-defined audiences stay excluded regardless.
+        rid = REC_ID.search(f"{aid} {r.audience_name}")
+        if rid and str(getattr(r, "purchase_defined", "")).strip().upper() != "YES":
+            hit = de[de["airtable_record_id"] == rid.group(1)] \
+                if "airtable_record_id" in de.columns else de.iloc[0:0]
+            if not hit.empty:
+                store = str(getattr(r, "store", "") or "").strip()
+                pick = hit
+                if store in STORE_KEY:
+                    pick = hit[hit.store_key == STORE_KEY[store]]
+                elif store == "Multi":
+                    pick = hit[hit.store_key == CHAIN_KEY]
+                best = (pick if not pick.empty else hit).iloc[0]
+                rows.append({
+                    "audience_id": aid, "audience_name": r.audience_name,
+                    "event_id": best.event_id,
+                    "event_date": str(best.event_date),
+                    "resolved_name": best.event_name,
+                    "source": "record id",
+                    "note": rid.group(1),
+                })
+                continue
+            rows.append({
+                "audience_id": aid, "audience_name": r.audience_name,
+                "event_id": "", "event_date": "", "resolved_name": "",
+                "source": "record id not in dim_event — VERIFY",
+                "note": rid.group(1),
+            })
+            continue
+
         excluded = str(getattr(r, "purchase_defined", "")).strip().upper() == "YES"
         if pd.isna(r.event_date) or excluded:
             rows.append({

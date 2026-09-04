@@ -336,21 +336,75 @@ def matched_control(
     ).df()
 
 
-def load_campaigns(path: Path) -> pd.DataFrame:
-    """Campaign budgets. gross_cost / net_cost_to_tta are Excel formulas, so the
-    workbook must have been opened and saved (or recalculated) at least once for
-    their cached values to be readable here."""
-    df = pd.read_excel(path, sheet_name="Campaigns")
-    for col in ("gross_cost", "net_cost_to_tta"):
-        if col in df:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    missing = df[df["net_cost_to_tta"].isna() & df["cost_2025"].notna()]
-    if len(missing):
-        log.warning(
-            "%d campaigns have a budget but no cost_year_to_use set: %s",
-            len(missing), ", ".join(missing["campaign"].astype(str)),
-        )
-    return df
+def load_campaigns(path: Path, db_path: Path | None = None,
+                   map_csv: Path | str = "event_audience_map.csv") -> pd.DataFrame:
+    """Campaign cost, derived from marketing's per-event figures.
+
+    Sums net_tta_cost (and gross_cost) from dim_event across the events each
+    campaign's audiences map to. Chain: workbook Mapping sheet `campaign`
+    -> audience_id -> event_audience_map.csv -> airtable_record_id ->
+    dim_event. Each event is counted once per campaign however many
+    audiences point at it.
+
+    Replaces the hand-typed Campaigns sheet, which was the last place a
+    second cost figure lived. Returns the same columns rollup_by_campaign
+    expects: campaign, gross_cost, net_cost_to_tta -- plus cost_events and
+    unrecorded_events so coverage is visible. A campaign whose events all
+    have unrecorded cost gets NULL, never 0.
+    """
+    mp = pd.read_excel(path, sheet_name="Mapping", dtype={"audience_id": str})
+    mp["campaign"] = mp.get("campaign", "").fillna("").astype(str).str.strip()
+    mp = mp[mp["campaign"] != ""][["audience_id", "campaign"]]
+    mp["audience_id"] = mp["audience_id"].astype(str).str.strip()
+
+    empty = pd.DataFrame(columns=["campaign", "gross_cost", "net_cost_to_tta",
+                                  "cost_events", "unrecorded_events"])
+    mfile = Path(map_csv)
+    if not mfile.exists():
+        log.warning("%s not found; campaign costs unavailable", mfile)
+        return empty
+    amap = pd.read_csv(mfile, dtype=str).fillna("")
+    amap = amap[amap["event_id"] != ""][["audience_id", "event_id"]]
+    amap["airtable_record_id"] = amap["event_id"].str.rsplit("-", n=1).str[0]
+
+    db = Path(db_path) if db_path else next(
+        (c for c in (Path("../tta.duckdb"), Path("tta.duckdb")) if c.exists()), None)
+    if db is None:
+        log.warning("no source database found; campaign costs unavailable")
+        return empty
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info('dim_event')").fetchall()}
+        if "airtable_record_id" not in cols or "net_tta_cost" not in cols:
+            log.warning("dim_event has no cost columns; re-run events_ingest.py")
+            return empty
+        ev = con.execute("""
+            SELECT airtable_record_id,
+                   MIN(gross_cost)    AS gross_cost,
+                   MIN(net_tta_cost)  AS net_tta_cost,
+                   BOOL_OR(cost_recorded) AS cost_recorded
+            FROM dim_event GROUP BY 1
+        """).df()
+    finally:
+        con.close()
+
+    j = (mp.merge(amap, on="audience_id", how="inner")
+           .drop_duplicates(["campaign", "airtable_record_id"])
+           .merge(ev, on="airtable_record_id", how="left"))
+    if j.empty:
+        return empty
+    out = (j.groupby("campaign")
+             .agg(gross_cost=("gross_cost", lambda s: s.sum(min_count=1)),
+                  net_cost_to_tta=("net_tta_cost", lambda s: s.sum(min_count=1)),
+                  cost_events=("cost_recorded", lambda s: int(s.fillna(False).sum())),
+                  unrecorded_events=("cost_recorded",
+                                     lambda s: int((~s.fillna(False).astype(bool)).sum())))
+             .reset_index())
+    part = out[(out.cost_events > 0) & (out.unrecorded_events > 0)]
+    if len(part):
+        log.info("%d campaign(s) have events with unrecorded cost; their cost is a floor: %s",
+                 len(part), ", ".join(part["campaign"]))
+    return out
 
 
 def dedupe_events(cohorts: pd.DataFrame) -> pd.DataFrame:
@@ -458,7 +512,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     df = build(args.db, args.mapping)
-    roll = rollup_by_campaign(df, load_campaigns(args.mapping))
+    roll = rollup_by_campaign(df, load_campaigns(args.mapping, args.db))
 
     if args.out:
         df.to_csv(args.out, index=False)

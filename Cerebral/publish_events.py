@@ -265,7 +265,8 @@ def _cost_table(ev, detail):
 
     cols = [key, "event_name", "event_date", "event_type", "series",
             "cost_state", "cost_recorded", "gross_cost", "brand_offset",
-            "net_tta_cost", "shared_lines", "expected_attendance",
+            "net_tta_cost", "net_tta_cost_export", "realloc_delta",
+            "shared_lines", "expected_attendance",
             "n_stores", "is_offsite", "has_control"]
     cols = [c for c in cols if c in ev.columns]
     base = (ev[cols].sort_values("has_control", ascending=False)

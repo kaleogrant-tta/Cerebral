@@ -358,9 +358,17 @@ def main():
     if not os.path.exists(a.db):
         print("Database not found: %s" % a.db)
         return 1
+    if not os.path.exists(cost):
+        print("Cost export not found: %s" % cost)
+        return 1
+    if events and not os.path.exists(events):
+        print("!! Events.xlsx not found at %s -- continuing WITHOUT it:" % events)
+        print("   no brand partners, and the export's UTC dates will NOT be")
+        print("   corrected. Evening events will be measured on the wrong day.")
+        events = None
 
     print("cost export : %s" % cost)
-    print("brand xlsx  : %s" % (events or "(none - brand_partners blank)"))
+    print("brand xlsx  : %s" % (events or "(none - no brand partners, no UTC date fix)"))
     print("database    : %s" % a.db)
 
     e, unmapped, stats, realloc_detail = load(cost, events, a.today)

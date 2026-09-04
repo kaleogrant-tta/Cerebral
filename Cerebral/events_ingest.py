@@ -15,14 +15,35 @@ SOURCE OF TRUTH
 ---------------
 The cost export is authoritative for what an event was and what it cost.
 It replaces Events.xlsx as the calendar. Events.xlsx is still read, if
-present, for one column the export does not yet carry: Brand Partners. It
-is joined on event name + date and is optional -- once the export includes
-Brand Partners the xlsx can be dropped.
+present, for two things the export does not carry correctly:
+
+* Brand Partners -- the export has no such column.
+* The LOCAL event date. The export's event_start_date is in UTC, so any
+  event starting at 7pm or later New York time is dated the following
+  day. Events.xlsx carries the local timestamp. Where the two disagree by
+  exactly one day, the xlsx date wins; the export date is kept in
+  `event_date_export` and the run summary counts the corrections. The
+  lift model matches on date, so a one-day shift measures the wrong day.
+
+Both are joined on event name and are optional -- once the export carries
+Brand Partners and a local-time date the xlsx can be dropped.
 
 Cost columns come straight from the export. `Total Cost for Event` from the
 Airtable rollup is NOT used: it counts every shared budget line in full
 against each event it touches. The export keeps that figure as
 `airtable_rollup_DO_NOT_USE` for audit only, and it is not written here.
+
+SHARED-LINE REALLOCATION
+------------------------
+Marketing splits every shared budget line evenly across the events it is
+attached to. The export does that split against ALL attached events,
+including ones that were cancelled or declined -- so a flowers order
+shared with ten events, one of which was cancelled, leaves a tenth of the
+cost charged to nothing. This ingest re-splits each shared line across
+the attached events that are not `exclude_*` (planned events keep their
+share: they will happen). The export's own figures are kept in
+`*_export` columns and `realloc_delta` shows the change per event, so the
+correction is visible rather than silent.
 
 COST STATE
 ----------
@@ -81,6 +102,9 @@ SERIES_PATTERNS = [("Tray Tables Up", r"TRAY TABLES UP|Tray Tables Up|^TTU"),
                    ("Clear for Takeoff", r"Clear for Takeoff")]
 
 COMPLETE = "Complete"          # matched by substring; export has an emoji
+SHARED_LINE = re.compile(
+    r"^(?P<label>.+?)\s+\$(?P<total>[\d,]+\.\d{2})\s*/\s*(?P<n>\d+)\s+events?"
+    r"\s*=\s*\$(?P<share>[\d,]+\.\d{2})\s*$")
 COST_COLS = ["direct_cost", "shared_cost_allocated", "gross_cost",
              "brand_offset", "net_tta_cost"]
 
@@ -107,22 +131,94 @@ def _attendance(s):
     return int(m.group(0).replace(",", "")) if m else pd.NA
 
 
-def load_brand_partners(path):
-    """name+date -> Brand Partners from the legacy Events.xlsx. Optional."""
+def reallocate_shared(d):
+    """Re-split shared lines across non-excluded sharers.
+
+    Returns (d, changes). d gains shared_cost_allocated_export,
+    gross_cost_export, net_tta_cost_export, realloc_delta, and has
+    shared_cost_allocated / gross_cost / net_tta_cost recomputed where a
+    sharer was excluded. Lines that do not parse, or whose stated sharer
+    count does not match the rows in the file, are left exactly as
+    exported.
+    """
+    d = d.copy()
+    for c in ("shared_cost_allocated", "gross_cost", "net_tta_cost"):
+        d[f"{c}_export"] = d[c]
+    d["realloc_delta"] = 0.0
+
+    parts = []
+    unparsed = 0
+    for idx, r in d.iterrows():
+        raw = r.get("shared_line_detail")
+        if pd.isna(raw) or not str(raw).strip():
+            continue
+        for seg in str(raw).split("||"):
+            m = SHARED_LINE.match(seg.strip())
+            if not m:
+                unparsed += 1
+                continue
+            parts.append({
+                "idx": idx,
+                "label": m["label"].strip(),
+                "total": float(m["total"].replace(",", "")),
+                "n": int(m["n"]),
+                "share": float(m["share"].replace(",", "")),
+                "keep": not str(r.cost_state).startswith("exclude"),
+            })
+    if not parts:
+        return d, {"lines": 0, "reallocated": 0, "unparsed": unparsed,
+                   "mismatched": 0, "orphaned_dollars": 0.0, "detail": []}
+
+    L = pd.DataFrame(parts)
+    g = (L.groupby(["label", "total"])
+           .agg(rows=("idx", "count"), n=("n", "first"), keep=("keep", "sum"))
+           .reset_index())
+    ok = g[g.rows == g.n]
+    fix = ok[ok.keep < ok.n]
+    detail = []
+    orphaned = 0.0
+    for a in fix.itertuples():
+        old = a.total / a.n
+        new = a.total / a.keep if a.keep else 0.0
+        orphaned += old * (a.n - a.keep)
+        detail.append((a.label, a.total, a.n, int(a.keep), old, new))
+        sel = (L.label == a.label) & (L.total == a.total)
+        for row in L[sel].itertuples():
+            delta = (new - old) if row.keep else -old
+            d.at[row.idx, "realloc_delta"] += delta
+
+    moved = d.realloc_delta != 0
+    d.loc[moved, "shared_cost_allocated"] = (
+        d.loc[moved, "shared_cost_allocated"].fillna(0) + d.loc[moved, "realloc_delta"])
+    d.loc[moved, "gross_cost"] = (
+        d.loc[moved, "direct_cost"].fillna(0) + d.loc[moved, "shared_cost_allocated"])
+    d.loc[moved, "net_tta_cost"] = (
+        d.loc[moved, "gross_cost"] - d.loc[moved, "brand_offset"].fillna(0))
+    return d, {"lines": int(len(g)), "reallocated": int(len(fix)),
+               "unparsed": unparsed, "mismatched": int((g.rows != g.n).sum()),
+               "orphaned_dollars": float(orphaned), "detail": detail}
+
+
+def load_events_xlsx(path):
+    """name -> (local event date, Brand Partners) from the legacy
+    Events.xlsx. Optional. Names that appear more than once with different
+    dates are dropped -- an ambiguous match is worse than none."""
     if not path or not os.path.exists(path):
         return None
     x = pd.read_excel(path)
     x.columns = [c.strip() for c in x.columns]
-    if "Brand Partners" not in x.columns:
+    if "Event" not in x.columns or "Event Start Date" not in x.columns:
         return None
-    x["event_date"] = pd.to_datetime(x["Event Start Date"],
-                                     format="%B %d, %Y %I:%M%p",
-                                     errors="coerce").dt.normalize()
+    x["xlsx_date"] = pd.to_datetime(x["Event Start Date"],
+                                    format="%B %d, %Y %I:%M%p",
+                                    errors="coerce").dt.normalize()
     x["event_name"] = x["Event"].astype(str).str.strip()
-    x["brand_partners"] = x["Brand Partners"].fillna("").astype(str).str.strip()
-    x = x.dropna(subset=["event_date"])
-    return (x[["event_name", "event_date", "brand_partners"]]
-            .drop_duplicates(["event_name", "event_date"]))
+    x["brand_partners"] = (x["Brand Partners"].fillna("").astype(str).str.strip()
+                           if "Brand Partners" in x.columns else "")
+    x = x.dropna(subset=["xlsx_date"])
+    amb = x.groupby("event_name")["xlsx_date"].nunique()
+    x = x[~x.event_name.isin(amb[amb > 1].index)]
+    return x[["event_name", "xlsx_date", "brand_partners"]].drop_duplicates("event_name")
 
 
 def load(cost_path, events_path=None, today=None):
@@ -141,6 +237,19 @@ def load(cost_path, events_path=None, today=None):
     d["event_status"] = d["event_status"].fillna("").astype(str).str.strip()
     d["cost_state"] = d["cost_state"].fillna("no_budget_linked").astype(str)
 
+    # --- cost columns numeric; re-split shared lines while dead rows are
+    #     still present (their shares are what gets redistributed) --------
+    for c in COST_COLS:
+        d[c] = pd.to_numeric(d.get(c), errors="coerce")
+    d, realloc = reallocate_shared(d)
+    stats["shared lines parsed"] = realloc["lines"]
+    stats["shared lines re-split"] = realloc["reallocated"]
+    if realloc["unparsed"]:
+        stats["!! shared lines unparsed"] = realloc["unparsed"]
+    if realloc["mismatched"]:
+        stats["!! shared lines count mismatch"] = realloc["mismatched"]
+    stats["$ recovered from dead events"] = round(realloc["orphaned_dollars"])
+
     # --- what actually happened -----------------------------------------
     excluded = d.cost_state.str.startswith("exclude")
     not_complete = ~d.event_status.str.contains(COMPLETE, case=False)
@@ -154,8 +263,6 @@ def load(cost_path, events_path=None, today=None):
     d = d[~excluded & ~not_complete & ~future & ~resched].copy()
 
     # --- cost -------------------------------------------------------------
-    for c in COST_COLS:
-        d[c] = pd.to_numeric(d.get(c), errors="coerce")
     unrecorded = d.cost_state == "no_budget_linked"
     # Never let an unrecorded event read as free.
     d.loc[unrecorded, COST_COLS] = pd.NA
@@ -177,10 +284,21 @@ def load(cost_path, events_path=None, today=None):
         m = d["event_name"].str.contains(pat, case=False, regex=True, na=False)
         d.loc[m & (d.series == "One-off"), "series"] = name
 
-    bp = load_brand_partners(events_path)
-    if bp is not None:
-        d = d.merge(bp, on=["event_name", "event_date"], how="left")
-        stats["brand partners matched from xlsx"] = int(d.brand_partners.notna().sum())
+    d["event_date_export"] = d["event_date"]
+    xl = load_events_xlsx(events_path)
+    if xl is not None:
+        d = d.merge(xl, on="event_name", how="left")
+        shift = (d["event_date"] - d["xlsx_date"]).dt.days
+        # +1 exactly is the UTC rollover signature; anything else is a
+        # genuine disagreement and the export stands.
+        fix = shift == 1
+        d.loc[fix, "event_date"] = d.loc[fix, "xlsx_date"]
+        stats["dates corrected (export is UTC)"] = int(fix.sum())
+        stats["dates disagree by >1 day (export kept)"] = int(
+            (shift.notna() & (shift != 0) & (shift != 1)).sum())
+        stats["brand partners matched from xlsx"] = int(
+            (d.brand_partners.fillna("") != "").sum())
+        d = d.drop(columns=["xlsx_date"])
     d["brand_partners"] = d.get("brand_partners", pd.Series(index=d.index)).fillna("")
 
     # --- explode stores ----------------------------------------------------
@@ -207,7 +325,7 @@ def load(cost_path, events_path=None, today=None):
     if dup:
         e = e.drop_duplicates("event_id")
         stats["duplicate store rows collapsed"] = int(dup)
-    return e, unmapped, stats
+    return e, unmapped, stats, realloc["detail"]
 
 
 OUT_COLS = ["event_id", "airtable_record_id", "event_name", "event_date",
@@ -216,7 +334,9 @@ OUT_COLS = ["event_id", "airtable_record_id", "event_name", "event_date",
             "cost_state", "cost_recorded", "direct_cost",
             "shared_cost_allocated", "gross_cost", "brand_offset",
             "net_tta_cost", "shared_lines", "expected_attendance",
-            "expected_attendance_raw"]
+            "expected_attendance_raw", "event_date_export",
+            "shared_cost_allocated_export",
+            "gross_cost_export", "net_tta_cost_export", "realloc_delta"]
 
 
 def main():
@@ -243,10 +363,13 @@ def main():
     print("brand xlsx  : %s" % (events or "(none - brand_partners blank)"))
     print("database    : %s" % a.db)
 
-    e, unmapped, stats = load(cost, events, a.today)
+    e, unmapped, stats, realloc_detail = load(cost, events, a.today)
     print()
     for k, v in stats.items():
         print("  %-36s: %s" % (k, f"{v:,}"))
+    for label, total, n, keep, old, new in realloc_detail:
+        print(f"    re-split  {label[:45]:<45} ${total:>9,.2f}  {n} -> {keep} "
+              f"sharers  ${old:>8,.2f} -> ${new:>8,.2f}")
     if unmapped:
         print("  !! unmapped store tags              : %s" % ", ".join(unmapped))
     print()
@@ -259,7 +382,8 @@ def main():
 
     out = e[OUT_COLS].copy()
     out["built_at"] = dt.datetime.now()
-    for c in COST_COLS:
+    for c in COST_COLS + ["shared_cost_allocated_export", "gross_cost_export",
+                          "net_tta_cost_export", "realloc_delta"]:
         out[c] = out[c].astype("Float64")
     out["expected_attendance"] = out["expected_attendance"].astype("Int64")
 
@@ -290,6 +414,11 @@ def main():
                CAST(shared_lines AS INTEGER)        AS shared_lines,
                CAST(expected_attendance AS INTEGER) AS expected_attendance,
                CAST(expected_attendance_raw AS VARCHAR) AS expected_attendance_raw,
+               CAST(event_date_export AS DATE)      AS event_date_export,
+               CAST(shared_cost_allocated_export AS DOUBLE) AS shared_cost_allocated_export,
+               CAST(gross_cost_export AS DOUBLE)    AS gross_cost_export,
+               CAST(net_tta_cost_export AS DOUBLE)  AS net_tta_cost_export,
+               CAST(realloc_delta AS DOUBLE)        AS realloc_delta,
                CAST(built_at AS TIMESTAMP)          AS built_at
         FROM ev
     """)

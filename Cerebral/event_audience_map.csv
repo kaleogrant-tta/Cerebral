@@ -2,7 +2,7 @@ audience_id,audience_name,event_id,event_date,resolved_name,source,note
 277053,Sasha Colby Event Purchasers,,2025-06-04,,excluded: purchase-defined,nan
 277061,House of Puff - Giveaway,,2025-06-06,,no dim_event row on this date,House of Puff - Giveaway (not on calendar)
 292571,Double Points Store Event - Zenco,recutWgEUGjijgU9g-4,2025-09-04,Back to Cool x Cloud Bar USQ,exact,1 dim_event row(s) on this date
-293013,BK Planet Opt-In,,2025-08-24,,no dim_event row on this date,Planet Brooklyn 2-day Music Festival (day 2)
+293013,BK Planet Opt-In,recj1x7kXKOCTuRCI-1,2025-08-23,Planet Brooklyn 2-day Music Festival,name match,6 dim_event row(s) on this date
 294147,Uprights Citizens Brigade 1-year Anniversary OPT-INS,recYtvGKl8Ub2olAB-1,2025-09-12,Back to Cool x Cloud Bar DTBK,date only — VERIFY,1 dim_event row(s) on this date
 296559,All Things Go 2025,recxCti2j6QNiSgIr-0,2025-09-26,All Things Go Festival Day #1,exact,1 dim_event row(s) on this date
 305960,Witchcraft - USQ,recEuL4bS17chgnaX-4,2025-10-09,Witchcraft In-Store: Ithaca Organics,exact,1 dim_event row(s) on this date
@@ -23,7 +23,7 @@ audience_id,audience_name,event_id,event_date,resolved_name,source,note
 329292,Upload: InFlightBites,,,,unmapped,"UNRESOLVED: no calendar match. Enrollment dates are bulk-import stamps, not attendance."
 330517,Upload: OBC May Event 2026,recU2BrxQxrMX9ctB-0,2026-05-18,Open Book Club x TTA: A Night  — Anais Wine Bar,exact,1 dim_event row(s) on this date
 332448,Pride Pouch - June 2026,,,,unmapped,PROBABLY NOT AN EVENT: 14 of 20 enrollment dates span 2024-2026 with no cluster. Looks like a giveaway to existing members.
-333871,Upload: TrayTablesUp6122026,,2026-06-12,,no dim_event row on this date,Tray Tables Up June (calendar shows 06-08)
+333871,Upload: TrayTablesUp6122026,rec4UnmFPV0CoDKGs-0,2026-06-08,"TRAY TABLES UP w. Litclub Founder, Kelly",exact,2 dim_event row(s) on this date
 333969,Upload: HighNotes609Guests,recLAhPEgXxLfzRxm-2,2026-06-08,High Notes Live #1 — Fifth Ave,name match,2 dim_event row(s) on this date
 334090,Upload: LoyaltyDinnerAttendees,recIrc14TffeUmOWm-0,2026-06-04,Chef Dinner (timeless brand partner loyalty),exact,1 dim_event row(s) on this date
 339283,Upload: HighNotes 6 30 2026,recm4VFxiEXCuPE5q-4,2026-06-29,High Notes Live #2 — USQ,exact,1 dim_event row(s) on this date

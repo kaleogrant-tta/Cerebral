@@ -25,6 +25,8 @@ import plotly.express as px
 import streamlit as st
 
 from heat import show_heat
+from events_cost_tab import render_events_cost
+from event_tracker_tab import render_event_tracker
 
 METRIC_LABEL = {"net": "Net sales", "baskets": "Baskets",
                 "new_customers": "New customers"}
@@ -423,9 +425,19 @@ from "a good day was chosen for the event."
     # Attendee-level 90-day return. Wrapped so a failure here degrades to
     # a caption instead of taking down the whole Events tab.
     try:
-        render_event_return(q, keys, stores, H, table_exists)
+        render_event_return(q, keys, stores, H, table_exists, howto)
     except Exception as exc:
         st.caption(f"Attendee return section unavailable: {exc}")
+
+    try:
+        render_events_cost(q, H, table_exists, howto)
+    except Exception as exc:
+        st.caption(f"Cost section unavailable: {exc}")
+
+    try:
+        render_event_tracker(q, H, table_exists, howto)
+    except Exception as exc:
+        st.caption(f"Event tracker unavailable: {exc}")
 
     with st.expander("Method, in detail"):
         st.markdown("""
@@ -472,7 +484,7 @@ comparison. The store filter does apply, on the hosting store.
         """)
 
 
-def render_event_return(q, keys, stores, H, table_exists=None):
+def render_event_return(q, keys, stores, H, table_exists=None, howto=None):
     """90-day return by attendee, new versus regular.
 
     Deliberately leads with how little of the roster can be measured. The
@@ -496,6 +508,8 @@ def render_event_return(q, keys, stores, H, table_exists=None):
 
     st.divider()
     H(f"Did attendees come back? ({win}-day return)")
+    if howto:
+        howto("event_return")
 
     all_stores = not keys or len(keys) == len(stores)
     if not all_stores:

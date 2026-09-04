@@ -53,3 +53,11 @@ secrets.toml
 .streamlit/secrets.toml
 *.duckdb.*
 *.pre-boundary
+cerebral_dump.txt
+cerebral_events_dump.txt
+events_cost_check.txt
+data_listing.txt
+export_dim_event.py
+check_events_cost.py
+events-cost-calendar*.csv
+_backup/

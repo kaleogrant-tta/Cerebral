@@ -1,32 +1,32 @@
 audience_id,audience_name,event_id,event_date,resolved_name,source,note
 277053,Sasha Colby Event Purchasers,,2025-06-04,,excluded: purchase-defined,nan
 277061,House of Puff - Giveaway,,2025-06-06,,no dim_event row on this date,House of Puff - Giveaway (not on calendar)
-292571,Double Points Store Event - Zenco,20250904-0-4,2025-09-04,Back to Cool x Cloud Bar USQ,exact,1 dim_event row(s) on this date
+292571,Double Points Store Event - Zenco,recutWgEUGjijgU9g-4,2025-09-04,Back to Cool x Cloud Bar USQ,exact,1 dim_event row(s) on this date
 293013,BK Planet Opt-In,,2025-08-24,,no dim_event row on this date,Planet Brooklyn 2-day Music Festival (day 2)
-294147,Uprights Citizens Brigade 1-year Anniversary OPT-INS,20250912-1-0,2025-09-12,One Year Re-Opening Anniversary Party UCB,exact,2 dim_event row(s) on this date
-296559,All Things Go 2025,20250926-0-0,2025-09-26,All Things Go Festival Day #1,exact,1 dim_event row(s) on this date
-305960,Witchcraft - USQ,20251009-0-4,2025-10-09,Witchcraft In-Store: Ithaca Organics,exact,1 dim_event row(s) on this date
-305961,Witchcraft - SoHo,20251015-0-3,2025-10-15,Witchcraft In-Store: Umamii,exact,1 dim_event row(s) on this date
-305962,Witchcraft - DTBK,20251023-0-1,2025-10-23,Witchcraft In-Store: Dada @ DTBK,exact,1 dim_event row(s) on this date
-305963,Witchcraft - 5TH,20251029-0-2,2025-10-29,Witchcraft In-Store: Ravensview @ FIFTH,exact,2 dim_event row(s) on this date
-308482,House of High Sign-In Form,20251107-0-3,2025-11-07,House of High: A Cannabis Imaginarium,exact,3 dim_event row(s) on this date
-311312,Upload: AndyFrascoSoHo1,20251230-0-3,2025-12-30,Artist Events: Andy Frasco (@andyfrasco) - Dec 30,exact,1 dim_event row(s) on this date
-315976,Upload: CaliSoberSipsImportFile Jan2026 - OPTIN,20260129-0-2,2026-01-29,Cali Sober Sips 2026: Fifth,exact,1 dim_event row(s) on this date
-316172,Upload: CaliSoberSips2026 Full File,20260129-0-2,2026-01-29,Cali Sober Sips 2026: Fifth,exact,1 dim_event row(s) on this date
-318908,11/15-Event,20251115-0-4,2025-11-15,Ghostface Killah Listening Party,name match,4 dim_event row(s) on this date
-322625,OBC-Event-March-2026,20260323-0-3,2026-03-23,Open Book Club x TTA (Read & Unwind),exact,1 dim_event row(s) on this date
-326334,Upload: OBCBookPickupsCustomerData,20260420-0-3,2026-04-20,420 2026 Food Drops & DJ April 20,name match,4 dim_event row(s) on this date
-326769,Upload: OnlyNYPhotobooth,20260416-0-3,2026-04-16,420 2026 OnlyNY Launch Party,exact,1 dim_event row(s) on this date
-327544,Upload: OnlyNY x TTA Launch Party,20260416-0-3,2026-04-16,420 2026 OnlyNY Launch Party,exact,1 dim_event row(s) on this date
+294147,Uprights Citizens Brigade 1-year Anniversary OPT-INS,recYtvGKl8Ub2olAB-1,2025-09-12,Back to Cool x Cloud Bar DTBK,date only — VERIFY,1 dim_event row(s) on this date
+296559,All Things Go 2025,recxCti2j6QNiSgIr-0,2025-09-26,All Things Go Festival Day #1,exact,1 dim_event row(s) on this date
+305960,Witchcraft - USQ,recEuL4bS17chgnaX-4,2025-10-09,Witchcraft In-Store: Ithaca Organics,exact,1 dim_event row(s) on this date
+305961,Witchcraft - SoHo,reciZr7dWWgdDEPIk-3,2025-10-15,Witchcraft In-Store: Umamii,exact,1 dim_event row(s) on this date
+305962,Witchcraft - DTBK,recWFF6MxaO6Sdmlp-1,2025-10-23,Witchcraft In-Store: Dada @ DTBK,exact,1 dim_event row(s) on this date
+305963,Witchcraft - 5TH,recW6JC2sSbE57xDL-2,2025-10-29,Witchcraft In-Store: Ravensview @ FIFTH,exact,2 dim_event row(s) on this date
+308482,House of High Sign-In Form,recStZYv5UYjEW7sJ-3,2025-11-07,House of High: A Cannabis Imaginarium,exact,3 dim_event row(s) on this date
+311312,Upload: AndyFrascoSoHo1,recrwXGvBFuGAgRj5-3,2025-12-30,Artist Events: Andy Frasco (@andyfrasco) - Dec 30,exact,1 dim_event row(s) on this date
+315976,Upload: CaliSoberSipsImportFile Jan2026 - OPTIN,reckRR2AQqTLEzwz6-2,2026-01-29,Cali Sober Sips 2026: Fifth,exact,1 dim_event row(s) on this date
+316172,Upload: CaliSoberSips2026 Full File,reckRR2AQqTLEzwz6-2,2026-01-29,Cali Sober Sips 2026: Fifth,exact,1 dim_event row(s) on this date
+318908,11/15-Event,,2025-11-15,,no dim_event row on this date,Ghostface Killah Listening Party
+322625,OBC-Event-March-2026,recs6sOQCnaUCEhl0-3,2026-03-23,Open Book Club x TTA (Read & Unwind),exact,1 dim_event row(s) on this date
+326334,Upload: OBCBookPickupsCustomerData,recs6sOQCnaUCEhl0-3,2026-03-23,Open Book Club x TTA (Read & Unwind),exact,1 dim_event row(s) on this date
+326769,Upload: OnlyNYPhotobooth,recsiHeeJuunngT3I-3,2026-04-16,420 2026 OnlyNY Launch Party,exact,1 dim_event row(s) on this date
+327544,Upload: OnlyNY x TTA Launch Party,recsiHeeJuunngT3I-3,2026-04-16,420 2026 OnlyNY Launch Party,exact,1 dim_event row(s) on this date
 329021,Upload: TrayTablesUp,,,,unmapped,DUPLICATE: 47 of its 50 members are also in 333871. Same event uploaded twice - leave unmapped to avoid double-counting.
-329291,Upload: BacktoCool 2026,20250904-0-4,2025-09-04,Back to Cool x Cloud Bar USQ,name match,1 dim_event row(s) on this date
+329291,Upload: BacktoCool 2026,recutWgEUGjijgU9g-4,2025-09-04,Back to Cool x Cloud Bar USQ,name match,1 dim_event row(s) on this date
 329292,Upload: InFlightBites,,,,unmapped,"UNRESOLVED: no calendar match. Enrollment dates are bulk-import stamps, not attendance."
-330517,Upload: OBC May Event 2026,20260518-0-0,2026-05-18,Open Book Club x TTA: A Night  — Anais Wine Bar,exact,1 dim_event row(s) on this date
+330517,Upload: OBC May Event 2026,recU2BrxQxrMX9ctB-0,2026-05-18,Open Book Club x TTA: A Night  — Anais Wine Bar,exact,1 dim_event row(s) on this date
 332448,Pride Pouch - June 2026,,,,unmapped,PROBABLY NOT AN EVENT: 14 of 20 enrollment dates span 2024-2026 with no cluster. Looks like a giveaway to existing members.
 333871,Upload: TrayTablesUp6122026,,2026-06-12,,no dim_event row on this date,Tray Tables Up June (calendar shows 06-08)
-333969,Upload: HighNotes609Guests,20260608-1-3,2026-06-08,High Notes Live #1 — Fifth Ave,exact,2 dim_event row(s) on this date
-334090,Upload: LoyaltyDinnerAttendees,20260604-0-0,2026-06-04,Chef Dinner (timeless brand partner loyalty),exact,1 dim_event row(s) on this date
-339283,Upload: HighNotes 6 30 2026,20260629-0-4,2026-06-29,High Notes Live #2 — USQ,exact,1 dim_event row(s) on this date
-339284,Upload: ClearForTakeoff 630 2026,20260627-0-3,2026-06-27,Clear for Takeoff Returns with Whitfit (soho),exact,1 dim_event row(s) on this date
-339724,Upload: ClearForTakeoff Google Sheet Backfill,20260627-0-3,2026-06-27,Clear for Takeoff Returns with Whitfit (soho),exact,1 dim_event row(s) on this date
+333969,Upload: HighNotes609Guests,recLAhPEgXxLfzRxm-2,2026-06-08,High Notes Live #1 — Fifth Ave,name match,2 dim_event row(s) on this date
+334090,Upload: LoyaltyDinnerAttendees,recIrc14TffeUmOWm-0,2026-06-04,Chef Dinner (timeless brand partner loyalty),exact,1 dim_event row(s) on this date
+339283,Upload: HighNotes 6 30 2026,recm4VFxiEXCuPE5q-4,2026-06-29,High Notes Live #2 — USQ,exact,1 dim_event row(s) on this date
+339284,Upload: ClearForTakeoff 630 2026,recsURNARuuWi6suJ-3,2026-06-27,Clear for Takeoff Returns with Whitfit (soho),exact,1 dim_event row(s) on this date
+339724,Upload: ClearForTakeoff Google Sheet Backfill,recsURNARuuWi6suJ-3,2026-06-27,Clear for Takeoff Returns with Whitfit (soho),exact,1 dim_event row(s) on this date
 342632,TTA Pride Pouch 200 Point Bonus About to Bust Comedy Festival,,,,unmapped,"Purchase peak 2026-05-19, all 39 buy at SoHo. Not on the events calendar."

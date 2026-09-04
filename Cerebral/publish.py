@@ -32,6 +32,7 @@ from publish_loyalty import build_loyalty
 from etl_discount import assert_discount_sane
 from publish_newret import build_newret
 from publish_event_return import build_event_return
+from publish_event_tracker import build_event_tracker
 from publish_group_lift import build_group_lift
 
 SLIM = "cerebral_dash.duckdb"
@@ -1239,6 +1240,7 @@ def build(src: str, dest: str) -> dict:
     build_newret(con)
     # --- event attendees: 90-day return, new vs regular ---
     build_event_return(con)
+    build_event_tracker(con)
     # --- discount groups: spend either side of enrolment ---
     # Basket size by group measures offer attachment, not spending.
     # This compares each member against their own prior quarter.
@@ -1259,6 +1261,7 @@ def build(src: str, dest: str) -> dict:
                     "match_method", "offer_name", "product_sku",
                     "alias", "canonical", "tier", "bin_label", "first_channel", "seq_label", "gap_bucket", "event_name", "event_id", "event_type", "series", "scope", "measure", "group_kind", "group_value", "store_name", "brand_partners", "metric", "id_scope", "segment",
     "group_name", "group_kind",
+    "airtable_record_id", "cost_state", "internal_external", "cpnc_note", "bucket",
 }
     leaked = []
     for (t,) in con.execute("SHOW TABLES").fetchall():

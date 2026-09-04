@@ -28,10 +28,27 @@ Controls are blocked only by events at the same store plus chain-wide
 off-site events. Blocking around every event removed 71% of candidate days
 and left a median of two controls per event.
 
+COST
+----
+dim_event now carries marketing's corrected cost (net_tta_cost). A fourth
+table, dash_events_cost, is one row per event (airtable_record_id, not per
+store row) and divides net cost by the INCREMENTAL new customers the lift
+model attributes to the event:
+
+    incremental = observed - counterfactual
+    counterfactual = baseline                     (off-site / chain-wide)
+                   = baseline * (1 + other-store drift)   (single store)
+
+summed across the store rows of a multi-store event. Cost per new customer
+is NULL when cost is unrecorded, when the event could not be measured, or
+when incremental new customers is <= 0 -- a negative divisor is not a
+result. Unrecorded is never treated as $0.
+
 PUBLISH.PY CHANGE REQUIRED
 --------------------------
 Add "event_name", "event_type", "series", "brand_partners", "store_name",
-"scope", "group_kind", "group_value" and "metric" to ALLOWED_TEXT.
+"scope", "group_kind", "group_value", "metric", "airtable_record_id",
+"cost_state", "internal_external" and "cpnc_note" to ALLOWED_TEXT.
 """
 
 import numpy as np
@@ -95,19 +112,21 @@ def _expand(dates):
 
 
 def _lift(series, day, blocked):
+    """(lift ratio, n_controls, observed, baseline)."""
     if day not in series.index:
-        return np.nan, 0
+        return np.nan, 0, np.nan, np.nan
     lo = day - pd.Timedelta(days=CONTROL_WINDOW_DAYS)
     hi = day + pd.Timedelta(days=CONTROL_WINDOW_DAYS)
     c = series[(series.index >= lo) & (series.index <= hi)
                & (series.index.dayofweek == day.dayofweek)]
     c = c[[i not in blocked for i in c.index]]
     if len(c) < MIN_CONTROLS:
-        return np.nan, len(c)
+        return np.nan, len(c), np.nan, np.nan
     base = c.mean()
     if not base:
-        return np.nan, len(c)
-    return series.loc[day] / base - 1, len(c)
+        return np.nan, len(c), np.nan, np.nan
+    obs = series.loc[day]
+    return obs / base - 1, len(c), float(obs), float(base)
 
 
 def _ci(x, n=BOOT, seed=SEED, stat="mean"):
@@ -145,11 +164,12 @@ def _detail_for_metric(ev, sd, chain, metric):
         others = [k for k in by_store if k not in (sk, 0)]
         for off in OFFSETS:
             day = e["event_date"] + pd.Timedelta(days=off)
-            own, nc = _lift(by_store[sk], day, blk)
+            own, nc, obs, base = _lift(by_store[sk], day, blk)
             if not np.isfinite(own):
                 continue
             did = np.nan
             drift = np.nan
+            counterfactual = base
             if e.has_control:
                 vals = [_lift(by_store[k], day,
                               blocked.get(k, chain_blocked))[0]
@@ -158,8 +178,11 @@ def _detail_for_metric(ev, sd, chain, metric):
                 if vals:
                     drift = float(np.mean(vals))
                     did = own - drift
+                    counterfactual = base * (1 + drift)
+            incremental = obs - counterfactual
             rows.append({
                 "metric": metric, "event_id": e.event_id,
+                "airtable_record_id": e.get("airtable_record_id", ""),
                 "event_name": e.event_name, "event_date": e.event_date,
                 "event_type": e.event_type, "series": e.series,
                 "brand_partners": e.brand_partners,
@@ -168,6 +191,9 @@ def _detail_for_metric(ev, sd, chain, metric):
                 "has_control": bool(e.has_control), "offset": off,
                 "own_lift": own, "control_drift": drift, "did": did,
                 "n_controls": nc,
+                "observed": obs, "baseline": base,
+                "counterfactual": counterfactual,
+                "incremental": incremental,
             })
     return pd.DataFrame(rows)
 
@@ -219,6 +245,60 @@ def _summaries(detail):
     return pd.DataFrame(out)
 
 
+def _cost_table(ev, detail):
+    """One row per event: net cost against incremental new customers."""
+    key = "airtable_record_id"
+    if key not in ev.columns or "net_tta_cost" not in ev.columns:
+        return pd.DataFrame()
+
+    d0 = detail[(detail.metric == "new_customers") & (detail.offset == 0)]
+    inc = (d0.groupby(key)
+             .agg(incremental_new=("incremental", "sum"),
+                  observed_new=("observed", "sum"),
+                  rows_measured=("event_id", "count"),
+                  min_controls=("n_controls", "min"))
+             .reset_index())
+
+    net_d0 = detail[(detail.metric == "net") & (detail.offset == 0)]
+    inc_net = (net_d0.groupby(key)["incremental"].sum()
+                     .rename("incremental_net_sales").reset_index())
+
+    cols = [key, "event_name", "event_date", "event_type", "series",
+            "cost_state", "cost_recorded", "gross_cost", "brand_offset",
+            "net_tta_cost", "shared_lines", "expected_attendance",
+            "n_stores", "is_offsite", "has_control"]
+    cols = [c for c in cols if c in ev.columns]
+    base = (ev[cols].sort_values("has_control", ascending=False)
+                    .drop_duplicates(key))
+    base["scope"] = base.apply(_scope, axis=1)
+
+    out = (base.merge(inc, on=key, how="left")
+               .merge(inc_net, on=key, how="left"))
+    out["measured"] = out.incremental_new.notna()
+    out["cost_recorded"] = out["cost_recorded"].fillna(False).astype(bool)
+
+    ok = out.cost_recorded & out.measured & (out.incremental_new > 0)
+    out["cost_per_new_customer"] = np.where(
+        ok, out.net_tta_cost / out.incremental_new.replace(0, np.nan), np.nan)
+    out["revenue_per_dollar"] = np.where(
+        out.cost_recorded & out.measured & (out.net_tta_cost > 0),
+        out.incremental_net_sales / out.net_tta_cost.replace(0, np.nan),
+        np.nan)
+
+    def _why(r):
+        if not r.cost_recorded:
+            return "cost unrecorded"
+        if not r.measured:
+            return "not measurable"
+        if r.incremental_new <= 0:
+            return "no incremental new customers"
+        if r.is_offsite or not r.has_control:
+            return "uncontrolled - upper bound"
+        return ""
+    out["cpnc_note"] = out.apply(_why, axis=1)
+    return out.sort_values("event_date", ascending=False).reset_index(drop=True)
+
+
 def build_events(con) -> dict:
     if not _src_has(con, "dim_event"):
         print("  [events] src.dim_event missing - skipping. "
@@ -248,8 +328,13 @@ def build_events(con) -> dict:
 
     summary = _summaries(detail)
 
+    cost = _cost_table(ev, detail)
+
     meta = pd.DataFrame([{
         "events": int(ev.event_name.nunique()),
+        "cost_recorded": int(cost.cost_recorded.sum()) if len(cost) else 0,
+        "cost_unrecorded": int((~cost.cost_recorded).sum()) if len(cost) else 0,
+        "net_tta_cost_total": float(cost.net_tta_cost.sum()) if len(cost) else 0.0,
         "event_rows": int(len(ev)),
         "single_store": int(ev.has_control.sum()),
         "offsite": int(ev.is_offsite.sum()),
@@ -263,7 +348,10 @@ def build_events(con) -> dict:
     out = {}
     for name, df in (("dash_events_detail", detail),
                      ("dash_events_summary", summary),
+                     ("dash_events_cost", cost),
                      ("dash_events_meta", meta)):
+        if df.empty:
+            continue
         con.execute(f"DROP TABLE IF EXISTS {name}")
         con.register("_ev_tmp", df)
         con.execute(f"CREATE TABLE {name} AS SELECT * FROM _ev_tmp")

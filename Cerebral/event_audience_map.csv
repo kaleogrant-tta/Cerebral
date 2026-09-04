@@ -3,7 +3,7 @@ audience_id,audience_name,event_id,event_date,resolved_name,source,note
 277061,House of Puff - Giveaway,,2025-06-06,,no dim_event row on this date,House of Puff - Giveaway (not on calendar)
 292571,Double Points Store Event - Zenco,recutWgEUGjijgU9g-4,2025-09-04,Back to Cool x Cloud Bar USQ,exact,1 dim_event row(s) on this date
 293013,BK Planet Opt-In,recj1x7kXKOCTuRCI-1,2025-08-23,Planet Brooklyn 2-day Music Festival,name match,6 dim_event row(s) on this date
-294147,Uprights Citizens Brigade 1-year Anniversary OPT-INS,recYtvGKl8Ub2olAB-1,2025-09-12,Back to Cool x Cloud Bar DTBK,date only — VERIFY,1 dim_event row(s) on this date
+294147,Uprights Citizens Brigade 1-year Anniversary OPT-INS,recD42qp1BiHwaM5m-0,2025-09-12,One Year Re-Opening Anniversary Party UCB,exact,2 dim_event row(s) on this date
 296559,All Things Go 2025,recxCti2j6QNiSgIr-0,2025-09-26,All Things Go Festival Day #1,exact,1 dim_event row(s) on this date
 305960,Witchcraft - USQ,recEuL4bS17chgnaX-4,2025-10-09,Witchcraft In-Store: Ithaca Organics,exact,1 dim_event row(s) on this date
 305961,Witchcraft - SoHo,reciZr7dWWgdDEPIk-3,2025-10-15,Witchcraft In-Store: Umamii,exact,1 dim_event row(s) on this date
@@ -13,7 +13,7 @@ audience_id,audience_name,event_id,event_date,resolved_name,source,note
 311312,Upload: AndyFrascoSoHo1,recrwXGvBFuGAgRj5-3,2025-12-30,Artist Events: Andy Frasco (@andyfrasco) - Dec 30,exact,1 dim_event row(s) on this date
 315976,Upload: CaliSoberSipsImportFile Jan2026 - OPTIN,reckRR2AQqTLEzwz6-2,2026-01-29,Cali Sober Sips 2026: Fifth,exact,1 dim_event row(s) on this date
 316172,Upload: CaliSoberSips2026 Full File,reckRR2AQqTLEzwz6-2,2026-01-29,Cali Sober Sips 2026: Fifth,exact,1 dim_event row(s) on this date
-318908,11/15-Event,,2025-11-15,,no dim_event row on this date,Ghostface Killah Listening Party
+318908,11/15-Event,recMHLeVkueWufPOs-4,2025-11-15,Ghostface Killah Listening Party,name match,4 dim_event row(s) on this date
 322625,OBC-Event-March-2026,recs6sOQCnaUCEhl0-3,2026-03-23,Open Book Club x TTA (Read & Unwind),exact,1 dim_event row(s) on this date
 326334,Upload: OBCBookPickupsCustomerData,recs6sOQCnaUCEhl0-3,2026-03-23,Open Book Club x TTA (Read & Unwind),exact,1 dim_event row(s) on this date
 326769,Upload: OnlyNYPhotobooth,recsiHeeJuunngT3I-3,2026-04-16,420 2026 OnlyNY Launch Party,exact,1 dim_event row(s) on this date

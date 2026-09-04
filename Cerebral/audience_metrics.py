@@ -367,26 +367,50 @@ def load_campaigns(path: Path, db_path: Path | None = None,
     amap = amap[amap["event_id"] != ""][["audience_id", "event_id"]]
     amap["airtable_record_id"] = amap["event_id"].str.rsplit("-", n=1).str[0]
 
-    db = Path(db_path) if db_path else next(
-        (c for c in (Path("../tta.duckdb"), Path("tta.duckdb")) if c.exists()), None)
+    def _has_dim_event(p: Path) -> bool:
+        if not p or not p.exists():
+            return False
+        try:
+            c = duckdb.connect(str(p), read_only=True)
+            try:
+                return c.execute(
+                    "SELECT COUNT(*) FROM duckdb_tables() "
+                    "WHERE table_name = 'dim_event'").fetchone()[0] > 0
+            finally:
+                c.close()
+        except Exception:
+            return False
+
+    # The caller may hand over the audiences database, which has no
+    # dim_event. Prefer whatever actually holds it.
+    candidates = [Path(db_path)] if db_path else []
+    candidates += [Path("../tta.duckdb"), Path("tta.duckdb")]
+    db = next((c for c in candidates if _has_dim_event(c)), None)
     if db is None:
-        log.warning("no source database found; campaign costs unavailable")
+        log.warning("no database with dim_event found (tried %s); "
+                    "campaign costs unavailable",
+                    ", ".join(str(c) for c in candidates))
         return empty
-    con = duckdb.connect(str(db), read_only=True)
     try:
-        cols = {r[1] for r in con.execute("PRAGMA table_info('dim_event')").fetchall()}
-        if "airtable_record_id" not in cols or "net_tta_cost" not in cols:
-            log.warning("dim_event has no cost columns; re-run events_ingest.py")
-            return empty
-        ev = con.execute("""
-            SELECT airtable_record_id,
-                   MIN(gross_cost)    AS gross_cost,
-                   MIN(net_tta_cost)  AS net_tta_cost,
-                   BOOL_OR(cost_recorded) AS cost_recorded
-            FROM dim_event GROUP BY 1
-        """).df()
-    finally:
-        con.close()
+        con = duckdb.connect(str(db), read_only=True)
+        try:
+            cols = {r[1] for r in con.execute(
+                "PRAGMA table_info('dim_event')").fetchall()}
+            if "airtable_record_id" not in cols or "net_tta_cost" not in cols:
+                log.warning("dim_event has no cost columns; re-run events_ingest.py")
+                return empty
+            ev = con.execute("""
+                SELECT airtable_record_id,
+                       MIN(gross_cost)    AS gross_cost,
+                       MIN(net_tta_cost)  AS net_tta_cost,
+                       BOOL_OR(cost_recorded) AS cost_recorded
+                FROM dim_event GROUP BY 1
+            """).df()
+        finally:
+            con.close()
+    except Exception as exc:
+        log.warning("campaign cost lookup failed (%s); continuing without cost", exc)
+        return empty
 
     j = (mp.merge(amap, on="audience_id", how="inner")
            .drop_duplicates(["campaign", "airtable_record_id"])

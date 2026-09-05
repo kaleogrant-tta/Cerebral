@@ -75,14 +75,19 @@ BASKET_FLAG_CATEGORIES = ["Flower", "Pre-Roll", "Vape", "Edible", "Concentrate",
 # ---------------------------------------------------------------------------
 CHANNEL_RULES = [
     ("Non-Stop", ["non stop", "nonstop"]),
-    ("Delivery", ["doobie"]),
+    # "Van N - xxx" registers are TTA's own delivery vans, May 2023 - Feb 2024,
+    # before delivery moved to Doobie. Same channel, different fulfilment.
+    ("Event", ["event van"]),        # MUST precede Delivery: van rule would catch it
+    ("Delivery", ["doobie", "van"]),
     # Excluded from customer analytics. Sample = testing; Internal Purchase =
     # employee sales, which are real revenue but not customer behaviour and
     # would distort ATV, penetration and channel mix.
-    ("EXCLUDE",  ["sample", "internal purchase"]),
+    # "Test register surface" -- 9 Dutchie commissioning rings in Jul 2023,
+    # $0.50-$1.00, one item each, numeric placeholder names.
+    ("EXCLUDE", ["sample", "internal purchase", "test register"]),
 ]
 CHANNEL_NUMBERED_PATTERN = r"register\s*\d+"   # -> In-Store
-CHANNELS = ["In-Store", "Non-Stop", "Delivery"]
+CHANNELS = ["In-Store", "Non-Stop", "Delivery", "Event"]
 
 # ---------------------------------------------------------------------------
 # AVAILABILITY CALENDAR
@@ -107,10 +112,18 @@ AVAILABILITY = {
             "data_visible_from": "2022-01-01",
         },
         "Delivery": {
-            # Confirmed by Kaleo. Consistent with the data: 130 Doobie Register
-            # transactions on 2024-07-23/24, four months after launch.
-            "launched": "2024-03-22",
-            "data_visible_from": "2024-03-22",
+            # Delivery began on the vans (Van 1, first txn 2023-05-26) and
+            # moved to Doobie 2024-03-22. Same channel, different fulfilment.
+            # CHANNEL_RULES maps both. Launch must predate Doobie or
+            # agg_category_week NULLs 1,216 van baskets as "did not exist".
+            "launched": "2023-05-26",
+            "data_visible_from": "2023-05-26",
+        },
+        "Event": {
+            # Offsite activations, Doobie Event Van. 15 trading days total,
+            # 3 of them 88% of revenue. Dormant since 2024-10-05.
+            "launched": "2023-08-18",
+            "data_visible_from": "2023-08-18",
         },
         "Non-Stop": {
             # Business launch, confirmed by Kaleo.
@@ -191,7 +204,13 @@ MAX_HEADER_SCAN_ROWS = 12
 THRESHOLDS = {
     'bulk_event_min_lines': 50,
     "product_join_rate":   0.995,   # dispensation lines matched to breakdown
-    "receipt_join_rate":   0.995,   # receipts matched to POS register
+    # TEMPORARY 2026-09-03, was 0.995. Returns produce no dispensation
+    # lines, so raw receipt match rate runs 0.991-0.996 in EVERY month
+    # Feb 2023 - Aug 2026 (return rate 0.28-0.64%, no trend). Excluding
+    # returns, all 43 months clear 0.995 (worst 0.9973). RETIGHTEN to
+    # 0.995 once the check excludes PosStatus=Returned from the
+    # denominator -- before the post-backfill overnight_rebuild.
+    "receipt_join_rate":   0.995,    # receipts matched to POS register
     "unmapped_category":   0,       # raw category strings not in CATEGORY_MAP
     "unknown_channel":     0,       # registers the rules could not classify
     # Reconciliation is banded. Dispensations and the Breakdown are produced by
@@ -214,7 +233,7 @@ THRESHOLDS = {
 # availability dates, thresholds). Stamped onto every row of load_log so you
 # can always tell which rules a given period was built under.
 # ---------------------------------------------------------------------------
-CONFIG_VERSION = "2026.08.01-1"
+CONFIG_VERSION = "2026.09.03-1"
 
 # ---------------------------------------------------------------------------
 # REPROCESS WINDOW
@@ -246,3 +265,4 @@ SHEETS = {
     },
     "max_rows": 200_000,
 }
+

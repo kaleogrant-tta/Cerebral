@@ -36,11 +36,21 @@ jobs:
       # database, so the online dashboard (including the Takeover GWP
       # reconciliation) refreshes itself after every run — no local
       # publish step needed to watch a promotion as it runs.
+      # Floor-set placements from the live Google Sheet (link-shared, no secret)
+      - name: Ingest floor sets
+        run: python vm_ingest.py --db /tmp/tta_work/tta.duckdb --workbook /tmp/tta_work/Visual_Merchandise_Data_2026.xlsx
+
+      # Build the dashboard file (no upload here - publish_vm.py ships it)
       - name: Publish dashboard file
+        run: python publish.py --db /tmp/tta_work/tta.duckdb
+
+      # Add the Visual Merch tables and upload. publish.py --upload would
+      # rebuild without them, so the upload lives here instead.
+      - name: Publish VM tables and upload
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           TTA_DRIVE_STATE:   ${{ secrets.TTA_DRIVE_STATE }}
-        run: python publish.py --db /tmp/tta_work/tta.duckdb --upload
+        run: python publish_vm.py --src /tmp/tta_work/tta.duckdb --upload
 
       - name: Note failure
         if: failure()

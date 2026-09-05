@@ -46,6 +46,7 @@ from discounting_tab import render_discounting
 from bei_tab import render_bei
 from brand_roi import render_brand_roi
 from channel_promo import render_channel_promo
+from promo_calendar import render_promo_calendar
 import scorecard_tab
 from scorecard_prefill import fetch_prefill
 
@@ -3552,9 +3553,18 @@ def render_promo_lab():
                  "Promo cost $": "${:,.0f}", "Net gain $": "${:,.0f}",
                  "ROI %": "{:,.0f}%", "Real margin": "{:.0%}"}
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         ["Churn Map (Categories)", "Store Opportunities", "Brand Promos",
-         "Brand Discount ROI", "Channel & Day Promo"])
+         "Brand Discount ROI", "Channel & Day Promo",
+         "Promo Calendar"])
+
+    # Declared here, rendered here. Tab ORDER comes from the list above, so
+    # this block sitting ahead of `with tab1:` costs nothing and leaves the
+    # existing blocks alone.
+    with tab6:
+        render_promo_calendar(q=q, keys=keys, stores=STORES,
+                              heading=None, table_exists=table_exists,
+                              accent=ACCENT, series=SERIES)
 
     # Declared here, rendered here. Tab ORDER comes from the list above, so
     # this block sitting ahead of `with tab1:` costs nothing and leaves the

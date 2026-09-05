@@ -818,10 +818,10 @@ st.caption(f"Category analytics · The Travel Agency · {label}")
 
 t_charts, t_insights, t_brands, t_bei, t_acc, t_redeem, t_discount, \
     t_loyalty, t_retention, t_events, t_audiences, \
-    t_takeover, t_projections, t_promo, t_scorecard, t_gloss = st.tabs(
+    t_takeover, t_vm, t_projections, t_promo, t_scorecard, t_gloss = st.tabs(
     ["Charts", "Insights", "Brands", "Brand Efficiency", "Accessories",
      "Redemptions", "Discounting", "Loyalty", "Retention", "Events",
-     "Audiences", "Takeovers", "Projections", "Promo Lab",
+     "Audiences", "Takeovers", "Visual Merch", "Projections", "Promo Lab",
      "GM Scorecard", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
@@ -4307,8 +4307,307 @@ def render_takeovers():
 with t_promo:
     render_promo_lab()
 
+import numpy as np
+
+# ===========================================================================
+# Visual Merchandising tab
+# ===========================================================================
+# Paste this block into cerebral_public.py next to the Takeover tracker, add
+# "Visual Merch" to the st.tabs() list (t_vm), and mount it with:
+#
+#     with t_vm:
+#         render_vm()
+#
+# It uses the module globals the other tabs use: q(), STORES, keys, keep, WIN.
+# Data comes from dash_vm_* tables built by publish_vm.py; every section
+# degrades to an info box if the tables are not in the loaded file yet.
+
+TIERS = ["Top", "Middle", "Bottom"]
+VM_MIN_WEEKS = 3                                  # per brand-store, each bucket
+
+
+def _vm_where() -> str:
+    """Store + week filter matching the sidebar, in SQL."""
+    wk = ",".join(f"({y},{w})" for y, w in sorted(keep))
+    cond = f"(iso_year, iso_week) IN ({wk})"
+    if len(keys) != len(STORES):
+        cond += f" AND store_key IN ({','.join(map(str, keys))})"
+    return cond
+
+
+def _vm_lift(treated: pd.DataFrame, baseline: pd.DataFrame):
+    """Median over brand-stores of (median net in treated weeks / median net in
+    baseline weeks) - 1. Brand-stores need VM_MIN_WEEKS in each bucket."""
+    if treated.empty or baseline.empty:
+        return None, 0
+    t = treated.groupby(["brand", "store_key"]).net.agg(["median", "size"])
+    b = baseline.groupby(["brand", "store_key"]).net.agg(["median", "size"])
+    j = t.join(b, lsuffix="_t", rsuffix="_b", how="inner")
+    j = j[(j.size_t >= VM_MIN_WEEKS) & (j.size_b >= VM_MIN_WEEKS) & (j.median_b > 0)]
+    if j.empty:
+        return None, 0
+    return float((j.median_t / j.median_b).median() - 1), len(j)
+
+
+def _vm_lift_table(bw: pd.DataFrame, col: str, order: list[str]) -> pd.DataFrame:
+    base = bw[bw.placement_state == "none"]
+    rows = []
+    for v in order:
+        sub = bw[bw[col] == v]
+        if sub.empty:
+            continue
+        lift, n = _vm_lift(sub, base)
+        rows.append({col: v, "Brand-weeks": len(sub),
+                     "Brands": sub.brand.nunique(),
+                     "Median net / wk": sub.net.median(),
+                     "Lift vs none": lift, "Brand-stores in lift": n})
+    return pd.DataFrame(rows)
+
+
+def render_vm():
+    st.subheader("Visual Merchandising")
+    st.markdown(
+        '<div class="howto"><b>How to read this.</b> Each brand-store-week is '
+        'tagged with where the brand sat on the floor that week, from the '
+        'floor-set workbook. <b>Lift</b> compares a brand against itself in the '
+        'same store: its median weekly net while on a shelf, divided by its '
+        'median weekly net in weeks with no recorded placement. Brands that are '
+        'on shelf every week have no baseline and drop out of the lift figures '
+        '(they still appear in the tables). Weeks inside a Brand Takeover are '
+        'kept out of the generic lift figures — a Takeover is kiosk featuring '
+        'plus whatever the floor set gave the brand that week, not a store-wide '
+        'display — and get their own cross-reference section below.</div>',
+        unsafe_allow_html=True)
+
+    cond = _vm_where()
+    bw = q(f"SELECT * FROM dash_vm_brand_week WHERE {cond}")
+    if bw.empty:
+        st.info("No floor-set data in the loaded file for this window. "
+                "Run vm_ingest.py then publish_vm.py, or widen the week slider.")
+        return
+    n_tk = int(bw.in_takeover.sum())
+    bw = bw[~bw.in_takeover.astype(bool)]
+
+    # ---- headline ---------------------------------------------------------
+    placed = bw[bw.shelf_slots > 0]
+    base = bw[bw.placement_state == "none"]
+    shelf_lift, n_ls = _vm_lift(placed, base)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Brand-weeks on shelf", f"{len(placed):,}")
+    c2.metric("Net from placed brands", f"{placed.net.sum() / max(bw.net.sum(), 1):.0%}",
+              help="Share of all brand net in the window earned by brands on a "
+                   "recorded shelf position that week")
+    c3.metric("Shelf lift vs none", "—" if shelf_lift is None else f"{shelf_lift:+.0%}",
+              help=f"Median across {n_ls} brand-stores with ≥{VM_MIN_WEEKS} weeks in each bucket")
+    c4.metric("Takeover brand-weeks set aside", f"{n_tk:,}",
+              help="Brand-store-weeks inside a Takeover window, excluded from the "
+                   "figures above; see the Takeover cross-reference below")
+
+    # ---- by tier / state --------------------------------------------------
+    left, right = st.columns(2)
+    with left:
+        st.markdown("##### Lift by shelf tier")
+        t = _vm_lift_table(bw, "best_tier", TIERS)
+        st.dataframe(t.style.format({"Median net / wk": "${:,.0f}", "Lift vs none": "{:+.0%}"},
+                                    na_rep="—"),
+                     use_container_width=True, hide_index=True)
+        st.markdown('<p class="note">best_tier is the highest shelf a brand held that '
+                    'week in that store, so a brand on Top and Bottom counts as Top.</p>',
+                    unsafe_allow_html=True)
+    with right:
+        st.markdown("##### Spotlight vs regular shelf")
+        bw["kind"] = np.where(bw.spotlight_slots > 0, "spotlight",
+                              np.where(bw.shelf_slots > 0, "regular shelf", "none"))
+        t = _vm_lift_table(bw, "kind", ["regular shelf", "spotlight"])
+        st.dataframe(t.style.format({"Median net / wk": "${:,.0f}", "Lift vs none": "{:+.0%}"},
+                                    na_rep="—"),
+                     use_container_width=True, hide_index=True)
+        st.markdown('<p class="note">"spotlight" = at least one slot that week in a '
+                    'themed/spotlight fixture (TTA Spotlight, Loyalty, Roots of '
+                    'Cannabis, Future of Flower, brand spotlights).</p>',
+                    unsafe_allow_html=True)
+
+    # ---- by bay type ------------------------------------------------------
+    st.markdown("##### Where placements earn the most")
+    pw = q(f"""SELECT store_key, iso_year, iso_week, pos_brand AS brand, bay_type,
+                      shelf_tier, net
+               FROM dash_vm_placement_week
+               WHERE pos_brand IS NOT NULL AND {cond}""")
+    if not pw.empty:
+        bay = (pw.groupby(["bay_type", "shelf_tier"])
+                 .agg(**{"Brand-weeks": ("brand", "size"), "Brands": ("brand", "nunique"),
+                         "Median net / wk": ("net", "median")})
+                 .reset_index())
+        bay["shelf_tier"] = pd.Categorical(bay.shelf_tier, TIERS, ordered=True)
+        bay = bay.sort_values(["bay_type", "shelf_tier"])
+        st.dataframe(bay.style.format({"Median net / wk": "${:,.0f}"}, na_rep="—"),
+                     use_container_width=True, hide_index=True)
+        st.markdown('<p class="note">Raw medians, not lift — a Flower bay earns more '
+                    'than a Wellness bay because flower sells more, not because the '
+                    'fixture works better. Use it to compare tiers <i>within</i> a bay '
+                    'type.</p>', unsafe_allow_html=True)
+
+    # ---- movers -----------------------------------------------------------
+    st.markdown("##### Biggest movers")
+    st.markdown('<p class="note">Brand-stores whose placement changed from one week to '
+                'the next, ranked by the change in weekly net. Direction of the '
+                'move is in <b>from → to</b>.</p>', unsafe_allow_html=True)
+    d = bw.sort_values(["brand", "store_key", "iso_year", "iso_week"]).copy()
+    g = d.groupby(["brand", "store_key"])
+    d["prev_state"], d["prev_tier"], d["prev_net"] = \
+        g.placement_state.shift(), g.best_tier.shift(), g.net.shift()
+    mv = d[d.prev_state.notna() &
+           ((d.prev_state != d.placement_state) | (d.prev_tier.fillna("") != d.best_tier.fillna("")))].copy()
+    if mv.empty:
+        st.info("No placement changes inside the selected weeks.")
+    else:
+        mv["Δ net"] = mv.net - mv.prev_net
+        mv["Δ %"] = mv["Δ net"] / mv.prev_net.replace(0, np.nan)
+        mv["from → to"] = (mv.prev_state + "/" + mv.prev_tier.fillna("—") + " → " +
+                           mv.placement_state + "/" + mv.best_tier.fillna("—"))
+        mv["Store"] = mv.store_key.map(STORES)
+        mv = mv.reindex(mv["Δ net"].abs().sort_values(ascending=False).index).head(15)
+        st.dataframe(mv[["brand", "Store", "week_start", "from → to", "prev_net", "net",
+                         "Δ net", "Δ %"]]
+                     .rename(columns={"brand": "Brand", "week_start": "Week of",
+                                      "prev_net": "Net before", "net": "Net after"})
+                     .style.format({"Net before": "${:,.0f}", "Net after": "${:,.0f}",
+                                    "Δ net": "${:+,.0f}", "Δ %": "{:+.0%}"}, na_rep="—"),
+                     use_container_width=True, hide_index=True)
+
+    # ---- takeover cross-reference -----------------------------------------
+    st.markdown("##### Takeover cross-reference — what was actually on display")
+    st.markdown(
+        '<p class="note">A Takeover buys kiosk featuring, not the floor. This lines '
+        'the brand\'s floor-set positions up against its sales <b>by category</b>, '
+        'week by week, for the window and the 4 weeks before it — so a flower-wall '
+        'window that moved mid-Takeover shows up next to that week\'s flower '
+        'sales. Weeks are the same ISO weeks as the rest of the dashboard, so '
+        'edge weeks are partly in and partly out of the window.</p>',
+        unsafe_allow_html=True)
+    xref = q("SELECT * FROM dash_vm_takeover_xref")
+    if xref.empty:
+        st.info("No Takeover cross-reference in the loaded file yet.")
+    else:
+        if len(keys) != len(STORES):
+            xref = xref[xref.store_key.isin(keys)]
+        tks = list(dict.fromkeys(xref.takeover))
+        tk_pick = st.selectbox("Takeover", tks, key="vm_tk")
+        x = xref[xref.takeover == tk_pick].copy()
+        x["Store"] = x.store_key.map(STORES)
+        x["display"] = x.display.fillna("— not on floor set —")
+
+        # summary: per store x category, prior-4 avg vs during avg, with the
+        # most common display in each phase
+        def _mode(v):
+            v = v.dropna()
+            return v.mode().iloc[0] if not v.empty else "—"
+        summ = (x.groupby(["Store", "category", "phase"])
+                  .agg(net=("net", "mean"), slots=("slots", "mean"), display=("display", _mode))
+                  .unstack("phase"))
+        summ.columns = [f"{a}|{b}" for a, b in summ.columns]
+        need = {"net|prior 4 wks", "net|during"}
+        if need.issubset(summ.columns):
+            summ["Δ net/wk"] = summ["net|during"] / summ["net|prior 4 wks"].replace(0, np.nan) - 1
+            out = summ.reset_index()[["Store", "category", "net|prior 4 wks", "net|during",
+                                      "Δ net/wk", "display|prior 4 wks", "display|during"]]
+            out = out.rename(columns={"category": "Category",
+                                      "net|prior 4 wks": "Prior 4 wks avg",
+                                      "net|during": "During avg",
+                                      "display|prior 4 wks": "Typical display before",
+                                      "display|during": "Typical display during"})
+            out = out[(out["Prior 4 wks avg"] > 0) | (out["During avg"] > 0)]
+            st.dataframe(out.style.format({"Prior 4 wks avg": "${:,.0f}", "During avg": "${:,.0f}",
+                                           "Δ net/wk": "{:+.0%}"}, na_rep="—"),
+                         use_container_width=True, hide_index=True)
+        st.markdown('<p class="note">Read the display columns before the % — a category '
+                    'that gained a window AND a Takeover in the same week cannot '
+                    'separate the two; one whose display did not change is a cleaner '
+                    'read of the kiosk on its own.</p>', unsafe_allow_html=True)
+
+        with st.expander("Week by week"):
+            cat_pick = st.multiselect("Categories", sorted(x.category.unique()),
+                                      default=[c for c in ("Flower", "Vape", "Pre-Roll", "Edible")
+                                               if c in set(x.category)], key="vm_tk_cat")
+            wk = x[x.category.isin(cat_pick)].sort_values(["Store", "category", "iso_year", "iso_week"])
+            st.dataframe(wk[["Store", "category", "week_start", "phase", "covered_days",
+                             "slots", "display", "net", "units"]]
+                         .rename(columns={"category": "Category", "week_start": "Week of",
+                                          "phase": "Phase", "covered_days": "Days in window",
+                                          "slots": "Slots", "display": "On display",
+                                          "net": "Net", "units": "Units"})
+                         .style.format({"Net": "${:,.0f}", "Units": "{:,.0f}"}, na_rep="—"),
+                         use_container_width=True, hide_index=True)
+
+    # ---- brand drill ------------------------------------------------------
+    st.markdown("##### Brand drill-down")
+    opts = sorted(bw.loc[bw.shelf_slots > 0, "brand"].unique())
+    pick = st.selectbox("Brand", opts, key="vm_brand")
+    one = bw[bw.brand == pick].copy()
+    one["Store"] = one.store_key.map(STORES)
+    chart = one.pivot_table(index="week_start", columns="Store", values="net", aggfunc="sum")
+    st.line_chart(chart)
+    st.dataframe(one.sort_values(["Store", "week_start"])
+                 [["Store", "week_start", "placement_state", "best_tier", "shelf_slots",
+                   "spotlight_slots", "bay_types", "takeover", "net", "units", "baskets"]]
+                 .assign(placement_state=lambda f: f.placement_state)
+                 .rename(columns={"week_start": "Week of", "placement_state": "State",
+                                  "best_tier": "Tier", "shelf_slots": "Slots",
+                                  "spotlight_slots": "Spotlight", "bay_types": "Bays",
+                                  "takeover": "Takeover"})
+                 .style.format({"net": "${:,.0f}", "units": "{:,.0f}"}, na_rep="—"),
+                 use_container_width=True, hide_index=True)
+    # every recorded position for that brand in the window
+    pos = q(f"""SELECT store_key, week_start, bay_raw, shelf_tier, position_label,
+                       brand_raw, product_hint, comment
+                FROM dash_vm_placement_week
+                WHERE pos_brand = '{pick.replace("'", "''")}' AND {cond}
+                ORDER BY store_key, week_start, bay_raw""")
+    if not pos.empty:
+        pos.insert(0, "Store", pos.pop("store_key").map(STORES))
+        with st.expander(f"Every recorded position for {pick} ({len(pos)})"):
+            st.dataframe(pos, use_container_width=True, hide_index=True)
+
+    # ---- data quality -----------------------------------------------------
+    with st.expander("Floor-set coverage and data quality"):
+        cov = q(f"""SELECT store_key, week_start, bay_raw, shelf_tier,
+                           sum(positions) AS positions, sum(filled) AS filled,
+                           sum(brand_matched) AS brand_matched
+                    FROM dash_vm_coverage WHERE {cond}
+                    GROUP BY ALL HAVING sum(filled) < sum(positions)
+                    ORDER BY store_key, week_start, bay_raw""")
+        st.markdown("**Positions with no entry**")
+        if cov.empty:
+            st.success("Every recorded position has an entry in this window.")
+        else:
+            cov.insert(0, "Store", cov.pop("store_key").map(STORES))
+            st.dataframe(cov, use_container_width=True, hide_index=True)
+
+        st.markdown("**Floor-set names that did not match a POS brand**")
+        st.markdown('<p class="note">Accessory items are expected here. A real brand '
+                    'in this list is either a spelling to add to vm_brand_alias.csv '
+                    'or a brand with no sales in the loaded data.</p>',
+                    unsafe_allow_html=True)
+        un = q("SELECT vm_brand, method FROM dash_vm_brand_resolve "
+               "WHERE pos_brand IS NULL ORDER BY vm_brand")
+        st.dataframe(un, use_container_width=True, hide_index=True)
+
+        st.markdown("**Ingest log**")
+        log = q("SELECT sheet, placements, notes, weeks, warnings, ingested_at "
+                "FROM dash_vm_ingest_log ORDER BY store, month")
+        st.dataframe(log, use_container_width=True, hide_index=True)
+        bad = log[log.warnings.fillna("").str.len() > 0] if not log.empty else log
+        if not bad.empty:
+            st.markdown(f'<div class="alert a-warn">{len(bad)} sheet(s) produced no '
+                        'placements — see the warnings column.</div>',
+                        unsafe_allow_html=True)
+
+
 with t_takeover:
     render_takeovers()
+
+with t_vm:
+    render_vm()
 
 
 # ---------------------------------------------------------------- loyalty

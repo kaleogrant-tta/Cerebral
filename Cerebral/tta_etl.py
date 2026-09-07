@@ -1101,6 +1101,34 @@ def discover(inbox: Path) -> dict[str, list[Path]]:
     return found
 
 
+RANGE_TOKEN = re.compile(r"(\d{1,2}_\d{1,2}_\d{4})-(\d{1,2}_\d{1,2}_\d{4})")
+
+
+def split_drops(files: dict[str, list[Path]]) -> list[tuple[str, dict[str, list[Path]]]]:
+    """Group discovered files into drops by the date-range token in their
+    names. A folder with one drop yields one group. Files with no token are
+    attached to every group. Returned in filename order of the token."""
+    groups: dict[str, dict[str, list[Path]]] = {}
+    untagged: dict[str, list[Path]] = {}
+    for kind, paths in files.items():
+        for p in paths:
+            m = RANGE_TOKEN.search(p.name)
+            if m:
+                groups.setdefault(m.group(0), {}).setdefault(kind, []).append(p)
+            else:
+                untagged.setdefault(kind, []).append(p)
+    if not groups:
+        return [("all", files)]
+    for g in groups.values():
+        for kind, paths in untagged.items():
+            g.setdefault(kind, []).extend(paths)
+
+    def _key(tok: str):
+        a = tok.split("-")[0].split("_")
+        return (int(a[2]), int(a[0]), int(a[1]))
+    return [(k, groups[k]) for k in sorted(groups, key=_key)]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--inbox", required=True, type=Path)
@@ -1112,52 +1140,73 @@ def main() -> int:
     print(f"\nTTA Category Analytics ETL")
     print(f"inbox: {args.inbox}   db: {args.db}\n")
 
-    files = discover(args.inbox)
-    for k, v in files.items():
+    all_files = discover(args.inbox)
+    for k, v in all_files.items():
         print(f"  found {k:<14} {len(v)} file(s)")
 
     required = ["dispensations", "breakdown", "pos_register"]
-    missing = [r for r in required if r not in files]
+    missing = [r for r in required if r not in all_files]
     if missing:
         print(f"\nERROR: missing required exports: {missing}")
         return 1
 
+    drops = split_drops(all_files)
+    if len(drops) > 1:
+        print(f"\n  {len(drops)} drops in this folder, processed separately: "
+              + ", ".join(k for k, _ in drops))
+
     pipe = Pipeline(args.db)
-    alpine = read_export(files["alpine"][0], "alpine") if "alpine" in files else None
-    breakdown = read_export(files["breakdown"][0], "breakdown")
-
-    # Combine every POS export in the folder and de-duplicate on PosId.
-    # A period may legitimately need more than one file per store -- e.g. a
-    # supplemental re-pull covering days the original export missed. Picking a
-    # single "best matching" file would silently discard the rest.
-    pos_frames = []
-    for pp in files["pos_register"]:
-        pos_frames.append(read_export(pp, "pos_register"))
-    pos_all = pd.concat(pos_frames, ignore_index=True)
-    before = len(pos_all)
-    pos_all = pos_all.drop_duplicates(subset=["PosId"], keep="last")
-    print(f"  combined {len(files['pos_register'])} POS export(s): "
-          f"{before:,} rows -> {len(pos_all):,} unique transactions")
-
     failed = 0
-    for disp_path in files["dispensations"]:
-        disp = read_export(disp_path, "dispensations")
-        loc = disp["Location"].dropna().iloc[0]
-
-        # Keep only the transactions belonging to this store. PosId is globally
-        # unique chain-wide, so an inner match on the store's receipts is exact.
-        pos_df = pos_all[pos_all["PosId"].isin(set(disp["ReceiptNo"]))].copy()
-        if pos_df.empty:
-            print(f"\nERROR: no POS transactions match {loc}")
+    for di, (tag, files) in enumerate(drops, 1):
+        if len(drops) > 1:
+            print(f"\n  ---- drop {di}/{len(drops)}: {tag} ----")
+        drop_missing = [r for r in required if r not in files]
+        if len(drop_missing) == len(required):
+            # inventory / receipt-only group; not a sales drop at all
+            print(f"  drop {tag}: no sales exports — skipped")
+            continue
+        if drop_missing:
+            print(f"  ERROR: drop {tag} is missing {drop_missing} — skipped")
             failed += 1
             continue
 
-        res = pipe.build(disp, breakdown, pos_df, alpine, args.period)
-        print_validation(res)
-        if res.ok and not args.validate_only:
-            pipe.write(res)
-        elif not res.ok:
-            failed += 1
+        alpine = read_export(files["alpine"][0], "alpine") if "alpine" in files else None
+        if len(files["breakdown"]) > 1:
+            print(f"  ! {len(files['breakdown'])} breakdown files in drop {tag}; "
+                  f"using {files['breakdown'][0].name}")
+        breakdown = read_export(files["breakdown"][0], "breakdown")
+
+        # Combine every POS export in the drop and de-duplicate on PosId.
+        # A period may legitimately need more than one file per store -- e.g. a
+        # supplemental re-pull covering days the original export missed. Picking a
+        # single "best matching" file would silently discard the rest.
+        pos_frames = []
+        for pp in files["pos_register"]:
+            pos_frames.append(read_export(pp, "pos_register"))
+        pos_all = pd.concat(pos_frames, ignore_index=True)
+        before = len(pos_all)
+        pos_all = pos_all.drop_duplicates(subset=["PosId"], keep="last")
+        print(f"  combined {len(files['pos_register'])} POS export(s): "
+              f"{before:,} rows -> {len(pos_all):,} unique transactions")
+
+        for disp_path in files["dispensations"]:
+            disp = read_export(disp_path, "dispensations")
+            loc = disp["Location"].dropna().iloc[0]
+
+            # Keep only the transactions belonging to this store. PosId is globally
+            # unique chain-wide, so an inner match on the store's receipts is exact.
+            pos_df = pos_all[pos_all["PosId"].isin(set(disp["ReceiptNo"]))].copy()
+            if pos_df.empty:
+                print(f"\nERROR: no POS transactions match {loc}")
+                failed += 1
+                continue
+
+            res = pipe.build(disp, breakdown, pos_df, alpine, args.period)
+            print_validation(res)
+            if res.ok and not args.validate_only:
+                pipe.write(res)
+            elif not res.ok:
+                failed += 1
 
     if not args.validate_only and not failed:
         pipe.build_aggregates()

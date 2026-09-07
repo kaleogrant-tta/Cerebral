@@ -120,7 +120,7 @@ def main() -> int:
 
     with DriveLock(drive, state_id, DRIVE["lock_filename"]):
         # --- state -------------------------------------------------------
-        print("  [1/6] pulling database")
+        print("  [1/7] pulling database")
         existing = drive.find(state_id, DRIVE["db_filename"])
         if existing:
             drive.download(existing["id"], DB_LOCAL)
@@ -129,7 +129,7 @@ def main() -> int:
             print("    no database in Drive — starting fresh")
 
         # --- inbox -------------------------------------------------------
-        print("  [2/6] pulling exports")
+        print("  [2/7] pulling exports")
         pulled = pull_inbox(drive, inbox_id, local_inbox)
         if not pulled:
             print("    inbox empty — nothing to do")
@@ -154,7 +154,7 @@ def main() -> int:
         # block receipt-only loads from publishing and archiving.
         sales_required = {"dispensations", "breakdown", "pos_register"}
         if sales_required.issubset(found):
-            print("  [3/6] running ETL")
+            print("  [3/7] running ETL")
             rc = os.system(
                 f"python3 tta_etl.py --inbox {local_inbox} --db {DB_LOCAL} "
                 f"--period scheduled"
@@ -163,19 +163,33 @@ def main() -> int:
                 print("  ETL reported failures — Drive left untouched")
                 return 1
         else:
-            print("  [3/6] no sales exports in inbox — ETL skipped")
+            print("  [3/7] no sales exports in inbox — ETL skipped")
 
         # --- publish -----------------------------------------------------
-        print("  [4/6] publishing to Sheets")
+        print("  [4/7] publishing to Sheets")
         con = duckdb.connect(str(DB_LOCAL))
         publish(con, sheet_id)
         con.close()
 
         # --- persist -----------------------------------------------------
-        print("  [5/6] pushing database back")
+        print("  [5/7] pushing database back")
         drive.upload(DB_LOCAL, state_id, DRIVE["db_filename"])
 
-        print("  [6/6] archiving processed exports")
+        # --- dashboard ---------------------------------------------------
+        # publish.py reads event_audience_map.csv and the config folder
+        # relative to its own directory, so run it from there. A failure
+        # here must not undo the ETL, the push, or the archive step.
+        print("  [6/7] building dashboard")
+        here = Path(__file__).resolve().parent
+        rc = os.system(
+            f"cd {here} && python3 publish.py --db {DB_LOCAL} --upload"
+        )
+        if rc != 0:
+            print("  !! dashboard build/upload FAILED (exit %d) — database and "
+                  "Sheets are updated; cerebral_dash.duckdb in Drive is the "
+                  "previous copy" % rc)
+
+        print("  [7/7] archiving processed exports")
         for _, file_id in pulled:
             drive.move(file_id, archive_id)
         print(f"    archived {len(pulled)} file(s)")

@@ -1312,10 +1312,20 @@ def main() -> int:
     ap.add_argument("--db", default="tta.duckdb")
     ap.add_argument("--out", default=SLIM)
     ap.add_argument("--upload", action="store_true")
+    ap.add_argument("--allow-missing-map", action="store_true",
+                    help="build even if event_audience_map.csv is absent "
+                         "(attendee-return and tracker tables will be missing)")
     args = ap.parse_args()
 
     if not Path(args.db).exists():
         print(f"No source database at {args.db}")
+        return 1
+    if not Path("event_audience_map.csv").exists() and not args.allow_missing_map:
+        print("\n  !! event_audience_map.csv is not in this directory "
+              f"({Path.cwd()}).")
+        print("     Without it dash_event_return and dash_event_tracker are")
+        print("     silently skipped and the published file looks complete.")
+        print("     Run from the Cerebral folder, or pass --allow-missing-map.")
         return 1
 
     print(f"\nBuilding {args.out} from {args.db}")

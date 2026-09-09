@@ -27,6 +27,15 @@ contains day-of). This differs from publish_event_return.py, which anchors
 on each person's first post-event purchase; that design is right for a
 return rate, this one is right for "what did the event produce by when".
 
+MATCHABLE
+---------
+Alpine IQ links a roster contact to a POS record on phone and email; a
+contact uploaded with an email the store profile does not carry never
+links. Measured on the full roster set: phone-bearing members resolve at
+~37%, email-only at ~0.5%. So `matchable` = the contact has a phone on
+the roster, and every rate is computed on matchable signups. Email-only
+signups are counted (`signups_unmatchable`) and shown, never divided.
+
 WHAT IS DELIBERATELY ABSENT
 ---------------------------
 Attendance. Signups are people who registered; there is no reliable
@@ -131,13 +140,20 @@ def build_event_tracker(con, map_path: str | Path = MAP_FILE) -> None:
         GROUP BY 1
     """)
 
-    # Roster per record: every signup, whether or not they can be resolved.
-    con.execute("""
+    # Roster per record: every signup, whether or not they can be resolved,
+    # with a flag for whether the POS link could ever form (phone on roster).
+    am_cols = {r[1] for r in con.execute(
+        "PRAGMA table_info('src.audience_members')").fetchall()}
+    phone = ("COALESCE(TRIM(am.phone), '') <> ''" if "phone" in am_cols
+             else "TRUE")
+    con.execute(f"""
         CREATE OR REPLACE TEMP VIEW tk_roster AS
-        SELECT DISTINCT e.airtable_record_id, am.contact_id
+        SELECT e.airtable_record_id, am.contact_id,
+               BOOL_OR({phone}) AS matchable
         FROM src.audience_members am
         JOIN tk_map m ON CAST(am.audience_id AS VARCHAR) = m.audience_id
         JOIN src.dim_event e ON e.event_id = m.event_id
+        GROUP BY 1, 2
     """)
 
     # Candidate customer keys per signup, two routes, unambiguous only.
@@ -179,7 +195,7 @@ def build_event_tracker(con, map_path: str | Path = MAP_FILE) -> None:
     # Bucket by history strictly before the event date.
     con.execute(f"""
         CREATE OR REPLACE TEMP VIEW tk_bucket AS
-        SELECT r.airtable_record_id, r.contact_id,
+        SELECT r.airtable_record_id, r.contact_id, r.matchable,
                CASE WHEN h.last_before IS NULL THEN 'new'
                     WHEN h.last_before >= ev.event_date - {LAPSE_DAYS}
                          THEN 'active'
@@ -215,6 +231,10 @@ def build_event_tracker(con, map_path: str | Path = MAP_FILE) -> None:
         WITH per_bucket AS (
             SELECT bk.airtable_record_id, bk.bucket,
                    COUNT(DISTINCT bk.contact_id)                 AS signups,
+                   COUNT(DISTINCT bk.contact_id) FILTER (WHERE bk.matchable)
+                                                                 AS signups_matchable,
+                   COUNT(DISTINCT bk.contact_id) FILTER (WHERE NOT bk.matchable)
+                                                                 AS signups_unmatchable,
                    COUNT(DISTINCT bk.contact_id) FILTER (WHERE bk.resolvable)
                                                                  AS resolvable
             FROM tk_bucket bk
@@ -224,7 +244,8 @@ def build_event_tracker(con, map_path: str | Path = MAP_FILE) -> None:
                ev.event_type, ev.series, ev.is_offsite,
                ev.cost_state, ev.cost_recorded,
                ev.net_tta_cost, ev.gross_cost, ev.brand_offset,
-               pb.bucket, pb.signups, pb.resolvable,
+               pb.bucket, pb.signups, pb.signups_matchable,
+               pb.signups_unmatchable, pb.resolvable,
                {win_sql}
         FROM tk_event ev
         JOIN per_bucket pb USING (airtable_record_id)
@@ -237,7 +258,8 @@ def build_event_tracker(con, map_path: str | Path = MAP_FILE) -> None:
         GROUP BY ev.airtable_record_id, ev.event_name, ev.event_date,
                  ev.event_type, ev.series, ev.is_offsite, ev.cost_state,
                  ev.cost_recorded, ev.net_tta_cost, ev.gross_cost,
-                 ev.brand_offset, pb.bucket, pb.signups, pb.resolvable
+                 ev.brand_offset, pb.bucket, pb.signups, pb.signups_matchable,
+                 pb.signups_unmatchable, pb.resolvable
         ORDER BY ev.event_date DESC, pb.bucket
     """)
 
@@ -251,7 +273,10 @@ def build_event_tracker(con, map_path: str | Path = MAP_FILE) -> None:
                 FROM dash_event_tracker WHERE cost_recorded) AS events_costed,
                (SELECT COUNT(DISTINCT airtable_record_id)
                 FROM dash_event_tracker WHERE mature_d90)    AS events_mature_90,
-               FALSE AS has_attendance
+               FALSE AS has_attendance,
+               (SELECT SUM(signups_unmatchable) FROM dash_event_tracker)
+                                                            AS signups_unmatchable_total,
+               (SELECT SUM(signups) FROM dash_event_tracker) AS signups_total
     """)
 
     for v in ("tk_bucket", "tk_txn", "tk_keys", "tk_roster", "tk_event",

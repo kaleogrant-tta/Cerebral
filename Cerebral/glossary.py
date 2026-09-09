@@ -234,6 +234,27 @@ GLOSSARY: dict[str, str] = {
 
     "attendance":
         "Not shown anywhere on this tab. The sign-up list is who registered; check-in capture is not reliable enough to say who came. A showed / did-not-show split arrives when it is.",
+
+    "matchable":
+        "Sign-ups with a phone number on the roster. Alpine IQ links a sign-up to a purchase on phone and email; email-only sign-ups link 0.5% of the time, phone-bearing ones 37%. So only matchable sign-ups can ever be seen buying, and every rate is computed on them. Email-only sign-ups are counted, never divided.",
+
+    "% of matchable target signups":
+        "Target-bucket sign-ups who bought within 90 days, as a share of target-bucket sign-ups that have a phone on the roster. The conversion rate with an honest denominator.",
+
+    "$ / target customer (matchable signups, 90d)":
+        "Net cost divided by matchable target-bucket sign-ups who bought within 90 days. The figure to compare events on. Still a ceiling: a phone on the roster is necessary for a match, not sufficient.",
+
+    "$ / matchable signup":
+        "Net cost divided by sign-ups that have a phone on the roster. A real number but a weak one: it rewards a long list.",
+
+    "% of matchable (+90d)":
+        "Sign-ups who bought within 90 days, as a share of matchable sign-ups in the bucket.",
+
+    "% of matchable (day-of)":
+        "Sign-ups who bought on the event date, as a share of matchable sign-ups in the bucket.",
+
+    "% of matchable (+30d)":
+        "Sign-ups who bought within 30 days, as a share of matchable sign-ups in the bucket.",
 }
 
 

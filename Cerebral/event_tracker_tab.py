@@ -102,17 +102,26 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
         f"but not in the prior {lapse} days. Windows count from the event "
         f"date and are cumulative.")
 
+    if "signups_matchable" not in df.columns:
+        df["signups_matchable"] = df["signups"]
+        df["signups_unmatchable"] = 0
     n_ev = df.airtable_record_id.nunique()
     n_cost = df[df.cost_recorded].airtable_record_id.nunique()
     n_mat = df[df.mature_d90].airtable_record_id.nunique()
+    unm = int(df.signups_unmatchable.sum()); tot = int(df.signups.sum())
     st.caption(f"{n_ev} events with a mapped roster - {n_cost} with recorded "
-               f"cost, {n_mat} old enough for a 90-day read.")
+               f"cost, {n_mat} old enough for a 90-day read. "
+               f"{tot:,} signups in total, of which {unm:,} "
+               f"({unm / max(tot, 1):.0%}) are email-only and can never be "
+               f"matched to a purchase; every rate below is computed on the "
+               f"remaining {tot - unm:,} **matchable** signups.")
 
     # ---- all mature events, by bucket --------------------------------------
     mat = df[df.mature_d90]
     if not mat.empty:
         g = (mat.groupby("bucket", observed=True)
                 .agg(signups=("signups", "sum"),
+                     matchable=("signups_matchable", "sum"),
                      buyers_d0=("buyers_d0", "sum"),
                      revenue_d0=("revenue_d0", "sum"),
                      buyers_d30=("buyers_d30", "sum"),
@@ -125,19 +134,21 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
         _table(pd.DataFrame({
             "Bucket": g.bucket.map(BUCKET_LABEL),
             "Signups": g.signups,
+            "Matchable": g.matchable,
             "Bought day-of": g.buyers_d0,
-            "% of signups (day-of)": _rate(g.buyers_d0, g.signups),
+            "% of matchable (day-of)": _rate(g.buyers_d0, g.matchable),
             "Bought by +30d": g.buyers_d30,
-            "% of signups (+30d)": _rate(g.buyers_d30, g.signups),
+            "% of matchable (+30d)": _rate(g.buyers_d30, g.matchable),
             "Bought by +90d": g.buyers_d90,
-            "% of signups (+90d)": _rate(g.buyers_d90, g.signups),
+            "% of matchable (+90d)": _rate(g.buyers_d90, g.matchable),
             "Revenue by +90d": g.revenue_d90,
-        }), shading={"% of signups (+90d)": "blue", "Revenue by +90d": "green"},
-            fmt={"Signups": "{:,.0f}", "Bought day-of": "{:,.0f}",
+        }), shading={"% of matchable (+90d)": "blue", "Revenue by +90d": "green"},
+            fmt={"Signups": "{:,.0f}", "Matchable": "{:,.0f}",
+                 "Bought day-of": "{:,.0f}",
                  "Bought by +30d": "{:,.0f}", "Bought by +90d": "{:,.0f}",
-                 "% of signups (day-of)": "{:.1%}",
-                 "% of signups (+30d)": "{:.1%}",
-                 "% of signups (+90d)": "{:.1%}",
+                 "% of matchable (day-of)": "{:.1%}",
+                 "% of matchable (+30d)": "{:.1%}",
+                 "% of matchable (+90d)": "{:.1%}",
                  "Revenue by +90d": "${:,.0f}"})
         st.caption(
             "A New-to-TTA signup who buys is a customer the event created. "
@@ -149,18 +160,20 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
     piv = (df.pivot_table(index=["airtable_record_id", "event_name",
                                  "event_date", "event_type", "cost_recorded",
                                  "net_tta_cost", "mature_d30", "mature_d90"],
-                          columns="bucket", values=["signups", "buyers_d30",
-                                                    "buyers_d90",
+                          columns="bucket", values=["signups", "signups_matchable",
+                                                    "buyers_d30", "buyers_d90",
                                                     "revenue_d90"],
                           aggfunc="sum", observed=True)
              .fillna(0).reset_index())
     piv.columns = ["_".join(c).strip("_") if isinstance(c, tuple) else c
                    for c in piv.columns]
     for b in BUCKET_ORDER:
-        for m in ("signups", "buyers_d30", "buyers_d90", "revenue_d90"):
+        for m in ("signups", "signups_matchable", "buyers_d30", "buyers_d90",
+                  "revenue_d90"):
             if f"{m}_{b}" not in piv.columns:
                 piv[f"{m}_{b}"] = 0
     piv["signups_all"] = sum(piv[f"signups_{b}"] for b in BUCKET_ORDER)
+    piv["matchable_all"] = sum(piv[f"signups_matchable_{b}"] for b in BUCKET_ORDER)
     piv["revenue_all"] = sum(piv[f"revenue_d90_{b}"] for b in BUCKET_ORDER)
     piv = piv.sort_values("event_date", ascending=False)
 
@@ -168,7 +181,8 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
     # net-new would always read as a failure and answer the wrong question.
     loyal = piv.event_type.isin(LOYALTY_TYPES)
     piv["target"] = np.where(loyal, "active", "new")
-    piv["target_signups"] = np.where(loyal, piv.signups_active, piv.signups_new)
+    piv["target_signups"] = np.where(loyal, piv.signups_matchable_active,
+                                     piv.signups_matchable_new)
     piv["target_d30"] = np.where(loyal, piv.buyers_d30_active, piv.buyers_d30_new)
     piv["target_d90"] = np.where(loyal, piv.buyers_d90_active, piv.buyers_d90_new)
 
@@ -177,8 +191,8 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
     cpnn = np.where(cost_ok,
                     piv.net_tta_cost / piv.target_d90.replace(0, np.nan),
                     np.nan)
-    cps = np.where(piv.cost_recorded & (piv.signups_all > 0),
-                   piv.net_tta_cost / piv.signups_all.replace(0, np.nan), np.nan)
+    cps = np.where(piv.cost_recorded & (piv.matchable_all > 0),
+                   piv.net_tta_cost / piv.matchable_all.replace(0, np.nan), np.nan)
 
     def _why(r, ok):
         if ok:
@@ -199,26 +213,27 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
         "Event": piv.event_name.str.slice(0, 50),
         "Net cost": piv.net_tta_cost,
         "Signups": piv.signups_all,
+        "Matchable": piv.matchable_all,
         "New signups": piv.signups_new,
         "Active signups": piv.signups_active,
         "Lapsed signups": piv.signups_lapsed,
         "Judged on": piv.target.map(BUCKET_LABEL),
         "Target bought by +90d": piv.target_d90,
-        "% of target signups": _rate(piv.target_d90, piv.target_signups),
-        "$ / target customer (signups, 90d)": cpnn,
-        "$ / signup": cps,
+        "% of matchable target signups": _rate(piv.target_d90, piv.target_signups),
+        "$ / target customer (matchable signups, 90d)": cpnn,
+        "$ / matchable signup": cps,
         "Revenue +90d (all signups)": piv.revenue_all,
         "Why blank": why,
-    }), shading={"$ / target customer (signups, 90d)": "blue",
-                 "% of target signups": "aqua"},
-        fmt={"Net cost": "${:,.0f}", "Signups": "{:,.0f}",
+    }), shading={"$ / target customer (matchable signups, 90d)": "blue",
+                 "% of matchable target signups": "aqua"},
+        fmt={"Net cost": "${:,.0f}", "Signups": "{:,.0f}", "Matchable": "{:,.0f}",
              "New signups": "{:,.0f}", "Active signups": "{:,.0f}",
              "Lapsed signups": "{:,.0f}", "Target bought by +90d": "{:,.0f}",
-             "% of target signups": "{:.1%}",
-             "$ / target customer (signups, 90d)": "${:,.0f}",
-             "$ / signup": "${:,.0f}",
+             "% of matchable target signups": "{:.1%}",
+             "$ / target customer (matchable signups, 90d)": "${:,.0f}",
+             "$ / matchable signup": "${:,.0f}",
              "Revenue +90d (all signups)": "${:,.0f}"},
-        reverse=("$ / target customer (signups, 90d)",))
+        reverse=("$ / target customer (matchable signups, 90d)",))
     st.caption(
         "**Judged on** - which bucket the event is for. Acquisition events "
         "are judged on New to TTA: net cost over new signups who bought "
@@ -227,7 +242,10 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
         "Loyalty events "
         "exist for existing customers and are judged on Active signups "
         "who bought; cost per net-new would answer the wrong question. "
-        "**$ / signup** is a real number but a weaker one: it rewards a "
+        "**Matchable** signups have a phone on the roster; email-only "
+        "signups resolve to a purchase 0.5% of the time and are excluded "
+        "from every rate rather than counted as non-buyers. "
+        "**$ / matchable signup** is a real number but a weaker one: it rewards a "
         "long list, not a good event. Events under 90 days old show "
         "signups only; a row flagged *no target buyers at +30d yet* has "
         "had a month and produced nothing from its target bucket - worth "
@@ -250,6 +268,7 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
     _table(pd.DataFrame({
         "Bucket": one.bucket.map(BUCKET_LABEL),
         "Signups": one.signups,
+        "Matchable": one.signups_matchable,
         "Resolvable to POS": one.resolvable,
         "Bought day-of": one.buyers_d0,
         "Revenue day-of": one.revenue_d0,
@@ -257,13 +276,13 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
         "Revenue by +30d": one.revenue_d30,
         "Bought by +90d": one.buyers_d90,
         "Revenue by +90d": one.revenue_d90,
-        "% of signups (+90d)": _rate(one.buyers_d90, one.signups),
-    }), shading={"% of signups (+90d)": "blue"},
-        fmt={"Signups": "{:,.0f}", "Resolvable to POS": "{:,.0f}",
+        "% of matchable (+90d)": _rate(one.buyers_d90, one.signups_matchable),
+    }), shading={"% of matchable (+90d)": "blue"},
+        fmt={"Signups": "{:,.0f}", "Matchable": "{:,.0f}", "Resolvable to POS": "{:,.0f}",
              "Bought day-of": "{:,.0f}", "Bought by +30d": "{:,.0f}",
              "Bought by +90d": "{:,.0f}", "Revenue day-of": "${:,.0f}",
              "Revenue by +30d": "${:,.0f}", "Revenue by +90d": "${:,.0f}",
-             "% of signups (+90d)": "{:.1%}"})
+             "% of matchable (+90d)": "{:.1%}"})
     st.caption(
         "**Resolvable to POS** - signups Alpine IQ has linked to a TTA POS "
         "record. Alpine links on phone and email; a signup uploaded with an "

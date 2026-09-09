@@ -89,6 +89,55 @@ def _summary_table(df, title, note=None):
         st.caption(note)
 
 
+def _clears_zero_panel(summ, metric):
+    """Front-page verdict: which groups show a detectable effect on this
+    measure, and which do not. Single-store events only."""
+    s1 = summ[(summ.scope == SCOPE_SINGLE)
+              & summ.group_kind.isin(["type", "store", "series"])].copy()
+    if s1.empty:
+        return
+    ez = ("excludes_zero_med" if "excludes_zero_med" in s1.columns
+          else "excludes_zero")
+    lo = "ci_lo_med" if "ci_lo_med" in s1.columns else "ci_lo"
+    hi = "ci_hi_med" if "ci_hi_med" in s1.columns else "ci_hi"
+    s1["kind"] = s1.group_kind.map({"type": "Type", "store": "Store",
+                                    "series": "Series"})
+    yes = s1[s1[ez].fillna(False)].sort_values("median", ascending=False)
+    no = s1[~s1[ez].fillna(False)].sort_values("n", ascending=False)
+
+    def _line(r):
+        rng = (f" [{_pct(r[lo])}, {_pct(r[hi])}]"
+               if pd.notna(r[lo]) else "")
+        small = "" if r.reliable else " · n small"
+        return (f"**{r.group_value}** ({r.kind}, {int(r.n)} events): "
+                f"{_pct(r['median'])}{rng}{small}")
+
+    st.markdown(f"**What clears zero on {METRIC_LABEL[metric].lower()}** "
+                f"- single-store events, effect after subtracting the other "
+                f"stores")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("Detectable effect")
+        if yes.empty:
+            st.caption("None.")
+        for _, r in yes.iterrows():
+            st.markdown("- " + _line(r))
+    with c2:
+        st.markdown("No detectable effect")
+        if no.empty:
+            st.caption("None.")
+        for _, r in no.iterrows():
+            st.markdown("- " + _line(r))
+    n_no_types = int(no[no.kind == "Type"].n.sum())
+    if n_no_types:
+        st.caption(
+            f"{n_no_types:,} events sit in types whose range includes zero: "
+            f"on this measure, nothing distinguishes them from an ordinary "
+            f"day. That is the most decision-relevant line on the tab. A "
+            f"range that includes zero is not proof of no effect, but it is "
+            f"the absence of evidence for one at this sample size.")
+
+
 def render_events(q, keys, stores, heading=None, table_exists=None,
                   howto=None):
     H = heading or (lambda t, term=None: st.markdown(f"##### {t}"))
@@ -165,6 +214,10 @@ def render_events(q, keys, stores, heading=None, table_exists=None,
                        "equally be the weather or the season. Weaker "
                        "evidence: treat it as a ceiling, not a measurement.")
         c2.caption(f"{int(r.n)} events · {_ci_text(r)}")
+
+
+    # ---- what clears zero ------------------------------------------------
+    _clears_zero_panel(summ, metric)
 
     with st.expander("How to read this tab", expanded=False):
         st.markdown("""
@@ -296,16 +349,39 @@ from "a good day was chosen for the event."
     if not oc.empty:
         oc["off"] = oc.group_value.astype(int)
         oc = oc.sort_values("off")
-        flat = (oc["median"] > 0).all()
-        if flat:
+        med = dict(zip(oc["off"], oc["median"]))
+        day0 = med.get(0, float("nan"))
+        before = [med[k] for k in (-2, -1) if k in med]
+        # Plateau: the day before the event is already carrying most of the
+        # event-day figure. Spike: the event day stands clear of both
+        # preceding days and day -2 is near zero.
+        plateau = (bool(before) and pd.notna(day0)
+                   and max(before) >= 0.6 * day0 and min(before) > 0.005)
+        spike = (bool(before) and pd.notna(day0) and day0 > 0
+                 and day0 > max(before) and abs(med.get(-2, 0)) < 0.01)
+        if plateau:
             st.warning(
-                "**Read this before quoting the off-site numbers.** The lift "
-                "is positive at every offset from −2 to +2 days. An event "
-                "cannot raise sales two days before it happens, so this is a "
-                "plateau rather than a spike — off-site events are scheduled "
-                "into already-busy weeks (festival season, holidays, the "
-                "cultural calendar). Treat the figures below as an upper "
-                "bound that is mostly scheduling, not effect.")
+                "**Read this before quoting the off-site numbers.** On this "
+                "measure the lift is already high the day before and two "
+                "days before the event. An event cannot raise sales before "
+                "it happens, so this is a plateau rather than a spike: "
+                "off-site events are scheduled into already-busy weeks "
+                "(festival season, holidays, the cultural calendar). Treat "
+                "the figures below as an upper bound that is mostly "
+                "scheduling, not effect.")
+        elif spike:
+            st.info(
+                "**Shape check.** On this measure the event day stands clear "
+                "of the two days before it, with day −2 near zero - the "
+                "spike-with-shoulders shape of a real effect. There is "
+                "still no control group for off-site events, so the size "
+                "is an upper bound; the shape is what says it is not purely "
+                "scheduling.")
+        else:
+            st.caption(
+                "No control group for off-site events. Read the offset "
+                "curve: an effect shows as a spike on the day, a busy week "
+                "shows as a plateau.")
         _summary_table(oc.assign(group_value="day " + oc.group_value),
                        "By day offset")
 
@@ -533,10 +609,13 @@ def render_event_return(q, keys, stores, H, table_exists=None, howto=None):
 
     st.markdown(
         f'<p class="note">Most attendees cannot be followed into '
-        f'transactions. A roster member with no POS record has never bought '
-        f'anything at TTA — that is a result, not a data gap. The return '
-        f'rate below is computed only on those who did buy, so read it '
-        f'alongside the funnel, never on its own.</p>',
+        f'transactions. A roster member with no POS record either never '
+        f'bought at TTA, or bought under a phone or email the roster does '
+        f'not carry, so the POS link (Alpine IQ persona → store record) '
+        f'never formed. The split between those two is not known, so '
+        f'buyer counts here are floors. The return rate below is computed '
+        f'only on those who did buy, so read it alongside the funnel, never '
+        f'on its own.</p>',
         unsafe_allow_html=True)
 
     f = st.columns(4)

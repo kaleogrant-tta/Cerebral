@@ -349,11 +349,12 @@ how many made their first TTA purchase after it. It needs a roster mapped
 in `event_audience_map.csv` and 90 days of data after the event. They
 answer different questions and are not averaged together.
 
-**No return on same-day sales, anywhere.** Same-day sales lift on-site
-is +1.7% with a range that crosses zero, so it is not a claim that holds.
-Net-new customers is: +7.4%, range +3.0% to +11.9%, with a clean spike
-on the day and the day after and nothing before. Every dollar figure on
-this tab is cost per net-new customer for that reason.
+**No return on same-day sales, anywhere.** The live figures are the
+cards at the top of the Events tab; nothing here quotes a number that
+could go stale. The reason cost is per net-new customer and never per
+dollar of same-day sales: new customers is the measure whose interval
+clears zero and whose shape is a spike on the day, and same-day sales is
+the one that does not reliably hold.
 
 **Off-site events never get the lift figure.** Chain-wide first-time
 buyers move by a hundred or more day to day. Attributing that swing to

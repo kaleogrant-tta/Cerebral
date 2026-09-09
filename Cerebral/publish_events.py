@@ -44,6 +44,15 @@ is NULL when cost is unrecorded, when the event could not be measured, or
 when incremental new customers is <= 0 -- a negative divisor is not a
 result. Unrecorded is never treated as $0.
 
+COINCIDENT EVENTS
+-----------------
+Two events at one store on one day both see that day's lift, and both
+rows show it -- the lift is a fact about the day. But summing across
+events would count the day twice, so each row carries `coincident` (how
+many events shared the store-day) and `incremental_share` (incremental
+divided by it). dash_events_cost uses the share; the group statistics
+count each store-day once.
+
 PUBLISH.PY CHANGE REQUIRED
 --------------------------
 Add "event_name", "event_type", "series", "brand_partners", "store_name",
@@ -182,6 +191,7 @@ def _detail_for_metric(ev, sd, chain, metric):
             incremental = obs - counterfactual
             rows.append({
                 "metric": metric, "event_id": e.event_id,
+                "coincident": 1,
                 "airtable_record_id": e.get("airtable_record_id", ""),
                 "event_name": e.event_name, "event_date": e.event_date,
                 "event_type": e.event_type, "series": e.series,
@@ -195,7 +205,16 @@ def _detail_for_metric(ev, sd, chain, metric):
                 "counterfactual": counterfactual,
                 "incremental": incremental,
             })
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    # Two events at one store on one day both see that day's lift. The
+    # lift is real; giving each event all of it is not. Tag the share so
+    # anything that sums across events divides it out.
+    df["coincident"] = (df.groupby(["store_key", "event_date", "offset"])
+                          ["event_id"].transform("nunique"))
+    df["incremental_share"] = df["incremental"] / df["coincident"]
+    return df
 
 
 def _scope(r):
@@ -224,6 +243,8 @@ def _summaries(detail):
                        "series": "series"}[kind]
                 groups = list(src.groupby(key))
             for name, sub in groups:
+                # a store-day counts once however many events shared it
+                sub = sub.drop_duplicates(["store_key", "event_date", "offset"])
                 x = sub[col].dropna().values
                 if len(x) < MIN_GROUP:
                     continue
@@ -253,14 +274,15 @@ def _cost_table(ev, detail):
 
     d0 = detail[(detail.metric == "new_customers") & (detail.offset == 0)]
     inc = (d0.groupby(key)
-             .agg(incremental_new=("incremental", "sum"),
+             .agg(incremental_new=("incremental_share", "sum"),
                   observed_new=("observed", "sum"),
                   rows_measured=("event_id", "count"),
-                  min_controls=("n_controls", "min"))
+                  min_controls=("n_controls", "min"),
+                  coincident=("coincident", "max"))
              .reset_index())
 
     net_d0 = detail[(detail.metric == "net") & (detail.offset == 0)]
-    inc_net = (net_d0.groupby(key)["incremental"].sum()
+    inc_net = (net_d0.groupby(key)["incremental_share"].sum()
                      .rename("incremental_net_sales").reset_index())
 
     cols = [key, "event_name", "event_date", "event_type", "series",
@@ -295,6 +317,8 @@ def _cost_table(ev, detail):
             return "no incremental new customers"
         if r.is_offsite or not r.has_control:
             return "uncontrolled - upper bound"
+        if r.coincident > 1:
+            return f"shared day with {int(r.coincident) - 1} other event(s) - split evenly"
         return ""
     out["cpnc_note"] = out.apply(_why, axis=1)
     return out.sort_values("event_date", ascending=False).reset_index(drop=True)
@@ -331,14 +355,19 @@ def build_events(con) -> dict:
 
     cost = _cost_table(ev, detail)
 
+    key = "airtable_record_id" if "airtable_record_id" in ev.columns else "event_name"
     meta = pd.DataFrame([{
-        "events": int(ev.event_name.nunique()),
+        "events": int(ev[key].nunique()),
         "cost_recorded": int(cost.cost_recorded.sum()) if len(cost) else 0,
         "cost_unrecorded": int((~cost.cost_recorded).sum()) if len(cost) else 0,
         "net_tta_cost_total": float(cost.net_tta_cost.sum()) if len(cost) else 0.0,
         "event_rows": int(len(ev)),
-        "single_store": int(ev.has_control.sum()),
-        "offsite": int(ev.is_offsite.sum()),
+        "single_store": int(ev[ev.has_control][key].nunique()),
+        "offsite": int(ev[ev.is_offsite][key].nunique()),
+        "coincident_store_days": int(
+            detail[(detail.offset == 0) & (detail.metric == METRICS[0])
+                   & (detail.coincident > 1)]
+            .drop_duplicates(["store_key", "event_date"]).shape[0]),
         "cov_start": lo, "cov_end": hi,
         "control_window_days": CONTROL_WINDOW_DAYS,
         "min_controls": MIN_CONTROLS,

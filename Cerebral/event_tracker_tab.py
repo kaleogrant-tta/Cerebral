@@ -222,7 +222,9 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
     st.caption(
         "**Judged on** - which bucket the event is for. Acquisition events "
         "are judged on New to TTA: net cost over new signups who bought "
-        "within 90 days is the figure to compare them on. Loyalty events "
+        "within 90 days is the figure to compare them on - and a ceiling, "
+        "because signups the POS cannot recognise never count as buyers. "
+        "Loyalty events "
         "exist for existing customers and are judged on Active signups "
         "who bought; cost per net-new would answer the wrong question. "
         "**$ / signup** is a real number but a weaker one: it rewards a "
@@ -263,10 +265,12 @@ def render_event_tracker(q, H, table_exists=None, howto=None):
              "Revenue by +30d": "${:,.0f}", "Revenue by +90d": "${:,.0f}",
              "% of signups (+90d)": "{:.1%}"})
     st.caption(
-        "**Resolvable to POS** - signups who have ever had a TTA POS "
-        "record. For New-to-TTA signups this is people who bought on or "
-        "after the event; the rest have still never transacted, which is a "
-        "result about the event, not a gap in the data. "
+        "**Resolvable to POS** - signups Alpine IQ has linked to a TTA POS "
+        "record. Alpine links on phone and email; a signup uploaded with an "
+        "email that the store profile does not carry never links, and their "
+        "purchases are invisible here. So *unresolved* means either never "
+        "bought or bought under a key the roster does not have; the buyer "
+        "counts are floors and the $ / customer figures are ceilings. "
         "**Attendance is not shown** - the roster is who registered. A "
         "showed / didn't-show split arrives when check-in capture is "
         "reliable.")

@@ -230,7 +230,7 @@ GLOSSARY: dict[str, str] = {
         "Sign-ups who bought within 90 days, as a share of all sign-ups in the bucket.",
 
     "resolvable to pos":
-        "Sign-ups who have ever had a TTA point-of-sale record. For New sign-ups, this is the people who bought on or after the event; the rest have still never transacted — a result about the event, not a gap in the data.",
+        "Sign-ups Alpine IQ has linked to a TTA point-of-sale record. Alpine builds that link from phone and email; a sign-up uploaded with an email the store profile does not carry never links, and their purchases are invisible here. Unresolved therefore means never bought OR bought under a key the roster lacks — the split is not known, so buyer counts are floors and dollars-per-customer are ceilings.",
 
     "attendance":
         "Not shown anywhere on this tab. The sign-up list is who registered; check-in capture is not reliable enough to say who came. A showed / did-not-show split arrives when it is.",
@@ -289,7 +289,7 @@ SECTIONS: dict[str, str] = {
         "high stock and little revenue.",
 
     "events":
-        "Did an event make people shop more than they would have anyway? Every number here is a comparison against what that day should have looked like — never a raw sales figure, because sales rise on Fridays and in December whether or not there was an event.\n\nSingle-store events are the strongest evidence: the other three stores act as a control group, so weather, holidays and anything citywide cancels out. Off-site events have no control group; treat their figures as a ceiling. The measure that holds up is **new customers** — first-time buyers rise on event days and the day after, and not before. Same-day sales lift does not clear the noise, so this tab does not make that claim.",
+        "Did an event make people shop more than they would have anyway? Every number here is a comparison against what that day should have looked like — never a raw sales figure, because sales rise on Fridays and in December whether or not there was an event.\n\nSingle-store events are the strongest evidence: the other three stores act as a control group, so weather, holidays and anything citywide cancels out. Off-site events have no control group; treat their figures as a ceiling. The cards at the top are the live figures; if a range includes zero, no effect has been detected on that measure. **New customers** is the measure to judge events by: first-time buyers rise on the day, and not before. This note quotes no numbers on purpose — the cards are the source of truth.",
 
     "event_return":
         "Of the people on an event's sign-up list who bought anything, how many came back within 90 days — and does that differ for people meeting TTA for the first time versus existing customers who happened to attend?\n\nRead the funnel first. Most sign-ups never buy at all; the return rate is computed only on those who did, so on its own it overstates what an event achieves. A dash means too few people to make a rate.",

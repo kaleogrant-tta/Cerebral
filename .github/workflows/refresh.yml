@@ -40,6 +40,14 @@ jobs:
       - name: Ingest floor sets
         run: python vm_ingest.py --db /tmp/tta_work/tta.duckdb --workbook /tmp/tta_work/Visual_Merchandise_Data_2026.xlsx
 
+      # Stock levels: Dutchie inventory exports live in the Drive state folder;
+      # anchors on the newest Monday snapshot already in fact_inventory
+      - name: Ingest inventory ledgers
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TTA_DRIVE_STATE:   ${{ secrets.TTA_DRIVE_STATE }}
+        run: python inv_ingest.py --from-drive --db /tmp/tta_work/tta.duckdb --since 2025-12-01
+
       # Build the dashboard file (no upload here - publish_vm.py ships it)
       - name: Publish dashboard file
         run: python publish.py --db /tmp/tta_work/tta.duckdb

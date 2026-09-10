@@ -59,8 +59,10 @@ stockout is only flagged once the floor hits zero AFTER allowing for that
 unknown opening stock. Conservative by design.
 
 Usage
-  python Cerebral\\inv_ingest.py                       (from the repo root)
-  python Cerebral\\inv_ingest.py --folder inventory --db tta.duckdb --since 2026-01-01
+  python Cerebral\\inv_ingest.py --folder inventory --db tta.duckdb --since 2025-12-01   (local)
+  python Cerebral\\inv_ingest.py --from-drive --db /tmp/tta_work/tta.duckdb            (CI: pulls
+        the exports from the Drive state folder; anchors on the newest Monday snapshot
+        in fact_inventory when no Current Inventory file is present)
 """
 
 from __future__ import annotations
@@ -203,6 +205,29 @@ def read_ledger(path: Path):
     return meta, rows
 
 
+# ---------------------------------------------------------------- drive
+def pull_from_drive(dest: Path) -> Path:
+    """Download every Dutchie inventory export from the Drive state folder
+    (TTA_DRIVE_STATE) into dest. Files are matched by name; no subfolder needed."""
+    import os, sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from tta_env import bootstrap
+    from tta_drive import DriveClient
+    bootstrap()
+    folder = os.environ.get("TTA_DRIVE_STATE")
+    if not folder:
+        raise SystemExit("TTA_DRIVE_STATE not set")
+    dc = DriveClient()
+    files = dc.list_files(folder, "Inventory Adjustments") + dc.list_files(folder, "Current Inventory")
+    dest.mkdir(parents=True, exist_ok=True)
+    print(f"pulling {len(files)} inventory export(s) from Drive state folder")
+    for i, f in enumerate(files, 1):
+        name = f.get("name") or f.get("title")
+        print(f"  [{i}/{len(files)}] {name}", flush=True)
+        dc.download(f["id"], dest / name)
+    return dest
+
+
 # ---------------------------------------------------------------- build
 def build(folder: Path, db: Path, since: dt.date) -> None:
     files = sorted(folder.glob("*.xlsx"))
@@ -229,10 +254,32 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
             print(f"[{i}/{len(files)}] {f.name:<50} ⚠ not a Dutchie inventory export — skipped")
             log.append(dict(file=f.name, kind="skipped", rows=0, note="unrecognised header"))
 
-    if not snapshots:
-        raise SystemExit("no Current Inventory snapshot found — the anchor is required")
-    anchor_ts, anchor_file, anchor_rows = max(snapshots, key=lambda s: s[0])
-    print(f"\nanchor: {anchor_file.name} @ {anchor_ts}")
+    if snapshots:
+        anchor_ts, anchor_file, anchor_rows = max(snapshots, key=lambda s: s[0])
+        print(f"\nanchor: {anchor_file.name} @ {anchor_ts}")
+    else:
+        # No export in the folder: use the newest REAL snapshot the Monday ETL
+        # loaded into fact_inventory (source IS NULL). Export happens before
+        # opening, so anchor at 06:00 that day.
+        con0 = duckdb.connect(str(db), read_only=True)
+        has_src = con0.execute("SELECT count(*) FROM information_schema.columns "
+                               "WHERE table_name='fact_inventory' AND column_name='source'").fetchone()[0]
+        flt = "WHERE source IS NULL" if has_src else ""
+        d = con0.execute(f"SELECT max(snapshot_date) FROM fact_inventory {flt}").fetchone()[0]
+        if d is None:
+            raise SystemExit("no Current Inventory export in the folder and no real snapshot in "
+                             "fact_inventory — an anchor is required")
+        rows = con0.execute(f"SELECT store_key, package_id, product, category, room, qty_on_hand, "
+                            f"unit_cost, unit_price FROM fact_inventory {flt} "
+                            f"{'AND' if flt else 'WHERE'} snapshot_date = ?", [d]).fetchall()
+        con0.close()
+        anchor_rows = [dict(store_key=sk, room=str(room or ""), room_class=room_class(room),
+                            product=norm_product(pr), category=str(cat or ""), brand="",
+                            package_id=str(pk or ""), qty=float(q or 0),
+                            unit_cost=float(uc or 0), unit_price=float(up or 0))
+                       for sk, pk, pr, cat, room, q, uc, up in rows]
+        anchor_ts, anchor_file = dt.datetime.combine(d, dt.time(6)), Path("fact_inventory")
+        print(f"\nanchor: real snapshot in fact_inventory @ {anchor_ts} ({len(anchor_rows):,} rows)")
 
     # dedupe ledger rows across overlapping exports; keep only events before the anchor
     seen, events = set(), []
@@ -514,8 +561,9 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
             "AND category IS NOT NULL GROUP BY ALL").fetchall())
         con.execute("DELETE FROM fact_inventory WHERE source IN ('ledger_rollback','dutchie_export')")
         fi_rows = []
-        # real anchor, one row per package x room (as the export has it)
-        for r in anchor_rows:
+        # real anchor, one row per package x room (as the export has it) — only
+        # when it came from a file; a fact_inventory anchor is already there
+        for r in (anchor_rows if anchor_file.suffix == ".xlsx" else []):
             fi_rows.append((anchor_ts.date(), r["store_key"], r["package_id"], r["product"],
                             r["category"], cat_map.get(r["category"], r["category"]), r["room"],
                             r["room_class"] in SELLABLE, r["qty"], r["unit_cost"], r["unit_price"],
@@ -532,9 +580,10 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
                     continue
                 fi_rows.append((we, sk, None, product, cat, cat_map.get(cat, cat), room, True,
                                 qty, uc, up, qty * uc, qty * up, "ledger_rollback"))
-        con.executemany("INSERT INTO fact_inventory (snapshot_date, store_key, package_id, product, "
-                        "raw_category, category, room, sellable, qty_on_hand, unit_cost, unit_price, "
-                        "ext_cost, ext_retail, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", fi_rows)
+        if fi_rows:
+            con.executemany("INSERT INTO fact_inventory (snapshot_date, store_key, package_id, product, "
+                            "raw_category, category, room, sellable, qty_on_hand, unit_cost, unit_price, "
+                            "ext_cost, ext_retail, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", fi_rows)
         unmapped = sorted({r[4] for r in fi_rows if r[4] and r[4] not in cat_map})
         if unmapped:
             print(f"  ⚠ {len(unmapped)} raw categories have no canonical mapping in fact_inventory "
@@ -569,5 +618,11 @@ if __name__ == "__main__":
     ap.add_argument("--folder", type=Path, default=Path("inventory"))
     ap.add_argument("--db", type=Path, default=Path("tta.duckdb"))
     ap.add_argument("--since", type=dt.date.fromisoformat, default=dt.date(2026, 1, 1))
+    ap.add_argument("--from-drive", action="store_true",
+                    help="download the inventory exports from the Drive state folder first")
     a = ap.parse_args()
-    build(a.folder, a.db, a.since)
+    folder = a.folder
+    if a.from_drive:
+        import tempfile
+        folder = pull_from_drive(Path(tempfile.gettempdir()) / "tta_inventory")
+    build(folder, a.db, a.since)

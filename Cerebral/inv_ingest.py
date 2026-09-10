@@ -41,6 +41,12 @@ Output (tta.duckdb)
   inv_anchor            the snapshot used (store_key, product, room, class, qty)
   inv_opening_offset    per store x product: opening stock inferred from the
                         deepest negative in the rolled-back series (see below)
+
+Anchors: besides the newest Current Inventory export in the folder, every
+real snapshot already in fact_inventory (loaded by the Monday ETL; source IS
+NULL; >= 3000 rows) is an anchor. Walking back through time, balances reset
+to each real count as it is crossed, so drift only accumulates between
+anchors. Every future Monday snapshot therefore tightens history for free.
   fact_inventory        ALSO fed: the real anchor snapshot plus one reconstructed
                         snapshot per week-end (source column marks them), so
                         publish.py's dash_inventory / dash_bei / dash_acc_product_inv
@@ -257,8 +263,52 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
         if r["room_class"] == "floor":
             floor[k] += r["qty"]
 
-    # sales from POS
+    # Real snapshots already loaded by the Monday ETL (source IS NULL) become
+    # extra anchors: when the roll-back crosses one, balances reset to that
+    # count, so error accumulates only between anchors, not across the year.
+    con_r = duckdb.connect(str(db), read_only=True)
+    extra_anchors = {}
+    if con_r.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name='fact_inventory'").fetchone()[0]:
+        has_src = con_r.execute("SELECT count(*) FROM information_schema.columns "
+                                "WHERE table_name='fact_inventory' AND column_name='source'").fetchone()[0]
+        src_filter = "AND source IS NULL" if has_src else ""
+        for d, n in con_r.execute(f"SELECT snapshot_date, count(*) FROM fact_inventory "
+                                  f"WHERE snapshot_date < ? {src_filter} GROUP BY 1 ORDER BY 1 DESC",
+                                  [anchor_ts.date()]).fetchall():
+            if n < 3000:      # partial load (one store, half a file): not a usable anchor
+                continue
+            rows = con_r.execute(f"SELECT store_key, product, room, qty_on_hand FROM fact_inventory "
+                                 f"WHERE snapshot_date = ? {src_filter}", [d]).fetchall()
+            tot, flr = defaultdict(float), defaultdict(float)
+            for sk, product, room, qty in rows:
+                rc = room_class(room)
+                k = (sk, norm_product(product))
+                if rc in SELLABLE:
+                    tot[k] += qty or 0
+                if rc == "floor":
+                    flr[k] += qty or 0
+            # Monday exports happen before opening: anchor at 06:00 that day
+            extra_anchors[dt.datetime.combine(d, dt.time(6))] = (dict(tot), dict(flr))
+            print(f"extra anchor: real snapshot {d} ({n:,} rows, {sum(tot.values()):,.0f} sellable units)")
+    con_r.close()
+
+    # sales from POS — and the guard that matters most: the anchor must not be
+    # later than the sales data. Rolling back through days that have receipts
+    # but no sales lines shifts EVERY product too low by those days' sales.
     con = duckdb.connect(str(db))
+    max_sales = con.execute("SELECT max(txn_ts) FROM fact_line").fetchone()[0]
+    if max_sales is not None and anchor_ts > max_sales + dt.timedelta(hours=6):
+        gap = anchor_ts - max_sales
+        cutoff = dt.datetime.combine(max_sales.date(), dt.time.max)
+        print(f"\n⚠ sales in fact_line end {max_sales:%Y-%m-%d %H:%M} but the snapshot is "
+              f"{anchor_ts:%Y-%m-%d %H:%M} ({gap.days} days later).\n"
+              f"  Ledger events after {cutoff:%Y-%m-%d} are IGNORED so the anchor is treated as "
+              f"end-of-day {max_sales:%Y-%m-%d}. Receipts and sales in the gap roughly cancel;\n"
+              f"  the residual error is their difference, not ten days of sales.\n"
+              f"  For an exact result, export Current Inventory the morning after the last sales day.")
+        events = [e for e in events if e["ts"] <= cutoff]
+        anchor_ts = cutoff
+        print(f"ledger events after truncation: {len(events):,}")
     sales = con.execute("""
         SELECT store_key, txn_ts, product,
                sum(CASE WHEN is_return THEN -units ELSE units END) AS units
@@ -321,32 +371,51 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
         weeks.append(w)
         w -= dt.timedelta(days=7)
 
-    # roll back: for each week compute end balance, then replay that week's events
-    # backwards to get start balance, min floor, and the flow totals
+    # roll back, newest first. Balances are updated event by event; whenever
+    # the walk crosses a real snapshot, balances reset to that count.
+    anchors_desc = sorted(extra_anchors.items(), key=lambda a: a[0], reverse=True)
     out = []
     cur_total, cur_floor = dict(total), dict(floor)
     idx = 0
+    n_resets = 0
     for ws_ in weeks:
         we_ts = dt.datetime.combine(ws_ + dt.timedelta(days=7), dt.time())  # exclusive end
         ws_ts = dt.datetime.combine(ws_, dt.time())
-        # events after this week's end have already been undone; undo those inside the week
-        # capture end balances for products touched or held
-        # (cheap: we only emit rows for products with any balance or activity)
-        end_total, end_floor = cur_total, cur_floor
+        # anchors that fall after this week's end but before the previous week's
+        # start were handled in the previous iteration; those inside this week
+        # are applied when the event walk passes them.
+        end_total, end_floor = dict(cur_total), dict(cur_floor)
         flows = defaultdict(lambda: defaultdict(float))
-        floor_min = {}
-        start_total, start_floor = dict(end_total), dict(end_floor)
+        floor_min = dict(end_floor)
+        wk_anchors = [a for a in anchors_desc if ws_ts <= a[0] < we_ts]
+
+        def apply_anchor(a_ts):
+            nonlocal cur_total, cur_floor, n_resets
+            tot, flr = extra_anchors[a_ts]
+            keys_ = set(cur_total) | set(tot) | set(cur_floor) | set(flr)
+            cur_total = {k: tot.get(k, 0.0) for k in keys_}
+            cur_floor = {k: flr.get(k, 0.0) for k in keys_}
+            for k in keys_:
+                floor_min[k] = min(floor_min.get(k, cur_floor[k]), cur_floor[k])
+            n_resets += 1
+
         while idx < len(stream) and stream[idx][0] >= ws_ts:
             ts, sk, product, d_total, d_floor, kind, qty = stream[idx]
             idx += 1
-            if ts >= we_ts:            # belongs to a later (already processed) week — skip
+            if ts >= we_ts:
                 continue
+            # cross any anchor that sits between this event and the previous one
+            while wk_anchors and wk_anchors[0][0] > ts:
+                apply_anchor(wk_anchors.pop(0)[0])
             k = (sk, product)
-            # undo the event to move from end-of-week toward start-of-week
-            start_total[k] = start_total.get(k, 0.0) - d_total
-            start_floor[k] = start_floor.get(k, 0.0) - d_floor
-            floor_min[k] = min(floor_min.get(k, end_floor.get(k, 0.0)), start_floor[k])
+            cur_total[k] = cur_total.get(k, 0.0) - d_total
+            cur_floor[k] = cur_floor.get(k, 0.0) - d_floor
+            floor_min[k] = min(floor_min.get(k, cur_floor[k]), cur_floor[k])
             flows[k][kind] += qty
+        while wk_anchors:                      # anchor earlier than every event this week
+            apply_anchor(wk_anchors.pop(0)[0])
+        start_total, start_floor = cur_total, cur_floor
+
         iy, iw, _ = ws_.isocalendar()
         keys = set(start_total) | set(end_total) | set(flows)
         for k in keys:
@@ -362,7 +431,9 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
                         fl.get("received", 0.0), fl.get("sold_units", 0.0),
                         fl.get("moved_to_floor", 0.0), fl.get("adjusted", 0.0),
                         fmin, fmin <= 0 and (sf > 0 or ef > 0 or fl.get("sold_units", 0) > 0)))
-        cur_total, cur_floor = start_total, start_floor
+        cur_total, cur_floor = dict(start_total), dict(start_floor)
+    if anchors_desc:
+        print(f"anchor resets applied: {n_resets} of {len(anchors_desc)} real snapshots")
 
     con.execute("""
         CREATE OR REPLACE TABLE fact_inventory_week (
@@ -409,7 +480,7 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
         WHERE o.store_key = t.store_key AND o.product = t.product""")
     n_off = con.execute("SELECT count(*), sum(total_offset) FROM inv_opening_offset WHERE total_offset > 0").fetchone()
     print(f"opening-stock offsets applied to {n_off[0]:,} store-products "
-          f"({n_off[1]:,.0f} units inferred as pre-{since} stock)")
+          f"({(n_off[1] or 0):,.0f} units inferred as pre-{since} stock)")
 
     # days of supply on the floor: floor_end / avg daily units over the trailing 4 weeks
     con.execute("""

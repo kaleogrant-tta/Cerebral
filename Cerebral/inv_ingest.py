@@ -41,6 +41,10 @@ Output (tta.duckdb)
   inv_anchor            the snapshot used (store_key, product, room, class, qty)
   inv_opening_offset    per store x product: opening stock inferred from the
                         deepest negative in the rolled-back series (see below)
+  fact_inventory        ALSO fed: the real anchor snapshot plus one reconstructed
+                        snapshot per week-end (source column marks them), so
+                        publish.py's dash_inventory / dash_bei / dash_acc_product_inv
+                        and the Insights "Inventory efficiency" block go current
 
 Opening stock: the ledger cannot see units received before --since (or
 corrected later by a positive Adjust). Those surface as the series going
@@ -127,7 +131,8 @@ def read_snapshot(path: Path):
     meta, h = _header_block(ws)
     hdr = [str(c or "").strip() for c in next(ws.iter_rows(min_row=h, max_row=h, values_only=True))]
     ix = {n: hdr.index(n) for n in ("Location Name", "Inventory Room", "Product Name",
-                                    "Category", "Quantity on Hand", "Package ID", "Brand Name")}
+                                    "Category", "Quantity on Hand", "Package ID", "Brand Name",
+                                    "Inventory Cost", "Inventory Price")}
     rows = []
     for r in ws.iter_rows(min_row=h + 1, values_only=True):
         if not r or not r[ix["Location Name"]]:
@@ -141,7 +146,9 @@ def read_snapshot(path: Path):
                          category=str(r[ix["Category"]] or ""),
                          brand=str(r[ix["Brand Name"]] or ""),
                          package_id=str(r[ix["Package ID"]] or ""),
-                         qty=float(r[ix["Quantity on Hand"]] or 0)))
+                         qty=float(r[ix["Quantity on Hand"]] or 0),
+                         unit_cost=float(r[ix["Inventory Cost"]] or 0),
+                         unit_price=float(r[ix["Inventory Price"]] or 0)))
     return _parse_dt(meta.get("Export Date")), rows
 
 
@@ -154,7 +161,7 @@ def read_ledger(path: Path):
     meta, h = _header_block(ws)
     hdr = [str(c or "").strip() for c in next(ws.iter_rows(min_row=h, max_row=h, values_only=True))]
     ix = {n: hdr.index(n) for n in ("Location", "TransactionDate", "Action", "Product",
-                                    "BrandName", "Category", "qty", "InventoryComment")}
+                                    "BrandName", "Category", "qty", "InventoryComment", "Cost")}
     rows = []
     for r in ws.iter_rows(min_row=h + 1, values_only=True):
         if not r or not r[ix["Location"]]:
@@ -181,6 +188,7 @@ def read_ledger(path: Path):
                          brand=str(r[ix["BrandName"]] or ""),
                          category=str(r[ix["Category"]] or ""),
                          qty=float(r[ix["qty"]] or 0),
+                         unit_cost=float(r[ix["Cost"]] or 0) if r[ix["Cost"]] not in (None, "") else None,
                          from_class=from_c, to_class=to_c,
                          from_sk=from_sk, to_sk=to_sk,
                          package_id=pkg.group(1) if pkg else "",
@@ -235,9 +243,14 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
     floor = defaultdict(float)
     pkg_class = {}
     prod_meta = {}
+    prod_cost, prod_price = {}, {}
     for r in anchor_rows:
         k = (r["store_key"], r["product"])
         prod_meta.setdefault(k, (r["brand"], r["category"]))
+        if r["unit_cost"]:
+            prod_cost.setdefault(k, r["unit_cost"])
+        if r["unit_price"]:
+            prod_price.setdefault(k, r["unit_price"])
         pkg_class[(r["store_key"], r["package_id"])] = r["room_class"]
         if r["room_class"] in SELLABLE:
             total[k] += r["qty"]
@@ -257,9 +270,11 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
     # unified, signed event stream  (dt, store, product, d_total, d_floor, kind, qty)
     stream = []
     n_xfer = 0
-    for r in events:
+    for r in sorted(events, key=lambda e: e["ts"]):   # oldest first so the newest cost wins
         k = (r["store_key"], r["product"])
         prod_meta.setdefault(k, (r["brand"], r["category"]))
+        if r["unit_cost"] and k not in prod_cost:
+            prod_cost[k] = r["unit_cost"]
         a, q = r["action"], r["qty"]
         if a == "Receive":
             stream.append((r["ts"], *k, q, 0.0, "received", q))
@@ -409,6 +424,54 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
                          ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)) s
         WHERE t.store_key = s.store_key AND t.product = s.product
           AND t.iso_year = s.iso_year AND t.iso_week = s.iso_week""")
+    # ---- feed fact_inventory ---------------------------------------------
+    # publish.py builds dash_inventory / dash_bei / dash_acc_product_inv from
+    # fact_inventory at MAX(snapshot_date). Writing the reconstruction in as
+    # weekly snapshots (plus the real anchor) makes Insights' Inventory
+    # Efficiency, Brand Efficiency and accessory stock current without touching
+    # publish.py. Reconstructed rows carry source='ledger_rollback'; the anchor
+    # is source='dutchie_export'; real Monday loads keep source NULL.
+    have_fi = con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name='fact_inventory'").fetchone()[0]
+    if have_fi:
+        cols = {r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='fact_inventory'").fetchall()}
+        if "source" not in cols:
+            con.execute("ALTER TABLE fact_inventory ADD COLUMN source VARCHAR")
+        # raw -> canonical category map, learned from rows the ETL already loaded
+        cat_map = dict(con.execute(
+            "SELECT raw_category, category FROM fact_inventory WHERE raw_category IS NOT NULL "
+            "AND category IS NOT NULL GROUP BY ALL").fetchall())
+        con.execute("DELETE FROM fact_inventory WHERE source IN ('ledger_rollback','dutchie_export')")
+        fi_rows = []
+        # real anchor, one row per package x room (as the export has it)
+        for r in anchor_rows:
+            fi_rows.append((anchor_ts.date(), r["store_key"], r["package_id"], r["product"],
+                            r["category"], cat_map.get(r["category"], r["category"]), r["room"],
+                            r["room_class"] in SELLABLE, r["qty"], r["unit_cost"], r["unit_price"],
+                            r["qty"] * r["unit_cost"], r["qty"] * r["unit_price"], "dutchie_export"))
+        # reconstructed week-ends, two synthetic rooms per product
+        for (sk, iy, iw, ws_, product, brand, cat, st_, et, sf, ef, *_rest) in out:
+            we = ws_ + dt.timedelta(days=6)
+            if we >= anchor_ts.date():
+                continue  # the real anchor covers this week
+            k = (sk, product)
+            uc, up = prod_cost.get(k, 0.0), prod_price.get(k, 0.0)
+            for room, qty in (("SALES FLOOR", ef), ("VAULT", et - ef)):
+                if qty <= 0:
+                    continue
+                fi_rows.append((we, sk, None, product, cat, cat_map.get(cat, cat), room, True,
+                                qty, uc, up, qty * uc, qty * up, "ledger_rollback"))
+        con.executemany("INSERT INTO fact_inventory (snapshot_date, store_key, package_id, product, "
+                        "raw_category, category, room, sellable, qty_on_hand, unit_cost, unit_price, "
+                        "ext_cost, ext_retail, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", fi_rows)
+        unmapped = sorted({r[4] for r in fi_rows if r[4] and r[4] not in cat_map})
+        if unmapped:
+            print(f"  ⚠ {len(unmapped)} raw categories have no canonical mapping in fact_inventory "
+                  f"(kept as-is, will show as their own rows in Insights): {', '.join(unmapped[:8])}")
+        nd = con.execute("SELECT count(DISTINCT snapshot_date) FROM fact_inventory").fetchone()[0]
+        print(f"fact_inventory: +{len(fi_rows):,} rows -> {nd} snapshot dates; "
+              f"latest = {con.execute('SELECT max(snapshot_date) FROM fact_inventory').fetchone()[0]}")
+
     con.execute("CREATE OR REPLACE TABLE inv_anchor AS SELECT * FROM (SELECT * FROM (VALUES "
                 + ",".join(["(?,?,?,?,?,?)"] * len(anchor_rows)) +
                 ") v(store_key, product, package_id, room, room_class, qty))",

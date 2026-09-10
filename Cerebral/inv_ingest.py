@@ -384,8 +384,12 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
     con.execute("""
         UPDATE fact_inventory_week t SET stockout_floor =
             CASE WHEN t.floor_min > 0 THEN FALSE
-                 WHEN o.floor_offset > 0 THEN NULL
-                 ELSE (t.floor_start > 0 OR t.moved_to_floor > 0 OR t.sold_units > 0) END
+                 -- nothing on the floor and nothing happened: not ranged, not a stockout
+                 WHEN t.floor_start <= 0 AND t.moved_to_floor <= 0 AND t.sold_units <= 0 THEN FALSE
+                 -- hit zero with activity, but this product's opening stock was inferred:
+                 -- the dip is where the inference came from, so it proves nothing
+                 WHEN o.floor_offset > 0 AND t.floor_min <= 0 AND t.floor_start <= 0 THEN NULL
+                 ELSE TRUE END
         FROM inv_opening_offset o
         WHERE o.store_key = t.store_key AND o.product = t.product""")
     n_off = con.execute("SELECT count(*), sum(total_offset) FROM inv_opening_offset WHERE total_offset > 0").fetchone()

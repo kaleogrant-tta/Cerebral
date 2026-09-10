@@ -4335,33 +4335,84 @@ def _vm_where() -> str:
     return cond
 
 
-def _vm_lift(treated: pd.DataFrame, baseline: pd.DataFrame):
-    """Median over brand-stores of (median net in treated weeks / median net in
-    baseline weeks) - 1. Brand-stores need VM_MIN_WEEKS in each bucket."""
+VM_COMPARED_TO = ("Compared to: the same brand's weeks with no recorded floor-set "
+                  "placement, in the same store. Not the store average, not the prior period.")
+
+
+def _vm_pairs(treated: pd.DataFrame, baseline: pd.DataFrame,
+              min_t: int = VM_MIN_WEEKS, min_b: int = VM_MIN_WEEKS) -> pd.DataFrame:
+    """One row per brand-store with enough weeks in both buckets:
+    median net while treated, median net in baseline, and the ratio."""
     if treated.empty or baseline.empty:
-        return None, 0
+        return pd.DataFrame(columns=["median_t", "size_t", "median_b", "size_b", "ratio"])
     t = treated.groupby(["brand", "store_key"]).net.agg(["median", "size"])
     b = baseline.groupby(["brand", "store_key"]).net.agg(["median", "size"])
     j = t.join(b, lsuffix="_t", rsuffix="_b", how="inner")
-    j = j[(j.size_t >= VM_MIN_WEEKS) & (j.size_b >= VM_MIN_WEEKS) & (j.median_b > 0)]
+    j = j[(j.size_t >= min_t) & (j.size_b >= min_b) & (j.median_b > 0)].copy()
+    j["ratio"] = j.median_t / j.median_b
+    return j
+
+
+def _vm_lift(treated: pd.DataFrame, baseline: pd.DataFrame):
+    """Median over brand-stores of (median net treated / median net baseline) - 1."""
+    j = _vm_pairs(treated, baseline)
     if j.empty:
         return None, 0
-    return float((j.median_t / j.median_b).median() - 1), len(j)
+    return float(j.ratio.median() - 1), len(j)
 
 
-def _vm_lift_table(bw: pd.DataFrame, col: str, order: list[str]) -> pd.DataFrame:
+def _vm_lift_table(bw: pd.DataFrame, col: str, order: list[str],
+                   population: pd.Index | None = None) -> pd.DataFrame:
+    """Lift by `col`. If `population` (a brand-store index) is given, every row is
+    computed on those brand-stores only, so rows and headline agree on who is
+    being measured; the per-row week threshold then drops to 2."""
     base = bw[bw.placement_state == "none"]
     rows = []
     for v in order:
         sub = bw[bw[col] == v]
         if sub.empty:
             continue
-        lift, n = _vm_lift(sub, base)
-        rows.append({col: v, "Brand-weeks": len(sub),
-                     "Brands": sub.brand.nunique(),
-                     "Median net / wk": sub.net.median(),
-                     "Lift vs none": lift, "Brand-stores in lift": n})
+        if population is not None:
+            sub = sub.set_index(["brand", "store_key"]).loc[
+                sub.set_index(["brand", "store_key"]).index.intersection(population)].reset_index()
+            j = _vm_pairs(sub, base, min_t=2)
+        else:
+            j = _vm_pairs(sub, base)
+        rows.append({col: v,
+                     "Brand-weeks": len(sub),
+                     "Brand-stores": len(j),
+                     "Net/wk placed": j.median_t.median() if len(j) else np.nan,
+                     "Net/wk baseline": j.median_b.median() if len(j) else np.nan,
+                     "Lift": (j.ratio.median() - 1) if len(j) else np.nan})
     return pd.DataFrame(rows)
+
+
+def _vm_tier_pairs(bw: pd.DataFrame, min_weeks: int = 2) -> pd.DataFrame:
+    """Shelf-to-shelf: brand-stores that spent >= min_weeks on each of two tiers,
+    compared against themselves. Answers 'is Top better than Middle?' directly."""
+    placed = bw[bw.best_tier.notna()]
+    g = placed.groupby(["brand", "store_key", "best_tier"]).net.agg(["median", "size"])
+    g = g[g["size"] >= min_weeks]["median"].unstack("best_tier")
+    rows = []
+    for hi, lo in (("Top", "Middle"), ("Top", "Bottom"), ("Middle", "Bottom")):
+        if hi not in g or lo not in g:
+            continue
+        p = g[[hi, lo]].dropna()
+        p = p[p[lo] > 0]
+        if p.empty:
+            continue
+        rows.append({"Comparison": f"{hi} vs {lo}",
+                     "Brand-stores": len(p),
+                     f"Net/wk on higher tier": p[hi].median(),
+                     f"Net/wk on lower tier": p[lo].median(),
+                     "Higher tier vs lower": (p[hi] / p[lo]).median() - 1,
+                     "Share doing better on higher": (p[hi] > p[lo]).mean()})
+    return pd.DataFrame(rows)
+
+
+_LIFT_FMT = {"Net/wk placed": "${:,.0f}", "Net/wk baseline": "${:,.0f}", "Lift": "{:+.0%}",
+             "Net/wk on higher tier": "${:,.0f}", "Net/wk on lower tier": "${:,.0f}",
+             "Higher tier vs lower": "{:+.0%}", "Share doing better on higher": "{:.0%}"}
 
 
 def render_vm():
@@ -4391,41 +4442,66 @@ def render_vm():
     # ---- headline ---------------------------------------------------------
     placed = bw[bw.shelf_slots > 0]
     base = bw[bw.placement_state == "none"]
-    shelf_lift, n_ls = _vm_lift(placed, base)
+    pairs = _vm_pairs(placed, base)          # the one population every lift uses
+    population = pairs.index
+    shelf_lift = (pairs.ratio.median() - 1) if len(pairs) else None
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Brand-weeks on shelf", f"{len(placed):,}")
     c2.metric("Net from placed brands", f"{placed.net.sum() / max(bw.net.sum(), 1):.0%}",
               help="Share of all brand net in the window earned by brands on a "
                    "recorded shelf position that week")
-    c3.metric("Shelf lift vs none", "—" if shelf_lift is None else f"{shelf_lift:+.0%}",
-              help=f"Median across {n_ls} brand-stores with ≥{VM_MIN_WEEKS} weeks in each bucket")
+    c3.metric("Shelf lift vs no placement",
+              "—" if shelf_lift is None else f"{shelf_lift:+.0%}",
+              help=(f"{len(pairs)} brand-stores with ≥{VM_MIN_WEEKS} placed weeks and "
+                    f"≥{VM_MIN_WEEKS} unplaced weeks. Median net/wk placed "
+                    f"${pairs.median_t.median():,.0f} vs ${pairs.median_b.median():,.0f} "
+                    f"unplaced.") if len(pairs) else None)
     c4.metric("Takeover brand-weeks set aside", f"{n_tk:,}",
               help="Brand-store-weeks inside a Takeover window, excluded from the "
                    "figures above; see the Takeover cross-reference below")
+    st.markdown(f'<p class="note">{VM_COMPARED_TO} Every lift table below is computed '
+                f'on the same {len(pairs)} brand-stores as the headline, so the rows are '
+                f'slices of one population rather than separate samples. Lift is a median '
+                f'of per-brand ratios, so rows do not add up to the headline the way a '
+                f'total would.</p>', unsafe_allow_html=True)
 
-    # ---- by tier / state --------------------------------------------------
+    # ---- by tier / spotlight ---------------------------------------------
     left, right = st.columns(2)
     with left:
         st.markdown("##### Lift by shelf tier")
-        t = _vm_lift_table(bw, "best_tier", TIERS)
-        st.dataframe(t.style.format({"Median net / wk": "${:,.0f}", "Lift vs none": "{:+.0%}"},
-                                    na_rep="—"),
+        t = _vm_lift_table(bw, "best_tier", TIERS, population)
+        st.dataframe(t.style.format(_LIFT_FMT, na_rep="—"),
                      use_container_width=True, hide_index=True)
-        st.markdown('<p class="note">best_tier is the highest shelf a brand held that '
-                    'week in that store, so a brand on Top and Bottom counts as Top.</p>',
+        st.markdown('<p class="note">Tier = the highest shelf the brand held that week '
+                    'in that store. Net/wk columns are the median brand-store\'s weekly '
+                    'net, placed vs unplaced — read the $ before the %.</p>',
                     unsafe_allow_html=True)
     with right:
         st.markdown("##### Spotlight vs regular shelf")
         bw["kind"] = np.where(bw.spotlight_slots > 0, "spotlight",
                               np.where(bw.shelf_slots > 0, "regular shelf", "none"))
-        t = _vm_lift_table(bw, "kind", ["regular shelf", "spotlight"])
-        st.dataframe(t.style.format({"Median net / wk": "${:,.0f}", "Lift vs none": "{:+.0%}"},
-                                    na_rep="—"),
+        t = _vm_lift_table(bw, "kind", ["regular shelf", "spotlight"], population)
+        st.dataframe(t.style.format(_LIFT_FMT, na_rep="—"),
                      use_container_width=True, hide_index=True)
         st.markdown('<p class="note">"spotlight" = at least one slot that week in a '
                     'themed/spotlight fixture (TTA Spotlight, Loyalty, Roots of '
-                    'Cannabis, Future of Flower, brand spotlights).</p>',
+                    'Cannabis, Future of Flower, brand spotlights). Same comparison: '
+                    'the brand\'s own unplaced weeks.</p>',
                     unsafe_allow_html=True)
+
+    # ---- shelf to shelf ---------------------------------------------------
+    st.markdown("##### Shelf to shelf — same brand, different tier")
+    tp = _vm_tier_pairs(bw)
+    if tp.empty:
+        st.info("No brand-store spent 2+ weeks on two different tiers in this window.")
+    else:
+        st.dataframe(tp.style.format(_LIFT_FMT, na_rep="—"),
+                     use_container_width=True, hide_index=True)
+        st.markdown('<p class="note">Compared to: the same brand-store\'s own weeks on '
+                    'the lower tier (not unplaced weeks). Only brand-stores with 2+ '
+                    'weeks on each of the two tiers count, so this is the direct answer '
+                    'to "does moving up a shelf help?" — the last column is how often '
+                    'it did.</p>', unsafe_allow_html=True)
 
     # ---- by bay type ------------------------------------------------------
     st.markdown("##### Where placements earn the most")

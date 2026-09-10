@@ -24,6 +24,9 @@ Writes (cerebral_dash.duckdb)
     dash_vm_brand_resolve    how every VM brand name mapped to a POS brand (or didn't)
     dash_vm_takeover_week    takeover windows expanded to store-weeks
     dash_vm_takeover_xref    takeover × store × week × category: display vs sales
+    dash_vm_stock_week       brand × store × week floor stock (from inv_ingest.py's
+                             fact_inventory_week, when present); also joined onto
+                             dash_vm_brand_week as floor_*, brand_stockout, ...
     dash_vm_ingest_log       pass-through of the ingest report
 
 placement_state per brand-store-week: none | shelf.  A Takeover is NOT a
@@ -145,14 +148,14 @@ def build(src: Path, dash: Path, app_file: Path) -> None:
     con = duckdb.connect(str(dash))
     con.execute(f"ATTACH '{src}' AS src (READ_ONLY)")
 
-    print("[1/8] takeover calendar")
+    print("[1/9] takeover calendar")
     takeovers = load_takeovers(app_file)
     extra = con.execute("SELECT brand, start_date, end_date, stores, surface, source "
                         "FROM src.dim_takeover").fetchall() \
         if con.execute("SELECT count(*) FROM src.dim_takeover").fetchone()[0] else []
     print(f"      {len(takeovers)} from TAKEOVERS, {len(extra)} from takeovers.csv")
 
-    print("[2/8] brand resolution")
+    print("[2/9] brand resolution")
     pos_brands = [b for (b,) in con.execute(
         "SELECT DISTINCT brand FROM dash_brand_week WHERE brand IS NOT NULL").fetchall()]
     dash_alias = {a.lower(): c for a, c in con.execute(
@@ -172,7 +175,7 @@ def build(src: Path, dash: Path, app_file: Path) -> None:
     n_ok = sum(1 for r in resolved if r["pos_brand"])
     print(f"      {n_ok}/{len(resolved)} VM brand names resolved to a POS brand")
 
-    print("[3/8] takeover × store-week")
+    print("[3/9] takeover × store-week")
     con.execute("CREATE OR REPLACE TABLE dash_vm_takeover_week "
                 "(takeover VARCHAR, pos_brand VARCHAR, brand_key VARCHAR, store_key INTEGER, "
                 "iso_year INTEGER, iso_week INTEGER, covered_days INTEGER, surface VARCHAR)")
@@ -206,7 +209,7 @@ def build(src: Path, dash: Path, app_file: Path) -> None:
                sum(net) AS net, sum(units) AS units, sum(baskets) AS baskets, sum(gm) AS gm
         FROM dash_brand_week GROUP BY ALL""")
 
-    print("[4/8] dash_vm_placement_week")
+    print("[4/9] dash_vm_placement_week")
     con.execute("""
         CREATE OR REPLACE TABLE dash_vm_placement_week AS
         SELECT p.store, w.store_key, w.iso_year, w.iso_week, w.week_start,
@@ -222,7 +225,7 @@ def build(src: Path, dash: Path, app_file: Path) -> None:
          AND s.iso_week = w.iso_week AND s.brand = r.pos_brand
     """)
 
-    print("[5/8] dash_vm_brand_week")
+    print("[5/9] dash_vm_brand_week")
     con.execute(f"""
         CREATE OR REPLACE TABLE dash_vm_brand_week AS
         WITH wk AS (SELECT DISTINCT store_key, iso_year, iso_week, week_start FROM src.dim_vm_week),
@@ -265,7 +268,64 @@ def build(src: Path, dash: Path, app_file: Path) -> None:
                          AND d.iso_year = wk.iso_year AND d.iso_week = wk.iso_week
     """)
 
-    print("[6/8] takeover cross-reference")
+    print("[6/9] stock levels (fact_inventory_week, if built)")
+    has_inv = con.execute("SELECT count(*) FROM duckdb_tables() "
+                          "WHERE database_name = 'src' AND table_name = 'fact_inventory_week'").fetchone()[0] > 0
+    if has_inv:
+        inv_names = [b for (b,) in con.execute(
+            "SELECT DISTINCT brand FROM src.fact_inventory_week WHERE brand <> ''").fetchall()]
+        inv_res = resolve_brands(inv_names, pos_brands, dash_alias, manual)
+        con.execute("CREATE OR REPLACE TABLE dash_vm_inv_brand_resolve "
+                    "(inv_brand VARCHAR, pos_brand VARCHAR, brand_key VARCHAR, method VARCHAR)")
+        con.executemany("INSERT INTO dash_vm_inv_brand_resolve VALUES (?,?,?,?)",
+                        [[r["vm_brand"], r["pos_brand"], r["brand_key"], r["method"]] for r in inv_res])
+        con.execute("""
+            CREATE OR REPLACE TABLE dash_vm_stock_week AS
+            SELECT r.pos_brand AS brand, i.store_key, i.iso_year, i.iso_week,
+                   count(*)                                   AS products,
+                   sum(i.floor_start)                         AS floor_start,
+                   sum(i.floor_end)                           AS floor_end,
+                   sum(i.total_end)                           AS total_end,
+                   sum(i.received)                            AS received,
+                   sum(i.sold_units)                          AS sold_units,
+                   sum(i.moved_to_floor)                      AS moved_to_floor,
+                   count(*) FILTER (WHERE i.stockout_floor)   AS products_stocked_out,
+                   count(*) FILTER (WHERE i.stockout_floor IS NULL) AS products_unknown,
+                   count(*) FILTER (WHERE i.floor_end > 0)    AS products_on_floor_end,
+                   -- brand-level stockout: nothing on the floor at the end of the week,
+                   -- or every product that was on the floor provably ran dry.
+                   -- Unknown (NULL) products block a TRUE verdict; the brand week
+                   -- becomes NULL = unknown, and the tab treats it as not-clean.
+                   CASE WHEN sum(i.floor_end) <= 0 THEN TRUE
+                        WHEN count(*) FILTER (WHERE i.stockout_floor IS NULL) > 0
+                             AND count(*) FILTER (WHERE i.stockout_floor = FALSE AND (i.floor_start > 0 OR i.moved_to_floor > 0)) = 0
+                             THEN NULL
+                        ELSE count(*) FILTER (WHERE i.stockout_floor) > 0
+                             AND count(*) FILTER (WHERE i.stockout_floor) =
+                                 count(*) FILTER (WHERE i.floor_start > 0 OR i.moved_to_floor > 0)
+                   END                                        AS brand_stockout,
+                   CASE WHEN sum(i.floor_start) + sum(i.moved_to_floor) > 0
+                        THEN sum(i.sold_units) / (sum(i.floor_start) + sum(i.moved_to_floor)) END
+                                                              AS floor_sell_through,
+                   median(i.days_of_supply_floor)             AS days_of_supply_floor
+            FROM src.fact_inventory_week i
+            JOIN dash_vm_inv_brand_resolve r ON r.inv_brand = i.brand AND r.pos_brand IS NOT NULL
+            GROUP BY ALL""")
+        n_inv = con.execute("SELECT count(*) FROM dash_vm_stock_week").fetchone()[0]
+        print(f"      {sum(1 for r in inv_res if r['pos_brand'])}/{len(inv_res)} inventory brands resolved; "
+              f"dash_vm_stock_week {n_inv:,} rows")
+        con.execute("""
+            CREATE OR REPLACE TABLE dash_vm_brand_week AS
+            SELECT b.*, s.floor_start, s.floor_end, s.sold_units AS inv_sold_units,
+                   s.moved_to_floor, s.products_stocked_out, s.products_unknown, s.products_on_floor_end,
+                   s.brand_stockout, s.floor_sell_through, s.days_of_supply_floor
+            FROM dash_vm_brand_week b
+            LEFT JOIN dash_vm_stock_week s USING (brand, store_key, iso_year, iso_week)""")
+    else:
+        print("      fact_inventory_week not in tta.duckdb — run inv_ingest.py to enable stock-adjusted lift")
+        con.execute("CREATE OR REPLACE TABLE dash_vm_stock_week AS SELECT NULL::VARCHAR AS brand LIMIT 0")
+
+    print("[7/9] takeover cross-reference")
     # bay_type / product_hint -> POS category, so a Rythm flower-wall window can
     # be lined up with Rythm flower sales rather than the whole brand.
     con.execute("""
@@ -332,7 +392,7 @@ def build(src: Path, dash: Path, app_file: Path) -> None:
         ORDER BY takeover, store_key, iso_year, iso_week, category
     """)
 
-    print("[7/8] coverage")
+    print("[8/9] coverage")
     con.execute("""
         CREATE OR REPLACE TABLE dash_vm_coverage AS
         SELECT store_key, iso_year, iso_week, week_start, bay_raw, bay_type, shelf_tier,
@@ -341,7 +401,7 @@ def build(src: Path, dash: Path, app_file: Path) -> None:
                count(*) FILTER (WHERE pos_brand IS NOT NULL) AS brand_matched
         FROM dash_vm_placement_week GROUP BY ALL
     """)
-    print("[8/8] ingest log")
+    print("[9/9] ingest log")
     con.execute("CREATE OR REPLACE TABLE dash_vm_ingest_log AS SELECT * FROM src.vm_ingest_log")
 
     n = con.execute("SELECT count(*) FROM dash_vm_brand_week").fetchone()[0]

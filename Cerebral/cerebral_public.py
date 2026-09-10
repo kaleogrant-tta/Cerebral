@@ -4551,6 +4551,86 @@ def render_vm():
                                     "Δ net": "${:+,.0f}", "Δ %": "{:+.0%}"}, na_rep="—"),
                      use_container_width=True, hide_index=True)
 
+    # ---- stock-adjusted view ---------------------------------------------
+    st.markdown("##### Stock on the floor — the confounder")
+    has_stock = "floor_end" in bw.columns and bw.floor_end.notna().any()
+    if not has_stock:
+        st.info("No stock history in the loaded file yet. Once inv_ingest.py has run "
+                "(Dutchie Current Inventory + Inventory Adjustments exports), this section "
+                "shows lift with stockout weeks removed, wasted slots, and sell-through by tier.")
+    else:
+        sw = bw[bw.floor_end.notna()]
+        cov = f"{sw.week_start.min():%b %d} → {sw.week_start.max():%b %d}"
+        st.markdown(
+            f'<p class="note">Stock history covers {cov}. A brand-store-week is a '
+            f'<b>stockout</b> when the brand had nothing left on the sales floor at the '
+            f'end of the week, or every product it had on the floor ran dry during it. '
+            f'Vault stock does not count — it cannot sell. Weeks where a product\'s '
+            f'opening stock is unknowable are neither in nor out; they are dropped from '
+            f'the "stockout weeks removed" figures.</p>', unsafe_allow_html=True)
+
+        # 1. lift with stockout weeks removed, next to the unadjusted figure
+        clean = sw[sw.brand_stockout.eq(False)]          # NULL = unknown, not clean
+        a = _vm_pairs(sw[sw.shelf_slots > 0], sw[sw.placement_state == "none"])
+        b_ = _vm_pairs(clean[clean.shelf_slots > 0], clean[clean.placement_state == "none"])
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Shelf lift, stock weeks only",
+                  "—" if a.empty else f"{a.ratio.median() - 1:+.0%}",
+                  help=f"{len(a)} brand-stores, same formula as the headline, restricted to weeks with stock data")
+        c2.metric("Shelf lift, stockout weeks removed",
+                  "—" if b_.empty else f"{b_.ratio.median() - 1:+.0%}",
+                  help=f"{len(b_)} brand-stores. Placed and unplaced weeks both exclude stockouts")
+        n_wasted = int((sw.shelf_slots > 0).__and__(sw.brand_stockout.fillna(False).astype(bool)).sum())
+        c3.metric("Wasted slots (placed but stocked out)", f"{n_wasted:,}",
+                  help="Brand-store-weeks with a recorded shelf position where the brand ran out on the floor")
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Lift by tier, stockout weeks removed**")
+            pop = b_.index
+            t = _vm_lift_table(clean, "best_tier", TIERS, pop)
+            st.dataframe(t.style.format(_LIFT_FMT, na_rep="—"),
+                         use_container_width=True, hide_index=True)
+            st.markdown(f'<p class="note">{VM_COMPARED_TO} Both sides exclude stockout '
+                        'weeks, so a tier is no longer penalised for weeks it had nothing '
+                        'to sell.</p>', unsafe_allow_html=True)
+        with right:
+            st.markdown("**Floor sell-through by tier**")
+            pl = sw[(sw.shelf_slots > 0) & sw.floor_sell_through.notna()]
+            stt = (pl.groupby("best_tier")
+                     .agg(**{"Brand-weeks": ("brand", "size"),
+                             "Median sell-through": ("floor_sell_through", "median"),
+                             "Median floor units start": ("floor_start", "median"),
+                             "Median days of supply": ("days_of_supply_floor", "median")})
+                     .reindex(TIERS).dropna(how="all").reset_index()
+                     .rename(columns={"best_tier": "Tier"}))
+            st.dataframe(stt.style.format({"Median sell-through": "{:.0%}",
+                                           "Median floor units start": "{:,.0f}",
+                                           "Median days of supply": "{:,.0f}"}, na_rep="—"),
+                         use_container_width=True, hide_index=True)
+            st.markdown('<p class="note">Sell-through = units sold ÷ (units on the floor at '
+                        'the start of the week + units moved to the floor during it). This '
+                        'separates "Top sells more" from "Top gets stocked more".</p>',
+                        unsafe_allow_html=True)
+
+        ws_ = sw[(sw.shelf_slots > 0) & sw.brand_stockout.fillna(False).astype(bool)].copy()
+        if not ws_.empty:
+            with st.expander(f"Wasted slots — {len(ws_)} placed brand-weeks that stocked out"):
+                ws_["Store"] = ws_.store_key.map(STORES)
+                st.dataframe(ws_.sort_values(["week_start", "Store"])
+                             [["Store", "week_start", "brand", "best_tier", "shelf_slots", "bay_types",
+                               "floor_start", "moved_to_floor", "inv_sold_units", "floor_end", "net"]]
+                             .rename(columns={"week_start": "Week of", "brand": "Brand",
+                                              "best_tier": "Tier", "shelf_slots": "Slots",
+                                              "bay_types": "Bays", "floor_start": "Floor start",
+                                              "moved_to_floor": "Moved to floor",
+                                              "inv_sold_units": "Sold", "floor_end": "Floor end",
+                                              "net": "Net"})
+                             .style.format({"Floor start": "{:,.0f}", "Moved to floor": "{:,.0f}",
+                                            "Sold": "{:,.0f}", "Floor end": "{:,.0f}",
+                                            "Net": "${:,.0f}"}, na_rep="—"),
+                             use_container_width=True, hide_index=True)
+
     # ---- takeover cross-reference -----------------------------------------
     st.markdown("##### Takeover cross-reference — what was actually on display")
     st.markdown(

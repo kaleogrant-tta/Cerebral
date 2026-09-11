@@ -1,4 +1,4 @@
-﻿"""checks.py - post-build validation for Cerebral.
+"""checks.py - post-build validation for Cerebral.
 Run from Cerebral/ after a build:
     python checks.py --dash ../cerebral_dash.duckdb --db ../tta.duckdb
 Exit code 1 on any FAIL (add --strict to fail on WARN too).
@@ -227,8 +227,13 @@ def check_stock_week(dash):
     report("stock-week: no negative stock", PASS if z == 0 else FAIL, f"{z} rows")
     z = q1(dash, f"select count(*) from {t} where floor_sell_through < 0 or floor_sell_through > 1.5")
     report("stock-week: floor_sell_through sane (0-150%)", PASS if z == 0 else WARN, f"{z} rows")
+    # publish_vm.py: brand_stockout = floor empty at week end, OR every product that was on the
+    # floor provably ran dry (so products_stocked_out > 0). Anything else is a contradiction.
+    z = q1(dash, f"select count(*) from {t} where brand_stockout and floor_end > 0 and products_stocked_out = 0")
+    report("stock-week: brand_stockout has a cause (empty floor or a stocked-out product)", PASS if z == 0 else FAIL, f"{z} rows")
     z = q1(dash, f"select count(*) from {t} where brand_stockout and floor_end > 0")
-    report("stock-week: brand_stockout implies floor_end = 0", PASS if z == 0 else FAIL, f"{z} rows")
+    report("stock-week: stocked-out brands with floor stock at week end", PASS if z == 0 else WARN,
+           f"{z} rows - stock ended on the floor for a product that never started there or was moved to floor (ledger gap?)")
     z = q1(dash, f"select count(*) from {t} where products_stocked_out > products or products_unknown > products or products_on_floor_end > products")
     report("stock-week: product counters <= products", PASS if z == 0 else FAIL, f"{z} rows")
 

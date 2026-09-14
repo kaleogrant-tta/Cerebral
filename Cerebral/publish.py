@@ -970,9 +970,9 @@ def build(src: str, dest: str) -> dict:
                 product_sku VARCHAR, units_received DOUBLE)
         """)
     else:
-        con.execute("""
+        con.execute(f"""
             CREATE TABLE dash_gwp_receipt AS
-            SELECT store_key, receive_date AS day, brand, product, product_sku,
+            SELECT store_key, receive_date AS day, {_canon_brand_sql('brand')} AS brand, product, product_sku,
                    SUM(quantity) AS units_received
             FROM src.fact_receipt
             WHERE is_gwp

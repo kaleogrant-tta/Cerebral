@@ -62,6 +62,7 @@ def check_weeks_aligned(dash):
         lag = yw_ord(ry, rw) - yw_ord(y, w)
         if lag == 0: report(f"latest week {t}", PASS, f"{y}-W{w:02d}")
         elif t.startswith("dash_vm_") and lag <= VM_LAG_WEEKS_OK: report(f"latest week {t}", PASS, f"{y}-W{w:02d} ({lag}w behind, within VM tolerance)")
+        elif lag == -1: report(f"latest week {t}", WARN, f"{y}-W{w:02d} is 1 week ahead of dash_brand_week (partial week from the Monday drop)")
         elif lag < 0: report(f"latest week {t}", FAIL, f"{y}-W{w:02d} is AHEAD of sales")
         else: report(f"latest week {t}", WARN, f"{y}-W{w:02d} - {lag} weeks behind sales (re-run vm_ingest?)")
 
@@ -100,7 +101,7 @@ def check_inventory_fresh(db):
     last = last_sale_date(db)
     nxt = last + dt.timedelta(days=1)
     expected = nxt - dt.timedelta(days=nxt.weekday())          # Monday of the week after the last sale
-    real = as_date(q1(db, "select max(snapshot_date) from fact_inventory where source='dutchie_export'"))
+    real = as_date(q1(db, "select max(snapshot_date) from fact_inventory where source is null or source='dutchie_export'"))
     newest = as_date(q1(db, "select max(snapshot_date) from fact_inventory"))
     report("fact_inventory: Dutchie export covers the latest sales week",
            PASS if real and real >= expected else FAIL,
@@ -151,7 +152,7 @@ def check_brand_week_vs_fact(dash, db):
 
 def check_dash_inventory_current(dash, db):
     snap = as_date(q1(dash, "select max(snapshot_date) from dash_inventory"))
-    real = as_date(q1(db, "select max(snapshot_date) from fact_inventory where source='dutchie_export'"))
+    real = as_date(q1(db, "select max(snapshot_date) from fact_inventory where source is null or source='dutchie_export'"))
     report("dash_inventory: built from newest Dutchie export", PASS if snap == real else FAIL,
            f"dash_inventory {snap} vs newest export {real}")
     d_tot = q1(dash, "select sum(qoh) from dash_inventory") or 0

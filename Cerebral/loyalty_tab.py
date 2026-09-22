@@ -285,6 +285,12 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
                               legend_title_text="")
             fig.update_yaxes(tickprefix="$")
             _wide(st.plotly_chart, fig, key="loy_ch")
+            thin = g[g.baskets < 30]
+            if not thin.empty:
+                st.caption("Thin cells (under 30 baskets in this window) - "
+                           "treat as directional: " + ", ".join(
+                               "%s x %s (n=%d)" % (r.tier, r.channel, r.baskets)
+                               for _, r in thin.iterrows()))
 
             if keep and min(keep) < NON_STOP_FIRST:
                 st.warning(

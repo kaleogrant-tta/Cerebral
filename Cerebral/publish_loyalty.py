@@ -105,7 +105,6 @@ def build_loyalty(con, min_cell: int = MIN_CELL) -> dict:
                    SUM(net) AS net,
                    SUM(CASE WHEN redeem > 0 THEN 1 ELSE 0 END) AS redeem_baskets
             FROM base GROUP BY 1,2,3,4,5
-            HAVING COUNT(DISTINCT ck) >= {min_cell}
         ),
         chain AS (
             SELECT 0 AS store_key, iso_year, iso_week, channel, tier,

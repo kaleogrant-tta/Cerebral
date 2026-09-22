@@ -182,7 +182,7 @@ def main() -> int:
         print("  [6/7] building dashboard")
         here = Path(__file__).resolve().parent
         rc = os.system(
-            f"cd {here} && python3 publish.py --db {DB_LOCAL} --upload"
+            f"cd {here} && python3 publish.py --db {DB_LOCAL}"   # no --upload: the workflow uploads after checks.py passes
         )
         if rc != 0:
             print("  !! dashboard build/upload FAILED (exit %d) — database and "

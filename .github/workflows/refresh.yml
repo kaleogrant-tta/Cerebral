@@ -71,4 +71,4 @@ jobs:
 
       - name: Note failure
         if: failure()
-        run: echo "::error::Refresh failed. Drive state unchanged — safe to re-run from the Actions tab."
+        run: echo "::error::Refresh failed. tta.duckdb and Sheets were updated; cerebral_dash.duckdb on Drive is still the previous copy — safe to re-run from the Actions tab."

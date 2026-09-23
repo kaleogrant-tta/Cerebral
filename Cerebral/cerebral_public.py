@@ -3681,6 +3681,9 @@ TAKEOVERS = [
     {"name": "Ruby Farms", "start": "2026-07-16", "end": "2026-08-17",
      "notes": "4-week SBC, all 4 stores + e-comm",
      "patterns": ["ruby farms", "ruby"]},
+    {"name": "Wyld", "start": "2026-09-15", "end": "2026-10-18",
+     "notes": "5-week takeover, Wyld brand only (Good Tide excluded)",
+     "patterns": ["wyld"]},
 ]
 
 

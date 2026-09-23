@@ -75,6 +75,10 @@ from pathlib import Path
 
 import duckdb
 from openpyxl import load_workbook
+import time
+_T = [time.time()]
+def _lap(label):
+    now = time.time(); print(f"  [timing] {label}: {now - _T[0]:.0f}s", flush=True); _T[0] = now
 
 STORE_KEY = {  # Dutchie location name fragment -> Cerebral store_key
     "downtown brooklyn": 1, "fifth avenue": 2, "soho": 3, "union square": 4,
@@ -254,6 +258,7 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
             print(f"[{i}/{len(files)}] {f.name:<50} ⚠ not a Dutchie inventory export — skipped")
             log.append(dict(file=f.name, kind="skipped", rows=0, note="unrecognised header"))
 
+    _lap("parse exports")
     if snapshots:
         anchor_ts, anchor_file, anchor_rows = max(snapshots, key=lambda s: s[0])
         print(f"\nanchor: {anchor_file.name} @ {anchor_ts}")
@@ -290,6 +295,7 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
             seen.add(r["key"])
             events.append(r)
     print(f"ledger events kept: {len(events):,} (deduped, {since} -> anchor)")
+    _lap("anchor + dedupe")
 
     # anchor balances per store x product, plus package -> class for Adjust rows
     total = defaultdict(float)
@@ -363,6 +369,7 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
         WHERE txn_ts >= ? AND txn_ts <= ?
         GROUP BY ALL""", [dt.datetime.combine(since, dt.time()), anchor_ts]).fetchall()
     print(f"sales rows: {len(sales):,}")
+    _lap("extra anchors + sales query")
 
     # unified, signed event stream  (dt, store, product, d_total, d_floor, kind, qty)
     stream = []
@@ -406,6 +413,7 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
         stream.append((ts, sk, k[1], -units, -units, "sold_units", units))
     stream.sort(key=lambda e: e[0], reverse=True)  # newest first: we roll BACK
     print(f"cross-store transfers booked: {n_xfer}")
+    _lap("event stream build + sort")
 
     # week boundaries (ISO weeks, Monday start), newest first
     def week_start(d: dt.date) -> dt.date:
@@ -626,3 +634,4 @@ if __name__ == "__main__":
         import tempfile
         folder = pull_from_drive(Path(tempfile.gettempdir()) / "tta_inventory")
     build(folder, a.db, a.since)
+    _lap("week roll-up + offsets + write")

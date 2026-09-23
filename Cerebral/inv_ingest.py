@@ -74,6 +74,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 from openpyxl import load_workbook
 import time
 _T = [time.time()]
@@ -497,7 +498,13 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
             total_start DOUBLE, total_end DOUBLE, floor_start DOUBLE, floor_end DOUBLE,
             received DOUBLE, sold_units DOUBLE, moved_to_floor DOUBLE, adjusted DOUBLE,
             floor_min DOUBLE, stockout_floor BOOLEAN)""")
-    con.executemany("INSERT INTO fact_inventory_week VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", out)
+    _lap("python roll-up")
+    _fiw = pd.DataFrame(out, columns=["store_key", "iso_year", "iso_week", "week_start", "product", "brand", "category", "total_start", "total_end", "floor_start", "floor_end", "received", "sold_units", "moved_to_floor", "adjusted", "floor_min", "stockout_floor"])
+    _fiw["week_start"] = pd.to_datetime(_fiw["week_start"])
+    con.register("_fiw", _fiw)
+    con.execute("INSERT INTO fact_inventory_week SELECT store_key, iso_year, iso_week, CAST(week_start AS DATE), product, brand, category, total_start, total_end, floor_start, floor_end, received, sold_units, moved_to_floor, adjusted, floor_min, CAST(stockout_floor AS BOOLEAN) FROM _fiw")
+    con.unregister("_fiw")
+    _lap("write fact_inventory_week")
     # Opening stock the ledger never saw (received before --since, or corrected
     # later by a positive Adjust) shows up as the series dipping below zero.
     # The deepest dip is the least opening stock the product must have had:
@@ -550,6 +557,7 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
                          ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)) s
         WHERE t.store_key = s.store_key AND t.product = s.product
           AND t.iso_year = s.iso_year AND t.iso_week = s.iso_week""")
+    _lap("offsets + days-of-supply updates")
     # ---- feed fact_inventory ---------------------------------------------
     # publish.py builds dash_inventory / dash_bei / dash_acc_product_inv from
     # fact_inventory at MAX(snapshot_date). Writing the reconstruction in as
@@ -589,9 +597,13 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
                 fi_rows.append((we, sk, None, product, cat, cat_map.get(cat, cat), room, True,
                                 qty, uc, up, qty * uc, qty * up, "ledger_rollback"))
         if fi_rows:
-            con.executemany("INSERT INTO fact_inventory (snapshot_date, store_key, package_id, product, "
-                            "raw_category, category, room, sellable, qty_on_hand, unit_cost, unit_price, "
-                            "ext_cost, ext_retail, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", fi_rows)
+            _fi = pd.DataFrame(fi_rows, columns=["snapshot_date", "store_key", "package_id", "product", "raw_category", "category", "room", "sellable", "qty_on_hand", "unit_cost", "unit_price", "ext_cost", "ext_retail", "source"])
+            _fi["snapshot_date"] = pd.to_datetime(_fi["snapshot_date"])
+            _fi["package_id"] = _fi["package_id"].astype("string")
+            con.register("_fi", _fi)
+            con.execute("INSERT INTO fact_inventory (snapshot_date, store_key, package_id, product, raw_category, category, room, sellable, qty_on_hand, unit_cost, unit_price, ext_cost, ext_retail, source) SELECT CAST(snapshot_date AS DATE), store_key, CAST(package_id AS VARCHAR), product, raw_category, category, room, CAST(sellable AS BOOLEAN), qty_on_hand, unit_cost, unit_price, ext_cost, ext_retail, source FROM _fi")
+            con.unregister("_fi")
+            _lap("write fact_inventory")
         unmapped = sorted({r[4] for r in fi_rows if r[4] and r[4] not in cat_map})
         if unmapped:
             print(f"  ⚠ {len(unmapped)} raw categories have no canonical mapping in fact_inventory "

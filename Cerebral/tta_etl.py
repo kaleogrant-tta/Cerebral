@@ -663,7 +663,11 @@ class Pipeline:
         # --- reconciliation ----------------------------------------------
         # The Breakdown includes sample-register and Non-Sale volume, so compare
         # like for like: add back what we deliberately excluded.
-        bd_units = float(det["QuantitySold"].sum())
+        _bd_q = pd.to_numeric(det["QuantitySold"], errors="coerce").fillna(0)
+        _bd_neg = float(-_bd_q[_bd_q < 0].sum())
+        # The Breakdown carries negative-quantity rows (reversals/returns, usually $0) that
+        # never appear as dispensation lines; compare on units sold, i.e. positives only.
+        bd_units = float(_bd_q[_bd_q > 0].sum())
         _ret_units = float(line.loc[line["is_return"].fillna(False).astype(bool), "units"].sum()) if "is_return" in line.columns else 0.0
         _gross = float(line["units"].sum()) + excl_units + float(excluded_cat_units)
         # Returns sit in our lines as positive units flagged is_return. The Breakdown
@@ -676,7 +680,7 @@ class Pipeline:
               qty_gap <= THRESHOLDS["qty_recon_tolerance"],
               f"{our_units:,.0f} vs breakdown {bd_units:,.0f} "
               f"({qty_gap*100:.3f}%, {bd_units-our_units:+,.0f} units; basis={_basis}, "
-              f"{_ret_units:,.0f} returned units, "
+              f"{_bd_neg:,.0f} reversal units in breakdown, "
               f"{excl_lines:,} sample + {excluded_cat_lines:,} non-sale excluded)",
               warn=qty_gap <= THRESHOLDS["qty_recon_fail"])
         if qty_gap > THRESHOLDS["qty_recon_tolerance"]:

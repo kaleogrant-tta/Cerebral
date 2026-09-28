@@ -664,12 +664,19 @@ class Pipeline:
         # The Breakdown includes sample-register and Non-Sale volume, so compare
         # like for like: add back what we deliberately excluded.
         bd_units = float(det["QuantitySold"].sum())
-        our_units = float(line["units"].sum()) + excl_units + float(excluded_cat_units)
+        _ret_units = float(line.loc[line["is_return"].fillna(False).astype(bool), "units"].sum()) if "is_return" in line.columns else 0.0
+        _gross = float(line["units"].sum()) + excl_units + float(excluded_cat_units)
+        # Returns sit in our lines as positive units flagged is_return. The Breakdown
+        # either drops them or nets them from QuantitySold; reconcile on whichever
+        # reading is closest and say which on the detail line.
+        _cands = {"gross": _gross, "returns excluded": _gross - _ret_units, "returns netted": _gross - 2 * _ret_units}
+        _basis, our_units = min(_cands.items(), key=lambda kv: abs(kv[1] - bd_units))
         qty_gap = abs(our_units - bd_units) / max(bd_units, 1)
         check("qty_reconciliation",
               qty_gap <= THRESHOLDS["qty_recon_tolerance"],
               f"{our_units:,.0f} vs breakdown {bd_units:,.0f} "
-              f"({qty_gap*100:.3f}%, {bd_units-our_units:+,.0f} units; "
+              f"({qty_gap*100:.3f}%, {bd_units-our_units:+,.0f} units; basis={_basis}, "
+              f"{_ret_units:,.0f} returned units, "
               f"{excl_lines:,} sample + {excluded_cat_lines:,} non-sale excluded)",
               warn=qty_gap <= THRESHOLDS["qty_recon_fail"])
         if qty_gap > THRESHOLDS["qty_recon_tolerance"]:

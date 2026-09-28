@@ -587,6 +587,7 @@ class Pipeline:
                   f"adjustments (>={THRESHOLDS['bulk_event_min_lines']} lines). Excluded.")
 
         # Now drop deliberate exclusions and account for them separately.
+        fl_all = fl.copy()   # pre-exclusion copy, used only by the qty_reconciliation diagnostic
         excl_units = float(fl.loc[fl["channel"] == "EXCLUDE", "Qty"].sum())
         excl_lines = int((fl["channel"] == "EXCLUDE").sum())
         fl = fl[fl["channel"].notna() & (fl["channel"] != "EXCLUDE")].copy()
@@ -671,6 +672,15 @@ class Pipeline:
               f"({qty_gap*100:.3f}%, {bd_units-our_units:+,.0f} units; "
               f"{excl_lines:,} sample + {excluded_cat_lines:,} non-sale excluded)",
               warn=qty_gap <= THRESHOLDS["qty_recon_fail"])
+        if qty_gap > THRESHOLDS["qty_recon_tolerance"]:
+            _pc = next((c for c in ("Product", "ProductName", "Product Name", "product") if c in fl_all.columns), None)
+            if _pc is not None:
+                _ours = fl_all.groupby(fl_all[_pc].astype(str).str.strip())["Qty"].sum()
+                _bd = det.groupby(det["Product"].astype(str).str.strip())["QuantitySold"].sum()
+                _d = _ours.subtract(_bd, fill_value=0).astype(float)
+                _d = _d[_d != 0].sort_values(key=abs, ascending=False)
+                _top = "; ".join(f"{v:+.0f} {str(p)[:45]}" for p, v in _d.head(8).items())
+                checks[-1]["detail"] += f" | {len(_d)} product(s) differ (+ = more in POS lines): {_top}"
 
         net_gap = abs(line["net_sales"].sum() - det["NetSales"].sum()) / max(det["NetSales"].sum(), 1)
         check("net_reconciliation",

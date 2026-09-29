@@ -49,6 +49,13 @@ jobs:
         run: python inv_ingest.py --from-drive --db /tmp/tta_work/tta.duckdb --since 2025-12-01
 
       # Build the dashboard file (no upload here - publish_vm.py ships it)
+      - name: Push enriched database back to Drive
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TTA_DRIVE_STATE:   ${{ secrets.TTA_DRIVE_STATE }}
+        run: python push_db.py /tmp/tta_work/tta.duckdb
+
+      # Build the dashboard file (no upload here - publish_vm.py ships it)
       - name: Publish dashboard file
         run: python publish.py --db /tmp/tta_work/tta.duckdb
 

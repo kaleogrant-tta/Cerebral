@@ -42,8 +42,7 @@ VM_LAG_WEEKS_OK = 2   # floor sets are logged by hand; allow a little lag before
 # Monday drop), which must block the upload rather than warn.
 LAG_FAIL_PREFIXES = ("dash_loyalty_", "dash_redemption_", "dash_brand_redemption")
 
-def check_tables_present(dash)
-    check_category_stock(dash):
+def check_tables_present(dash):
     have = tables(dash)
     print(f"  ({len([t for t in have if t.startswith('dash_')])} dash_* tables found)")
     for t in REQUIRED_DASH:

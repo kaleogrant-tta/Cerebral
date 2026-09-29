@@ -15,7 +15,8 @@ try:
     NAME = DRIVE["db_filename"]
 except Exception:
     NAME = "tta.duckdb"
-db = Path(sys.argv[1] if len(sys.argv) > 1 else "../tta.duckdb").resolve()
+db = Path(sys.argv[1]) if len(sys.argv) > 1 else (Path("tta.duckdb") if Path("tta.duckdb").exists() else Path("../tta.duckdb"))
+db = db.resolve()
 if not db.exists():
     sys.exit(f"no such file: {db}")
 print(f"uploading {db} ({db.stat().st_size/1e6:.0f} MB) -> Drive state folder as {NAME}", flush=True)

@@ -293,6 +293,7 @@ def main():
     run("alias", check_alias_applied, dash); run("gwp", check_gwp, dash, db)
     run("event tracker", check_event_tracker, dash)
     run("takeover", check_takeover_calendar, dash); run("stock week", check_stock_week, dash)
+    run("category stock", check_category_stock, dash)
 
     counts = {s: sum(1 for _, st, _ in RESULTS if st == s) for s in (PASS, FAIL, WARN, SKIP)}
     print(f"== {counts[PASS]} pass, {counts[FAIL]} fail, {counts[WARN]} warn, {counts[SKIP]} skip")

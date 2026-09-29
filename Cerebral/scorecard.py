@@ -75,16 +75,52 @@ def week_series(con, store_filter):
                    COUNT(DISTINCT basket_id) AS baskets_with
             FROM fact_line WHERE NOT is_return {store_filter}
             GROUP BY 1,2,3
+        ),
+        sk AS (
+            -- shelf context per category-week, so a penetration dip is read
+            -- against what was actually in stock rather than as pure demand
+            SELECT iso_year, iso_week, {_CAT_CASE} AS category,
+                   COUNT(DISTINCT product) FILTER (
+                       WHERE floor_start > 0 OR floor_end > 0 OR sold_units > 0) AS skus_in_stock,
+                   COUNT(DISTINCT product) FILTER (WHERE stockout_floor)         AS skus_out,
+                   SUM(floor_end)                                               AS floor_units_end
+            FROM fact_inventory_week WHERE 1=1 {store_filter}
+            GROUP BY 1,2,3
         )
         SELECT cw.iso_year, cw.iso_week, cw.category,
                cw.net, cw.gm, cw.units, cw.baskets_with,
                bw.baskets, bw.days_open, bw.net_all,
                cw.baskets_with::DOUBLE / bw.baskets              AS penetration,
                cw.net / bw.baskets * 100                         AS per100,
-               cw.gm / NULLIF(cw.net,0)                          AS margin_pct
+               cw.gm / NULLIF(cw.net,0)                          AS margin_pct,
+               sk.skus_in_stock, sk.skus_out, sk.floor_units_end
         FROM cw JOIN bw USING (iso_year, iso_week)
+        LEFT JOIN sk ON sk.iso_year = cw.iso_year AND sk.iso_week = cw.iso_week
+                    AND sk.category = cw.category
         ORDER BY cw.iso_year, cw.iso_week, cw.category
     """).df()
+
+
+STOCK_DROP = 0.80   # in-stock SKUs under 80% of the 4-week norm reads as a supply problem
+
+# fact_inventory_week keeps Dutchie's raw category names; sales use the canonical
+# ones, so map inventory onto the same names before joining (same map as the ETL).
+from tta_config import CATEGORY_MAP
+_CAT_CASE = ("CASE category " + " ".join(
+    f"WHEN '{k.replace(chr(39), chr(39)*2)}' THEN '{v}'" for k, v in CATEGORY_MAP.items())
+    + " ELSE category END")
+
+def stock_note(hist, r):
+    """Availability index: this week's in-stock SKUs vs the trailing 4-week mean."""
+    if "skus_in_stock" not in hist or pd.isna(r.skus_in_stock):
+        return None, ""
+    base = hist.skus_in_stock.tail(4).mean()
+    if not base or pd.isna(base):
+        return None, ""
+    idx = r.skus_in_stock / base
+    out = int(r.skus_out) if pd.notna(r.skus_out) else 0
+    return idx, (f" | in-stock SKUs {int(r.skus_in_stock)} vs 4-wk avg {base:.0f} "
+                 f"({idx*100:.0f}%), {out} stocked out")
 
 
 def control_limits(hist: pd.Series, n_baskets: float):
@@ -225,13 +261,21 @@ def main() -> int:
             base, lcl, ucl = control_limits(h.penetration, r.baskets)
             if base is not None:
                 if r.penetration < lcl:
+                    idx, note = stock_note(h, r)
+                    why = ("" if idx is None else
+                           " - likely SUPPLY-driven, not demand" if idx < STOCK_DROP
+                           else " - shelf was normal, read as demand")
                     alerts.append(
                         f"{cat}: penetration {r.penetration*100:.1f}% is BELOW "
-                        f"lower control limit {lcl*100:.1f}% (baseline {base*100:.1f}%)")
+                        f"lower control limit {lcl*100:.1f}% (baseline {base*100:.1f}%){why}{note}")
                 elif r.penetration > ucl:
                     alerts.append(
                         f"{cat}: penetration {r.penetration*100:.1f}% is ABOVE "
                         f"upper control limit {ucl*100:.1f}% (baseline {base*100:.1f}%)")
+            idx, note = stock_note(h, r)
+            if idx is not None and idx < STOCK_DROP and (lcl is None or r.penetration >= lcl):
+                alerts.append(f"{cat}: in-stock SKUs at {idx*100:.0f}% of 4-wk norm"
+                              f"{note} - penetration holding for now, watch it")
             rr = run_rules(pd.concat([h.penetration, pd.Series([r.penetration])]))
             if rr:
                 alerts.append(f"{cat}: {rr} on penetration")

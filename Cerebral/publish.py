@@ -313,7 +313,35 @@ def build(src: str, dest: str) -> dict:
         """)
 
     # --- category x store x channel x week -------------------------------
-    con.execute("""
+    # Shelf context per store x category x week from fact_inventory_week (built
+    # by inv_ingest) so a category dip can be read against availability. The
+    # table is optional in the source DB: without it the three columns are NULL.
+    from tta_config import CATEGORY_MAP
+    _has_inv_week = con.execute(
+        "SELECT count(*) FROM duckdb_tables() WHERE database_name='src' "
+        "AND table_name='fact_inventory_week'").fetchone()[0] > 0
+    _cat_case = ("CASE category " + " ".join(
+        f"WHEN '{k.replace(chr(39), chr(39)*2)}' THEN '{v}'" for k, v in CATEGORY_MAP.items())
+        + " ELSE category END")
+    _sk = (f"""
+        sk AS (
+            SELECT store_key, iso_year, iso_week, {_cat_case} AS category,
+                   COUNT(DISTINCT product) FILTER (
+                       WHERE floor_start > 0 OR floor_end > 0 OR sold_units > 0) AS skus_in_stock,
+                   COUNT(DISTINCT product) FILTER (WHERE stockout_floor)         AS skus_out,
+                   SUM(floor_end)                                               AS floor_units_end
+            FROM src.fact_inventory_week
+            GROUP BY 1,2,3,4
+        )""" if _has_inv_week else """
+        sk AS (
+            SELECT NULL::INTEGER AS store_key, NULL::INTEGER AS iso_year,
+                   NULL::INTEGER AS iso_week, NULL::VARCHAR AS category,
+                   NULL::BIGINT AS skus_in_stock, NULL::BIGINT AS skus_out,
+                   NULL::DOUBLE AS floor_units_end
+            WHERE FALSE
+        )""")
+    print(f"  dash_category_week stock columns: {'from fact_inventory_week' if _has_inv_week else 'NULL (no fact_inventory_week in source)'}")
+    con.execute(f"""
         CREATE TABLE dash_category_week AS
         WITH bw AS (
             SELECT store_key, iso_year, iso_week, channel,
@@ -332,9 +360,12 @@ def build(src: str, dest: str) -> dict:
                    COUNT(DISTINCT basket_id)   AS baskets_with
             FROM fl WHERE NOT is_return
             GROUP BY 1,2,3,4,5
-        )
-        SELECT cw.*, bw.baskets, bw.days_open, bw.net_all, bw.avg_lines
+        ),
+        {_sk}
+        SELECT cw.*, bw.baskets, bw.days_open, bw.net_all, bw.avg_lines,
+               sk.skus_in_stock, sk.skus_out, sk.floor_units_end
         FROM cw JOIN bw USING (store_key, iso_year, iso_week, channel)
+        LEFT JOIN sk USING (store_key, iso_year, iso_week, category)
     """)
 
     # --- basket totals per store x channel x week ------------------------

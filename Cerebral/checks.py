@@ -42,7 +42,8 @@ VM_LAG_WEEKS_OK = 2   # floor sets are logged by hand; allow a little lag before
 # Monday drop), which must block the upload rather than warn.
 LAG_FAIL_PREFIXES = ("dash_loyalty_", "dash_redemption_", "dash_brand_redemption")
 
-def check_tables_present(dash):
+def check_tables_present(dash)
+    check_category_stock(dash):
     have = tables(dash)
     print(f"  ({len([t for t in have if t.startswith('dash_')])} dash_* tables found)")
     for t in REQUIRED_DASH:
@@ -70,6 +71,23 @@ def check_weeks_aligned(dash):
         elif lag < 0: report(f"latest week {t}", FAIL, f"{y}-W{w:02d} is AHEAD of sales")
         elif t.startswith(LAG_FAIL_PREFIXES): report(f"latest week {t}", FAIL, f"{y}-W{w:02d} - {lag} weeks behind sales; loyalty/redemption must match sales (Alpine file missing from the drop?)")
         else: report(f"latest week {t}", WARN, f"{y}-W{w:02d} - {lag} weeks behind sales (re-run vm_ingest?)")
+
+def check_category_stock(dash):
+    """dash_category_week must carry shelf context (skus_in_stock etc.) built from
+    fact_inventory_week. FAIL when the last two weeks have none - that means the
+    source DB reached publish.py without fact_inventory_week, and every
+    'category down' reading silently loses its supply-vs-demand context."""
+    t = "dash_category_week"
+    if t not in tables(dash): report("category stock context", SKIP, "table missing"); return
+    if "skus_in_stock" not in cols(dash, t):
+        report("category stock context", FAIL, "no skus_in_stock column - publish.py stock join missing"); return
+    weeks = dash.execute(f'select distinct iso_year, iso_week from "{t}" order by 1 desc, 2 desc limit 2').fetchall()
+    cov = [(y, w) + dash.execute(f'select count(*), count(skus_in_stock) from "{t}" where iso_year=? and iso_week=?', [y, w]).fetchone()
+           for y, w in weeks]
+    txt = "; ".join(f"{y}-W{w:02d} {m}/{n} rows" for y, w, n, m in cov)
+    if all(m == 0 for *_, m in cov): report("category stock context", FAIL, txt + " - fact_inventory_week missing from source?")
+    elif cov[0][3] == 0: report("category stock context", WARN, txt + " - latest week has no stock context yet")
+    else: report("category stock context", PASS, txt)
 
 def check_no_dupes(con, t, keys):
     if t not in tables(con): report(f"unique keys {t}", SKIP, "table missing"); return

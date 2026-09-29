@@ -37,6 +37,10 @@ REQUIRED_DASH = [
     "dash_vm_brand_week", "dash_vm_stock_week", "dash_vm_takeover_xref", "dash_vm_placement_week",
 ]
 VM_LAG_WEEKS_OK = 2   # floor sets are logged by hand; allow a little lag before warning
+# Tables built from the Alpine IQ redemption file. If these fall behind sales the
+# week loaded with no loyalty data (2026-09-28: Alpine file dropped from the
+# Monday drop), which must block the upload rather than warn.
+LAG_FAIL_PREFIXES = ("dash_loyalty_", "dash_redemption_", "dash_brand_redemption")
 
 def check_tables_present(dash):
     have = tables(dash)
@@ -64,6 +68,7 @@ def check_weeks_aligned(dash):
         elif t.startswith("dash_vm_") and lag <= VM_LAG_WEEKS_OK: report(f"latest week {t}", PASS, f"{y}-W{w:02d} ({lag}w behind, within VM tolerance)")
         elif lag == -1: report(f"latest week {t}", WARN, f"{y}-W{w:02d} is 1 week ahead of dash_brand_week (partial week from the Monday drop)")
         elif lag < 0: report(f"latest week {t}", FAIL, f"{y}-W{w:02d} is AHEAD of sales")
+        elif t.startswith(LAG_FAIL_PREFIXES): report(f"latest week {t}", FAIL, f"{y}-W{w:02d} - {lag} weeks behind sales; loyalty/redemption must match sales (Alpine file missing from the drop?)")
         else: report(f"latest week {t}", WARN, f"{y}-W{w:02d} - {lag} weeks behind sales (re-run vm_ingest?)")
 
 def check_no_dupes(con, t, keys):

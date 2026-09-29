@@ -1125,7 +1125,7 @@ def discover(inbox: Path) -> dict[str, list[Path]]:
 RANGE_TOKEN = re.compile(r"(\d{1,2}_\d{1,2}_\d{4})-(\d{1,2}_\d{1,2}_\d{4})")
 
 
-def split_drops(files: dict[str, list[Path]]) -> list[tuple[str, dict[str, list[Path]]]]:
+def split_drops(files: dict[str, list[Path]], required=()) -> list[tuple[str, dict[str, list[Path]]]]:
     """Group discovered files into drops by the date-range token in their
     names. A folder with one drop yields one group. Files with no token are
     attached to every group. Returned in filename order of the token."""
@@ -1143,6 +1143,27 @@ def split_drops(files: dict[str, list[Path]]) -> list[tuple[str, dict[str, list[
     for g in groups.values():
         for kind, paths in untagged.items():
             g.setdefault(kind, []).extend(paths)
+
+    # Sales exports end on Sunday but Alpine / inventory / receipt exports are
+    # Monday-dated, so they carry a different range token. A group with no
+    # sales exports is folded into the sales group that STARTS on the same
+    # day; otherwise its Alpine file is dropped and the week loads with no
+    # loyalty redemptions (happened 2026-09-28).
+    def _start(tok: str) -> str:
+        return tok.split("-")[0]
+    for tok in list(groups):
+        g = groups[tok]
+        if any(k in g for k in required):
+            continue
+        host = next((t for t in groups if t != tok and _start(t) == _start(tok)
+                     and any(k in groups[t] for k in required)), None)
+        if host is None:
+            continue
+        for kind, paths in g.items():
+            groups[host].setdefault(kind, []).extend(paths)
+        print(f"  folded {tok} (no sales exports) into drop {host}: "
+              + ", ".join(sorted(g)))
+        del groups[tok]
 
     def _key(tok: str):
         a = tok.split("-")[0].split("_")
@@ -1171,7 +1192,7 @@ def main() -> int:
         print(f"\nERROR: missing required exports: {missing}")
         return 1
 
-    drops = split_drops(all_files)
+    drops = split_drops(all_files, required)
     if len(drops) > 1:
         print(f"\n  {len(drops)} drops in this folder, processed separately: "
               + ", ".join(k for k, _ in drops))
@@ -1192,6 +1213,9 @@ def main() -> int:
             continue
 
         alpine = read_export(files["alpine"][0], "alpine") if "alpine" in files else None
+        if alpine is None:
+            print(f"  !! WARNING: drop {tag} has NO Alpine export -- loyalty "
+                  f"redemptions for this period will load as zero")
         if len(files["breakdown"]) > 1:
             print(f"  ! {len(files['breakdown'])} breakdown files in drop {tag}; "
                   f"using {files['breakdown'][0].name}")

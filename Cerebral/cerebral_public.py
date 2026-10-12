@@ -48,6 +48,8 @@ from brand_roi import render_brand_roi
 from channel_promo import render_channel_promo
 from promo_calendar import render_promo_calendar
 import scorecard_tab
+from scorecard import (ALERT_MIN_PTS, ALERT_RUN, ALERT_Z,
+                       control_limits as control_band, run_rules as run_rule)
 from scorecard_prefill import fetch_prefill
 
 
@@ -107,6 +109,13 @@ def is_on_menu(offer_name, brand, category, product):
 DASH_FILE = "cerebral_dash.duckdb"
 CACHE_MINUTES = 30
 BASELINE_WEEKS = 13
+# Brand trend labels: ±20% and at least $5,000 net in BOTH halves, otherwise
+# "too small to call" (small brands swing by more than 10% on pure noise).
+TREND_BAND_PCT = 20.0
+TREND_MIN_BASE = 5000.0
+# Scorecard week-on-week deltas are blank when the category had fewer than
+# this many baskets in either week (tiny categories swing 20-40% on noise).
+WOW_MIN_BASKETS = 50
 
 STORES = {1: "DTBK", 2: "5th Avenue", 3: "Soho", 4: "Union Square"}
 
@@ -135,7 +144,7 @@ def canon_brand(s: "pd.Series") -> "pd.Series":
     return key.map(BRAND_ALIASES).fillna(s)
 
 st.set_page_config(page_title="Cerebral", layout="wide",
-                   initial_sidebar_state="expanded")
+                   initial_sidebar_state="auto")
 
 # ===========================================================================
 # Theme
@@ -338,6 +347,12 @@ def load_theme() -> dict:
 
 PALETTE = load_theme()
 
+# One Plotly template for every chart in the app (fonts, colourway, hover,
+# margins, transitions) — see charts.py. Tab modules call charts.apply()
+# themselves; this makes bare go.Figure() calls pick it up too.
+import charts  # noqa: E402
+charts.apply_charts_template(PALETTE)
+
 ACCENT      = PALETTE.get("accent", "#2F6F4F")
 ACCENT_SOFT = PALETTE.get("accent-soft", "#7FA98F")
 WARN        = PALETTE.get("warn", "#B4632B")
@@ -389,15 +404,22 @@ def gate() -> bool:
         return True                              # no password configured
     if st.session_state.get("_ok"):
         return True
-    st.markdown("### Cerebral")
-    st.caption("Category analytics · The Travel Agency")
-    entered = st.text_input("Password", type="password")
-    if entered:
-        if entered == pw:
-            st.session_state["_ok"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect.")
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        st.markdown("## Cerebral")
+        st.caption("Category analytics · The Travel Agency")
+        st.markdown("")
+        with st.form("gate_form", border=False):
+            entered = st.text_input("Password", type="password",
+                                    placeholder="Enter the dashboard password")
+            go_in = st.form_submit_button("Open dashboard", type="primary",
+                                          use_container_width=True)
+        if go_in or entered:
+            if entered == pw:
+                st.session_state["_ok"] = True
+                st.rerun()
+            elif go_in:
+                st.error("That password is not right. Try again.")
     return False
 
 
@@ -616,29 +638,8 @@ def and_filter(keys: list[int]) -> str:
 # Analysis helpers
 # ===========================================================================
 
-def control_band(hist: pd.Series, n: float):
-    if len(hist) < 4 or n <= 0:
-        return None, None, None
-    p = hist.mean()
-    se = (p * (1 - p) / n) ** .5
-    return p, p - 2 * se, p + 2 * se
-
-
-def run_rule(s: pd.Series) -> str | None:
-    if len(s) < 7:
-        return None
-    base = s.iloc[:-1].mean()
-    l7 = s.tail(7)
-    if (l7 > base).all():
-        return "7 consecutive weeks above baseline"
-    if (l7 < base).all():
-        return "7 consecutive weeks below baseline"
-    d = s.tail(6).diff().dropna()
-    if len(d) >= 5 and (d > 0).all():
-        return "6 consecutive weeks rising"
-    if len(d) >= 5 and (d < 0).all():
-        return "6 consecutive weeks falling"
-    return None
+# control_band() and run_rule() are imported from scorecard.py (one shared
+# definition of the alert thresholds: ALERT_Z, ALERT_MIN_PTS, ALERT_RUN).
 
 
 # ===========================================================================
@@ -651,19 +652,33 @@ if not gate():
 if load_db() is None:
     st.title("Cerebral")
     st.error("No published data available.")
+    if LOAD_DB_WHYS:
+        st.markdown("**What went wrong**")
     for why in LOAD_DB_WHYS:
         st.markdown(f"- {why}")
     st.markdown("""
 The dashboard reads `cerebral_dash.duckdb`, built by the scheduled refresh
 and pulled from Google Drive using the app's secrets.
 """)
+    st.button("Try again", icon=":material/refresh:", key="retry_load",
+              on_click=lambda: (st.cache_data.clear(),
+                                _load_db_cached.clear()))
     st.stop()
 
 meta = q("SELECT * FROM dash_meta").iloc[0]
 
-st.sidebar.markdown("### Cerebral")
+# ---- sidebar rail: brand block, then the two global filters ------------
+st.sidebar.markdown(
+    '<div style="line-height:1.15;margin:0 0 .35rem 0">'
+    '<span style="font-size:1.45rem;font-weight:700;letter-spacing:-.02em">'
+    'Cerebral</span><br>'
+    '<span style="font-size:.78rem;opacity:.65;letter-spacing:.04em;'
+    'text-transform:uppercase">The Travel Agency</span></div>',
+    unsafe_allow_html=True)
+st.sidebar.caption("Category analytics")
 picked = st.sidebar.multiselect("Stores", list(STORES.values()),
-                                default=list(STORES.values()))
+                                default=list(STORES.values()), key="stores",
+                                help="Applies to every section.")
 keys = [k for k, v in STORES.items() if v in picked] or list(STORES)
 wf, af = sfilter(keys), and_filter(keys)
 
@@ -705,16 +720,19 @@ weeks = (df[["iso_year", "iso_week"]].drop_duplicates()
 # show: two days against seven reads as a 70% collapse. The week is kept and
 # compared PER TRADING DAY, and labelled, rather than dropped — three days of
 # data is still information.
-_wk_days = (df.groupby(["iso_year", "iso_week"])["days_open"].max()
-              .rename("days_open").reset_index())
+# The latest ISO week is partial only if the data stops before that week's
+# Sunday. (days_open is NOT used for this: Monday 00:00-01:00 delivery orders
+# make some complete weeks read as 8 "days", so a median of it misfires.)
 _last = weeks.iloc[-1]
-_last_days = int(_wk_days[(_wk_days.iso_year == _last.iso_year)
-                          & (_wk_days.iso_week == _last.iso_week)]
-                 ["days_open"].iloc[0])
-_typical = int(_wk_days["days_open"].median())
-PARTIAL_WEEK = _last_days < _typical
-PARTIAL_DAYS = _last_days
-n_wk = st.sidebar.slider("Weeks shown", 4, max(len(weeks), 4), min(26, len(weeks)))
+_last_wk_start = pd.Timestamp.fromisocalendar(int(_last.iso_year),
+                                              int(_last.iso_week), 1)
+_last_txn = pd.Timestamp(meta.last_txn).normalize()
+PARTIAL_WEEK = bool(_last_txn < _last_wk_start + pd.Timedelta(days=6))
+PARTIAL_DAYS = int(min(7, max(1, (_last_txn - _last_wk_start).days + 1)))
+n_wk = st.sidebar.slider("Weeks shown", 4, max(len(weeks), 4),
+                         min(26, len(weeks)), key="n_weeks",
+                         help="How many of the most recent weeks every "
+                              "section covers.")
 keep = set(zip(weeks.iso_year.tail(n_wk), weeks.iso_week.tail(n_wk)))
 dfv = df[df.apply(lambda r: (r.iso_year, r.iso_week) in keep, axis=1)]
 dfv = dfv.sort_values(["category", "wk_date"])
@@ -786,6 +804,17 @@ def win_halves(frame: pd.DataFrame, value: str, by: list[str] | None = None):
     f = frame.copy()
     f["_wk"] = f.iso_year.astype(int) * 100 + f.iso_week.astype(int)
     ordered = sorted(f["_wk"].unique())
+    # A partial trailing week is not comparable with full ones: leave it out
+    # of the late half (only when it is the newest week in this frame).
+    if PARTIAL_WEEK and len(ordered) > 2:
+        _lw = int(weeks.iloc[-1].iso_year) * 100 + int(weeks.iloc[-1].iso_week)
+        if ordered[-1] == _lw:
+            f = f[f["_wk"] != _lw]
+            ordered = ordered[:-1]
+    # Equal week counts in both halves: an odd window drops its oldest week.
+    if len(ordered) % 2 == 1 and len(ordered) > 1:
+        f = f[f["_wk"] != ordered[0]]
+        ordered = ordered[1:]
     cut = ordered[len(ordered) // 2] if len(ordered) > 1 else ordered[0] + 1
     f["_half"] = f["_wk"].map(lambda v: "early" if v < cut else "late")
     grp = (by or []) + ["_half"]
@@ -807,41 +836,54 @@ if not WIN_FULL:
         f"{n_wk} of {len(weeks)} weeks")
 
 st.sidebar.divider()
+# "Data as of": what the published file covers and when it was built.
+st.sidebar.markdown(
+    f"**Data as of {str(meta.last_txn)[:10]}**")
 st.sidebar.caption(
-    f"{int(meta.n_baskets):,} baskets\n\n"
+    f"{int(meta.n_baskets):,} baskets  ·  "
     f"{str(meta.first_txn)[:10]} → {str(meta.last_txn)[:10]}\n\n"
-    f"updated {str(meta.built_at)[:16]}")
+    f"Built {str(meta.built_at)[:16]}")
+
+
+def _refresh_data():
+    """Drop every cached query and the cached file handle, so the next run
+    re-reads the published file (and re-pulls it from Drive when deployed).
+    scorecard_con is deliberately left alone: it is the one WRITE connection
+    and closing it mid-session would drop a half-filled form's DuckDB lock."""
+    st.cache_data.clear()
+    _load_db_cached.clear()
+
+
+st.sidebar.button("Refresh data", icon=":material/refresh:", key="refresh_data",
+                  on_click=_refresh_data, use_container_width=True,
+                  help="Clear cached results and reload the published data.")
 
 st.title("Cerebral")
 label = "All stores" if len(keys) == len(STORES) else ", ".join(STORES[k] for k in keys)
 st.caption(f"Category analytics · The Travel Agency · {label}")
 
-t_charts, t_insights, t_brands, t_bei, t_acc, t_redeem, t_discount, \
-    t_loyalty, t_retention, t_events, t_audiences, \
-    t_takeover, t_vm, t_projections, t_promo, t_scorecard, t_gloss = st.tabs(
-    ["Charts", "Insights", "Brands", "Brand Efficiency", "Accessories",
-     "Redemptions", "Discounting", "Loyalty", "Retention", "Events",
-     "Audiences", "Takeovers", "Visual Merch", "Projections", "Promo Lab",
-     "GM Scorecard", "What the terms mean"])
 
 # ---------------------------------------------------------------- charts
-with t_charts:
+def section_charts():
     wk = (dfv.groupby(["iso_year", "iso_week", "wk_date"])
              .agg(net=("net", "sum"), baskets=("baskets", "first"),
                   days=("days_open", "max"))
              .reset_index().sort_values("wk_date"))
+    # days_open can read 8 on a complete week (Monday-after-midnight delivery
+    # orders), so a divisor never exceeds 7.
+    wk["days"] = wk["days"].clip(upper=7)
     wk["atv"] = wk.net / wk.baskets
     wk["net_pd"] = wk.net / wk.days
     wk["bkt_pd"] = wk.baskets / wk.days
     cur = wk.iloc[-1]
     prev = wk.iloc[-2] if len(wk) > 1 else None
 
-    is_partial = PARTIAL_WEEK and len(wk) and cur.days < wk.days.median()
+    is_partial = bool(PARTIAL_WEEK and len(wk))
 
     if is_partial:
         st.markdown(
             f'<div class="alert a-warn">The latest week is still in progress '
-            f'— <b>{int(cur.days)} of {int(wk.days.median())} trading days</b>. '
+            f'— <b>{PARTIAL_DAYS} of 7 days</b>. '
             f'Its totals are therefore lower than a full week, so the headline '
             f'figures below are shown <b>per trading day</b> to stay '
             f'comparable. Charts show actual totals.</div>',
@@ -888,28 +930,18 @@ with t_charts:
         # fixedrange on both y-axes: y2 overlays y, and plotly rescales
         # them independently, so any zoom or pan detaches the Baskets line
         # from the bars it is drawn against.
-        fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
-                          xaxis=dict(fixedrange=True),
+        fig.update_layout(xaxis=dict(fixedrange=True),
                           yaxis=dict(title="Net $", tickformat="$~s",
-                                     gridcolor="rgba(0,0,0,.07)",
                                      fixedrange=True),
                           yaxis2=dict(title="Baskets", overlaying="y",
                                       side="right", showgrid=False,
                                       tickformat=",.0f", fixedrange=True),
-                          hovermode="x unified",
-                          legend=dict(orientation="h", y=1.12, x=0,
-                                      title_text=""),
-                          plot_bgcolor="rgba(0,0,0,0)")
+                          hovermode="x unified")
         # Toolbar stays, minus every button that changes an axis range:
         # with fixedrange set they would do nothing, and a dead button is
         # worse than no button. scrollZoom off so the wheel scrolls the
         # page rather than the plot.
-        st.plotly_chart(fig, use_container_width=True, key="pc1",
-                        config={"scrollZoom": False, "displaylogo": False,
-                                "modeBarButtonsToRemove": [
-                                    "zoom2d", "pan2d", "select2d", "lasso2d",
-                                    "zoomIn2d", "zoomOut2d", "autoScale2d",
-                                    "resetScale2d"]})
+        charts.show(fig, key="pc1", kind="line", config=charts.plotly_config_static)
 
     with R:
         st.markdown("##### Category share of revenue")
@@ -919,12 +951,16 @@ with t_charts:
                      color="category",
                      color_discrete_map={c: cat_color(c)
                                          for c in mix.category})
-        fig.update_traces(textposition="outside", textinfo="percent+label",
+        # Labels sit inside the ring so nothing is clipped at the frame
+        # edge; Plotly drops any label that will not fit, and the small
+        # slices stay reachable on hover.
+        fig.update_traces(textposition="inside", textinfo="percent+label",
+                          insidetextorientation="horizontal",
                           hovertemplate="%{label}<br>%{value:$,.0f}"
                                         "<extra></extra>")
-        fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
-                          showlegend=False)
-        st.plotly_chart(fig, use_container_width=True, key="pc2")
+        fig.update_layout(showlegend=False)
+        charts.show(fig, key="pc2", kind="pie", height=320,
+                    margin=dict(l=10, r=10, t=10, b=10))
 
     # ---------------------------------------------------- transactions
     st.divider()
@@ -935,78 +971,79 @@ with t_charts:
         'hold up on a smaller number of larger baskets, and the two need to '
         'be read together.</p>', unsafe_allow_html=True)
 
-    tx = q(f"""
+    @st.fragment
+    def _frag_transactions():
+        tx = q(f"""
         SELECT iso_year, iso_week, SUM(baskets) AS baskets,
                MAX(days_open) AS days_open
         FROM dash_basket_week {wfw} GROUP BY 1,2
     """)
-    if not tx.empty:
-        tx["wk_date"] = pd.to_datetime(
-            tx.iso_year.astype(str) + "-W"
-            + tx.iso_week.astype(str).str.zfill(2) + "-1",
-            format="%G-W%V-%u", errors="coerce")
-        tx = tx.sort_values("wk_date")
+        if not tx.empty:
+            tx["wk_date"] = pd.to_datetime(
+                tx.iso_year.astype(str) + "-W"
+                + tx.iso_week.astype(str).str.zfill(2) + "-1",
+                format="%G-W%V-%u", errors="coerce")
+            tx = tx.sort_values("wk_date")
 
-        tc1, tc2 = st.columns([3, 1])
-        with tc2:
-            per_day = st.checkbox(
-                "Per trading day", value=bool(PARTIAL_WEEK),
-                help="Divides each week by the days it actually traded. A "
-                     "week in progress, or one containing a closure, "
-                     "otherwise reads as a collapse in volume.")
-        tx["value"] = tx.baskets / tx.days_open if per_day else tx.baskets
-        tx["trend"] = tx["value"].rolling(4, min_periods=2).mean()
+            tc1, tc2 = st.columns([3, 1])
+            with tc2:
+                per_day = st.checkbox(
+                    "Per trading day", value=bool(PARTIAL_WEEK),
+                    help="Divides each week by the days it actually traded. A "
+                         "week in progress, or one containing a closure, "
+                         "otherwise reads as a collapse in volume.")
+            tx["value"] = (tx.baskets / tx.days_open.clip(upper=7)
+                          if per_day else tx.baskets)
+            tx["trend"] = tx["value"].rolling(4, min_periods=2).mean()
 
-        _cur, _prev = tx.iloc[-1], (tx.iloc[-2] if len(tx) > 1 else None)
-        with tc1:
-            m = st.columns(3)
-            m[0].metric(
-                "Transactions per day" if per_day else "Transactions, latest week",
-                f"{_cur.value:,.0f}",
-                f"{(_cur.value / _prev.value - 1) * 100:+.1f}%"
-                if _prev is not None and _prev.value else None)
-            m[1].metric("4-week average", f"{_cur.trend:,.0f}",
-                        help="The latest point of the trend line. Week-to-week "
-                             "movement is mostly noise; this is the level.")
-            m[2].metric("Window total", f"{tx.baskets.sum():,.0f}",
-                        help="Every transaction across the weeks and stores "
-                             "currently selected.")
+            _cur, _prev = tx.iloc[-1], (tx.iloc[-2] if len(tx) > 1 else None)
+            with tc1:
+                m = st.columns(3)
+                m[0].metric(
+                    "Transactions per day" if per_day else "Transactions, latest week",
+                    f"{_cur.value:,.0f}",
+                    f"{(_cur.value / _prev.value - 1) * 100:+.1f}%"
+                    if _prev is not None and _prev.value else None)
+                m[1].metric("4-week average", f"{_cur.trend:,.0f}",
+                            help="The latest point of the trend line. Week-to-week "
+                                 "movement is mostly noise; this is the level.")
+                m[2].metric("Window total", f"{tx.baskets.sum():,.0f}",
+                            help="Every transaction across the weeks and stores "
+                                 "currently selected.")
 
-        fig = go.Figure()
-        fig.add_bar(x=tx.wk_date, y=tx.value, name="Transactions",
-                    marker_color=ACCENT, opacity=.7)
-        fig.add_scatter(x=tx.wk_date, y=tx.trend, name="4-week average",
-                        line=dict(color=MUTED, width=2.4))
-        fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0),
-                          yaxis=dict(title="Transactions per day" if per_day
-                                     else "Transactions",
-                                     tickformat=",.0f",
-                                     gridcolor="rgba(0,0,0,.07)"),
-                          xaxis_title="", hovermode="x unified",
-                          legend=dict(orientation="h", y=1.14, x=0,
-                                      title_text=""),
-                          plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True, key="pc_tx")
+            fig = go.Figure()
+            fig.add_bar(x=tx.wk_date, y=tx.value, name="Transactions",
+                        marker_color=ACCENT, opacity=.7)
+            fig.add_scatter(x=tx.wk_date, y=tx.trend, name="4-week average",
+                            line=dict(color=MUTED, width=2.4))
+            fig.update_layout(yaxis=dict(title="Transactions per day" if per_day
+                                         else "Transactions",
+                                         tickformat=",.0f"),
+                              xaxis_title="", hovermode="x unified")
+            charts.show(fig, key="pc_tx", kind="line")
+    _frag_transactions()
 
     # ---------------------------------------------- new vs returning
     st.divider()
     heading("New and returning customers by week")
 
-    _nr_store = ("store_key = 0" if len(keys) == len(STORES)
-                 else f"store_key IN ({','.join(map(str, keys))})")
-    _nr_scope_label = st.radio(
-        "Who counts as a customer",
-        ["Loyalty-identified only", "Everyone in the POS"],
-        horizontal=True, key="nr_scope",
-        help="Customers without a loyalty ID are keyed on a hash of their "
-             "name. Two people sharing a name collapse into one key, and "
-             "every collision turns a genuinely new customer into a "
-             "returning one — so the second option understates new "
-             "customers. Its trend is usable; its level is not.")
-    _nr_scope = ("resolved" if _nr_scope_label.startswith("Loyalty")
-                 else "all")
+    @st.fragment
+    def _frag_new_returning():
+        _nr_store = ("store_key = 0" if len(keys) == len(STORES)
+                     else f"store_key IN ({','.join(map(str, keys))})")
+        _nr_scope_label = st.radio(
+            "Who counts as a customer",
+            ["Loyalty-identified only", "Everyone in the POS"],
+            horizontal=True, key="nr_scope",
+            help="Customers without a loyalty ID are keyed on a hash of their "
+                 "name. Two people sharing a name collapse into one key, and "
+                 "every collision turns a genuinely new customer into a "
+                 "returning one — so the second option understates new "
+                 "customers. Its trend is usable; its level is not.")
+        _nr_scope = ("resolved" if _nr_scope_label.startswith("Loyalty")
+                     else "all")
 
-    nr = q(f"""
+        nr = q(f"""
         SELECT iso_year, iso_week, segment,
                SUM(customers) AS customers, SUM(net) AS net
         FROM dash_newret_week
@@ -1015,178 +1052,173 @@ with t_charts:
         GROUP BY 1,2,3
     """)
 
-    if nr.empty:
-        st.markdown(
-            '<div class="alert a-warn">This chart needs '
-            '<code>dash_newret_week</code>, which the next scheduled rebuild '
-            'will create. Everything else on this tab is unaffected.</div>',
-            unsafe_allow_html=True)
-    else:
-        nr["wk_date"] = pd.to_datetime(
-            nr.iso_year.astype(str) + "-W"
-            + nr.iso_week.astype(str).str.zfill(2) + "-1",
-            format="%G-W%V-%u", errors="coerce")
-
-        # The first weeks of loaded history have nothing before them, so
-        # every customer in them looks new. Dropping those weeks is the
-        # difference between a trend and a cliff that is an artefact of
-        # where the data starts.
-        _nrm = q("SELECT * FROM dash_newret_meta")
-        _burn = 4
-        _cut = None
-        if not _nrm.empty:
-            _burn = int(_nrm.iloc[0].get("burn_in_weeks", 4) or 4)
-            _cut = pd.to_datetime(_nrm.iloc[0].first_txn) + \
-                pd.Timedelta(weeks=_burn)
-            nr = nr[nr.wk_date >= _cut]
-
         if nr.empty:
             st.markdown(
-                f'<p class="note">The selected window sits inside the first '
-                f'{_burn} weeks of loaded history, where everyone counts as '
-                f'new. Widen the window to see this.</p>',
+                '<div class="alert a-warn">This chart needs '
+                '<code>dash_newret_week</code>, which the next scheduled rebuild '
+                'will create. Everything else on this tab is unaffected.</div>',
                 unsafe_allow_html=True)
         else:
-            piv = (nr.pivot_table(index="wk_date", columns="segment",
-                                  values="customers", aggfunc="sum")
-                     .fillna(0).sort_index())
-            for _c in ("New", "Returning"):
-                if _c not in piv.columns:
-                    piv[_c] = 0.0
-            piv["total"] = piv.New + piv.Returning
-            piv["new_share"] = (piv.New / piv.total.replace(0, np.nan)) * 100
+            nr["wk_date"] = pd.to_datetime(
+                nr.iso_year.astype(str) + "-W"
+                + nr.iso_week.astype(str).str.zfill(2) + "-1",
+                format="%G-W%V-%u", errors="coerce")
 
-            _c2, _p2 = piv.iloc[-1], (piv.iloc[-2] if len(piv) > 1 else None)
-            nm = st.columns(4)
-            nm[0].metric("New customers, latest week", f"{_c2.New:,.0f}",
-                         f"{(_c2.New / _p2.New - 1) * 100:+.1f}%"
-                         if _p2 is not None and _p2.New else None,
-                         help="Customers whose first ever purchase, across "
-                              "the whole loaded history, falls in that week.")
-            nm[1].metric("Returning", f"{_c2.Returning:,.0f}",
-                         f"{(_c2.Returning / _p2.Returning - 1) * 100:+.1f}%"
-                         if _p2 is not None and _p2.Returning else None,
-                         help="Everyone else who shopped that week.")
-            nm[2].metric("New as % of customers", f"{_c2.new_share:,.1f}%",
-                         f"{_c2.new_share - _p2.new_share:+.1f}pp"
-                         if _p2 is not None and pd.notna(_p2.new_share) else None,
-                         help="Acquisition rate. Falling share with flat "
-                              "totals means the base is ageing, not growing.")
-            _half = max(1, len(piv) // 2)
-            _early, _late = piv.New.iloc[:_half].mean(), piv.New.iloc[-_half:].mean()
-            nm[3].metric("New, window trend",
-                         f"{(_late / _early - 1) * 100:+.1f}%" if _early else "—",
-                         help="Average weekly new customers in the second "
-                              "half of the window against the first.")
+            # The first weeks of loaded history have nothing before them, so
+            # every customer in them looks new. Dropping those weeks is the
+            # difference between a trend and a cliff that is an artefact of
+            # where the data starts.
+            _nrm = q("SELECT * FROM dash_newret_meta")
+            _burn = 4
+            _cut = None
+            if not _nrm.empty:
+                _burn = int(_nrm.iloc[0].get("burn_in_weeks", 4) or 4)
+                _cut = pd.to_datetime(_nrm.iloc[0].first_txn) + \
+                    pd.Timedelta(weeks=_burn)
+                nr = nr[nr.wk_date >= _cut]
 
-            fig = go.Figure()
-            fig.add_bar(x=piv.index, y=piv.Returning, name="Returning",
-                        marker_color=MUTED, opacity=.55)
-            fig.add_bar(x=piv.index, y=piv.New, name="New",
-                        marker_color=ACCENT)
-            fig.add_scatter(x=piv.index, y=piv.new_share, name="New %",
-                            yaxis="y2", line=dict(color=WARN, width=2.4))
-            fig.update_layout(barmode="stack", height=380,
-                              margin=dict(l=0, r=0, t=10, b=0),
-                              yaxis=dict(title="Customers", tickformat=",.0f",
-                                         gridcolor="rgba(0,0,0,.07)"),
-                              yaxis2=dict(title="New %", overlaying="y",
-                                          side="right", showgrid=False,
-                                          ticksuffix="%", rangemode="tozero"),
-                              xaxis_title="", hovermode="x unified",
-                              legend=dict(orientation="h", y=1.12, x=0,
-                                          title_text=""),
-                              plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True, key="pc_nr")
+            if nr.empty:
+                st.markdown(
+                    f'<p class="note">The selected window sits inside the first '
+                    f'{_burn} weeks of loaded history, where everyone counts as '
+                    f'new. Widen the window to see this.</p>',
+                    unsafe_allow_html=True)
+            else:
+                piv = (nr.pivot_table(index="wk_date", columns="segment",
+                                      values="customers", aggfunc="sum")
+                         .fillna(0).sort_index())
+                for _c in ("New", "Returning"):
+                    if _c not in piv.columns:
+                        piv[_c] = 0.0
+                piv["total"] = piv.New + piv.Returning
+                piv["new_share"] = (piv.New / piv.total.replace(0, np.nan)) * 100
 
-            _notes = ["A customer is new in the week of their first ever "
-                      "purchase and returning in every week after it, so the "
-                      "two bars sum to that week's customer count."]
-            if _cut is not None:
-                _notes.append(f"The first {_burn} weeks of history are "
-                              f"excluded — with nothing loaded before them, "
-                              f"everyone in them reads as new.")
-            if len(keys) != len(STORES):
-                _notes.append("With a store filter applied, a customer who "
-                              "shopped two of the selected stores in one week "
-                              "is counted once per store. Select all stores "
-                              "for the exact chain figure.")
-            st.markdown('<p class="note">' + " ".join(_notes) + "</p>",
-                        unsafe_allow_html=True)
+                _c2, _p2 = piv.iloc[-1], (piv.iloc[-2] if len(piv) > 1 else None)
+                nm = st.columns(4)
+                nm[0].metric("New customers, latest week", f"{_c2.New:,.0f}",
+                             f"{(_c2.New / _p2.New - 1) * 100:+.1f}%"
+                             if _p2 is not None and _p2.New else None,
+                             help="Customers whose first ever purchase, across "
+                                  "the whole loaded history, falls in that week.")
+                nm[1].metric("Returning", f"{_c2.Returning:,.0f}",
+                             f"{(_c2.Returning / _p2.Returning - 1) * 100:+.1f}%"
+                             if _p2 is not None and _p2.Returning else None,
+                             help="Everyone else who shopped that week.")
+                nm[2].metric("New as % of customers", f"{_c2.new_share:,.1f}%",
+                             f"{_c2.new_share - _p2.new_share:+.1f}pp"
+                             if _p2 is not None and pd.notna(_p2.new_share) else None,
+                             help="Acquisition rate. Falling share with flat "
+                                  "totals means the base is ageing, not growing.")
+                _half = max(1, len(piv) // 2)
+                _early, _late = piv.New.iloc[:_half].mean(), piv.New.iloc[-_half:].mean()
+                nm[3].metric("New, window trend",
+                             f"{(_late / _early - 1) * 100:+.1f}%" if _early else "—",
+                             help="Average weekly new customers in the second "
+                                  "half of the window against the first.")
+
+                fig = go.Figure()
+                fig.add_bar(x=piv.index, y=piv.Returning, name="Returning",
+                            marker_color=MUTED, opacity=.55)
+                fig.add_bar(x=piv.index, y=piv.New, name="New",
+                            marker_color=ACCENT)
+                fig.add_scatter(x=piv.index, y=piv.new_share, name="New %",
+                                yaxis="y2", line=dict(color=WARN, width=2.4))
+                fig.update_layout(barmode="stack", yaxis=dict(title="Customers", tickformat=",.0f"),
+                                  yaxis2=dict(title="New %", overlaying="y",
+                                              side="right", showgrid=False,
+                                              ticksuffix="%", rangemode="tozero"),
+                                  xaxis_title="", hovermode="x unified")
+                charts.show(fig, key="pc_nr", kind="line")
+
+                _notes = ["A customer is new in the week of their first ever "
+                          "purchase and returning in every week after it, so the "
+                          "two bars sum to that week's customer count."]
+                if _cut is not None:
+                    _notes.append(f"The first {_burn} weeks of history are "
+                                  f"excluded — with nothing loaded before them, "
+                                  f"everyone in them reads as new.")
+                if len(keys) != len(STORES):
+                    _notes.append("With a store filter applied, a customer who "
+                                  "shopped two of the selected stores in one week "
+                                  "is counted once per store. Select all stores "
+                                  "for the exact chain figure.")
+                st.markdown('<p class="note">' + " ".join(_notes) + "</p>",
+                            unsafe_allow_html=True)
+    _frag_new_returning()
 
     st.divider()
     heading("Dollars per 100 baskets", "$/100 baskets")
     howto("per100")
     order = dfv.groupby("category").net.sum().sort_values(ascending=False).index.tolist()
-    cc1, cc2 = st.columns([3, 1])
-    with cc1:
-        pick = st.multiselect("Categories", order, default=order[:4])
-    with cc2:
-        smooth = st.checkbox("4-week average", value=True,
-                             help="Averages each point with the three weeks "
-                                  "before it. Week-to-week noise is large "
-                                  "enough to hide the trend underneath.")
-    if pick:
-        d = dfv[dfv.category.isin(pick)].sort_values(["category", "wk_date"]).copy()
-        ycol, ylab = "per100", "$ per 100 baskets"
-        if smooth:
-            d["smoothed"] = (d.groupby("category")["per100"]
-                              .transform(lambda x: x.rolling(4, min_periods=2).mean()))
-            ycol, ylab = "smoothed", "$ per 100 baskets (4-week average)"
-        fig = px.line(d, x="wk_date", y=ycol, color="category",
-                      markers=not smooth,
-                      category_orders={"category": [c for c in CATEGORY_ORDER
-                                                    if c in pick]},
-                      color_discrete_map={c: cat_color(c) for c in pick})
-        fig.update_traces(line=dict(width=2.6),
-                          marker=dict(size=6),
-                          hovertemplate="%{y:$,.0f}<extra>%{fullData.name}</extra>")
-        fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0),
-                          yaxis_title=ylab, xaxis_title="",
-                          hovermode="x unified",
-                          legend=dict(orientation="h", y=1.1, x=0,
-                                      title_text=""),
-                          plot_bgcolor="rgba(0,0,0,0)")
-        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", zeroline=False,
-                         tickformat="$,.0f")
-        fig.update_xaxes(gridcolor="rgba(0,0,0,.04)", showgrid=True)
-        st.plotly_chart(fig, use_container_width=True, key="pc3")
+    @st.fragment
+    def _frag_per100():
+        cc1, cc2 = st.columns([3, 1])
+        with cc1:
+            pick = st.multiselect("Categories", order, default=order[:4])
+        with cc2:
+            smooth = st.checkbox("4-week average", value=True,
+                                 help="Averages each point with the three weeks "
+                                      "before it. Week-to-week noise is large "
+                                      "enough to hide the trend underneath.")
+        if pick:
+            d = dfv[dfv.category.isin(pick)].sort_values(["category", "wk_date"]).copy()
+            ycol, ylab = "per100", "$ per 100 baskets"
+            if smooth:
+                d["smoothed"] = (d.groupby("category")["per100"]
+                                  .transform(lambda x: x.rolling(4, min_periods=2).mean()))
+                ycol, ylab = "smoothed", "$ per 100 baskets (4-week average)"
+            fig = px.line(d, x="wk_date", y=ycol, color="category",
+                          markers=not smooth,
+                          category_orders={"category": [c for c in CATEGORY_ORDER
+                                                        if c in pick]},
+                          color_discrete_map={c: cat_color(c) for c in pick})
+            fig.update_traces(line=dict(width=2.6),
+                              marker=dict(size=6),
+                              hovertemplate="%{y:$,.0f}<extra>%{fullData.name}</extra>")
+            fig.update_layout(yaxis_title=ylab, xaxis_title="",
+                              hovermode="x unified")
+            fig.update_yaxes(zeroline=False,
+                             tickformat="$,.0f")
+            fig.update_xaxes(showgrid=True)
+            charts.show(fig, key="pc3", kind="line")
+    _frag_per100()
 
     st.divider()
     heading("Penetration with control limits", "penetration")
     howto("control_chart")
-    cat = st.selectbox("Category", order)
-    d = dfv[dfv.category == cat].sort_values(["iso_year", "iso_week"]).copy()
-    if len(d) >= 5:
-        d["base"] = d.penetration.rolling(BASELINE_WEEKS, min_periods=4).mean()
-        d["se"] = ((d.base * (1 - d.base)) / d.baskets) ** .5
-        d["ucl"], d["lcl"] = d.base + 2 * d.se, d.base - 2 * d.se
-        fig = go.Figure()
-        fig.add_scatter(x=d.wk_date, y=d.ucl * 100, line=dict(width=0),
-                        showlegend=False, hoverinfo="skip")
-        fig.add_scatter(x=d.wk_date, y=d.lcl * 100, line=dict(width=0),
-                        fill="tonexty", fillcolor=BAND,
-                        name="control band", hoverinfo="skip")
-        fig.add_scatter(x=d.wk_date, y=d.base * 100, name="baseline",
-                        line=dict(color=MUTED, dash="dot", width=1.5))
-        fig.add_scatter(x=d.wk_date, y=d.penetration * 100, name="penetration",
-                        mode="lines+markers", line=dict(color=ACCENT, width=2.5))
-        br = d[(d.penetration > d.ucl) | (d.penetration < d.lcl)]
-        if len(br):
-            fig.add_scatter(x=br.wk_date, y=br.penetration * 100, mode="markers",
-                            name="outside limits",
-                            marker=dict(color=BAD, size=11, symbol="circle-open",
-                                        line=dict(width=2.5)))
-        fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0),
-                          yaxis_title="% of baskets containing this category",
-                          xaxis_title="", hovermode="x unified",
-                          legend=dict(orientation="h", y=1.1, x=0,
-                                      title_text=""),
-                          plot_bgcolor="rgba(0,0,0,0)")
-        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%",
-                         zeroline=False)
-        fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
-        st.plotly_chart(fig, use_container_width=True, key="pc4")
+    @st.fragment
+    def _frag_penetration():
+        cat = st.selectbox("Category", order)
+        d = dfv[dfv.category == cat].sort_values(["iso_year", "iso_week"]).copy()
+        if len(d) >= 5:
+            # Same rule as the Alerts panel: baseline = prior 13 weeks, the
+            # week being tested left out; half-width = ALERT_Z baseline SDs,
+            # never narrower than ALERT_MIN_PTS.
+            _prior = d.penetration.shift(1).rolling(BASELINE_WEEKS, min_periods=4)
+            d["base"] = _prior.mean()
+            d["hw"] = np.maximum(ALERT_Z * _prior.std(ddof=1), ALERT_MIN_PTS)
+            d["ucl"], d["lcl"] = d.base + d.hw, d.base - d.hw
+            fig = go.Figure()
+            fig.add_scatter(x=d.wk_date, y=d.ucl * 100, line=dict(width=0),
+                            showlegend=False, hoverinfo="skip")
+            fig.add_scatter(x=d.wk_date, y=d.lcl * 100, line=dict(width=0),
+                            fill="tonexty", fillcolor=BAND,
+                            name="control band", hoverinfo="skip")
+            fig.add_scatter(x=d.wk_date, y=d.base * 100, name="baseline",
+                            line=dict(color=MUTED, dash="dot", width=1.5))
+            fig.add_scatter(x=d.wk_date, y=d.penetration * 100, name="penetration",
+                            mode="lines+markers", line=dict(color=ACCENT, width=2.5))
+            br = d[(d.penetration > d.ucl) | (d.penetration < d.lcl)]
+            if len(br):
+                fig.add_scatter(x=br.wk_date, y=br.penetration * 100, mode="markers",
+                                name="outside limits",
+                                marker=dict(color=BAD, size=11, symbol="circle-open",
+                                            line=dict(width=2.5)))
+            fig.update_layout(yaxis_title="% of baskets containing this category",
+                              xaxis_title="", hovermode="x unified")
+            fig.update_yaxes(ticksuffix="%")
+            charts.show(fig, key="pc4", kind="line")
+    _frag_penetration()
 
     st.divider()
     A, B = st.columns(2)
@@ -1230,9 +1262,8 @@ with t_charts:
                 text=a.text.split("=")[-1]
                      + f"  ·  {share_of.get(a.text.split('=')[-1], 0):.0f}% of baskets",
                 font=dict(size=12)))
-            fig.update_layout(height=420, margin=dict(l=0, r=0, t=24, b=0),
-                              showlegend=False, plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True, key="pc5")
+            fig.update_layout(showlegend=False)
+            charts.show(fig, key="pc5", kind="line", height=420, margin=dict(l=0, r=0, t=24, b=0))
             st.markdown('<p class="note">Each channel has its own scale, so a '
                         'small channel\'s movement is visible rather than '
                         'flattened by the large one. The label shows how much '
@@ -1258,21 +1289,18 @@ with t_charts:
                             color_continuous_scale="RdYlGn", origin="upper",
                             zmin=40, zmax=160)
             fig.update_traces(textfont_size=13)
-            fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
-                              coloraxis_showscale=False, xaxis_title="",
+            fig.update_layout(coloraxis_showscale=False, xaxis_title="",
                               yaxis_title="")
-            st.plotly_chart(fig, use_container_width=True, key="pc6")
+            charts.show(fig, key="pc6", kind="heat")
             howto("channel_grid")
 
 # -------------------------------------------------------------- insights
-with t_insights:
+def section_insights():
     st.markdown("#### Alerts")
     howto("alerts")
 
-    # Alerts run on the last COMPLETE week. Penetration is a ratio so it is
-    # not distorted by a short week, but basket counts are, and the control
-    # limits are built from those — a two-day week has wide limits and noisy
-    # penetration, which produces alarming alerts about nothing.
+    # Alerts run on the last COMPLETE week: a two-day week gives a noisy
+    # penetration figure, which produces alarming alerts about nothing.
     alert_weeks = weeks.iloc[:-1] if PARTIAL_WEEK else weeks
     if PARTIAL_WEEK and len(weeks) >= 2:
         _aw = alert_weeks.iloc[-1]
@@ -1298,16 +1326,16 @@ with t_insights:
             h = h.sort_values(["iso_year", "iso_week"])
             if len(h) < 4:
                 continue
-            base, lcl, ucl = control_band(h.penetration, r.baskets)
+            base, lcl, ucl = control_band(h.penetration)
             if base is not None:
                 if r.penetration < lcl:
                     alerts.append(("bad", r.category,
                         f"penetration {r.penetration*100:.1f}% is below the lower "
-                        f"control limit {lcl*100:.1f}% (baseline {base*100:.1f}%)"))
+                        f"alert limit {lcl*100:.1f}% (baseline {base*100:.1f}%)"))
                 elif r.penetration > ucl:
                     alerts.append(("ok", r.category,
                         f"penetration {r.penetration*100:.1f}% is above the upper "
-                        f"control limit {ucl*100:.1f}% (baseline {base*100:.1f}%)"))
+                        f"alert limit {ucl*100:.1f}% (baseline {base*100:.1f}%)"))
             rr = run_rule(pd.concat([h.penetration, pd.Series([r.penetration])]))
             if rr:
                 alerts.append(("bad" if ("below" in rr or "falling" in rr) else "ok",
@@ -1332,11 +1360,14 @@ with t_insights:
     if len(sc_weeks) > 1:
         py, pw = sc_weeks.iloc[-2]
         pv = df[(df.iso_year == py) & (df.iso_week == pw)][
-            ["category", "per100", "penetration"]].rename(
-            columns={"per100": "pp", "penetration": "pn"})
+            ["category", "per100", "penetration", "baskets_with"]].rename(
+            columns={"per100": "pp", "penetration": "pn",
+                     "baskets_with": "bw_prev"})
         cur = cur.merge(pv, on="category", how="left")
         cur["d100"] = (cur.per100 / cur.pp - 1) * 100
         cur["dpen"] = (cur.penetration - cur.pn) * 100
+        _thin = (cur.baskets_with < WOW_MIN_BASKETS) | (cur.bw_prev < WOW_MIN_BASKETS)
+        cur.loc[_thin, ["d100", "dpen"]] = np.nan
     cur = cur.sort_values("net", ascending=False)
     st.dataframe(pd.DataFrame({
         "Category": cur.category,
@@ -1358,7 +1389,9 @@ with t_insights:
         "$/100 bkt": st.column_config.NumberColumn(
             help=tip("$/100 baskets"), format="$%d"),
         "Δ WoW %": st.column_config.NumberColumn(
-            help="Change in $/100 baskets versus last week. " + tip("Δ WoW"),
+            help="Change in $/100 baskets versus last week. " + tip("Δ WoW")
+                 + f" Blank when the category had under {WOW_MIN_BASKETS} "
+                   "baskets in either week - too few to read.",
             format="%.1f%%"),
         "Penetration %": st.column_config.NumberColumn(
             help=tip("penetration"), format="%.1f%%"),
@@ -1389,44 +1422,46 @@ with t_insights:
                JOIN b bb ON bb.category = p.cat_b
         WHERE p.n >= 50 ORDER BY lift
     """)
-    if not lift.empty:
-        lift["Read"] = lift.lift.apply(
-            lambda v: "substitutes" if v < .7 else
-                      ("affinity" if v > 1.3 else "independent"))
-        st.dataframe(pd.DataFrame({
-            "Pair": lift.cat_a + "  +  " + lift.cat_b,
-            "Lift": lift.lift.round(2),
-            "Baskets": lift.baskets,
-            "What it means": lift.Read,
-        }), use_container_width=True, hide_index=True, column_config={
-            "Pair": st.column_config.TextColumn(
-                help="The two categories being compared."),
-            "Lift": st.column_config.NumberColumn(
-                help=tip("co-purchase lift"), format="%.2f"),
-            "Baskets": st.column_config.NumberColumn(
-                help="How many transactions contained both. Bigger numbers "
-                     "make the result more reliable.", format="%d"),
-            "What it means": st.column_config.TextColumn(
-                help="Substitutes — customers pick one or the other. "
-                     "Affinity — often bought together. "
-                     "Independent — no real relationship."),
-        })
+    @st.fragment
+    def _frag_pair_drill():
+        if not lift.empty:
+            lift["Read"] = lift.lift.apply(
+                lambda v: "substitutes" if v < .7 else
+                          ("affinity" if v > 1.3 else "independent"))
+            st.dataframe(pd.DataFrame({
+                "Pair": lift.cat_a + "  +  " + lift.cat_b,
+                "Lift": lift.lift.round(2),
+                "Baskets": lift.baskets,
+                "What it means": lift.Read,
+            }), use_container_width=True, hide_index=True, column_config={
+                "Pair": st.column_config.TextColumn(
+                    help="The two categories being compared."),
+                "Lift": st.column_config.NumberColumn(
+                    help=tip("co-purchase lift"), format="%.2f"),
+                "Baskets": st.column_config.NumberColumn(
+                    help="How many transactions contained both. Bigger numbers "
+                         "make the result more reliable.", format="%d"),
+                "What it means": st.column_config.TextColumn(
+                    help="Substitutes — customers pick one or the other. "
+                         "Affinity — often bought together. "
+                         "Independent — no real relationship."),
+            })
 
 
-    # ---- drill-down: brands and products behind a category pair ---------
-    if not lift.empty:
-        st.markdown("##### Go deeper on a pair")
-        st.markdown('<p class="note">Pick a pair to see which brands and '
-                    'products sit behind the category-level read, and what it '
-                    'suggests for buying.</p>', unsafe_allow_html=True)
+        # ---- drill-down: brands and products behind a category pair ---------
+        if not lift.empty:
+            st.markdown("##### Go deeper on a pair")
+            st.markdown('<p class="note">Pick a pair to see which brands and '
+                        'products sit behind the category-level read, and what it '
+                        'suggests for buying.</p>', unsafe_allow_html=True)
 
-        labels = [f"{r.cat_a} + {r.cat_b}  ({r.lift:.2f} — {r.Read})"
-                  for _, r in lift.iterrows()]
-        choice = st.selectbox("Category pair", labels, key="pairpick")
-        row = lift.iloc[labels.index(choice)]
-        ca, cb, lv, read = row.cat_a, row.cat_b, float(row.lift), row.Read
+            labels = [f"{r.cat_a} + {r.cat_b}  ({r.lift:.2f} — {r.Read})"
+                      for _, r in lift.iterrows()]
+            choice = st.selectbox("Category pair", labels, key="pairpick")
+            row = lift.iloc[labels.index(choice)]
+            ca, cb, lv, read = row.cat_a, row.cat_b, float(row.lift), row.Read
 
-        bt = q(f"""
+            bt = q(f"""
             SELECT category, brand,
                    SUM(net_early) AS net_early, SUM(net_late) AS net_late,
                    SUM(units_early) AS u_early, SUM(units_late) AS u_late,
@@ -1436,217 +1471,226 @@ with t_insights:
             GROUP BY 1,2 HAVING SUM(net_total) >= 2000
         """)
 
-        if bt.empty:
-            st.info("Not enough brand-level volume in this pair to break down.")
-        else:
-            bt["change"] = pct_change(bt.net_late, bt.net_early)
-            bt["dir"] = bt.change.apply(
-                lambda v: "growing" if pd.notna(v) and v > 10 else
-                          ("declining" if pd.notna(v) and v < -10 else "flat"))
+            if bt.empty:
+                st.info("Not enough brand-level volume in this pair to break down.")
+            else:
+                bt["change"] = pct_change(bt.net_late, bt.net_early)
+                def _dir(r):
+                    if min(r.net_early, r.net_late) < TREND_MIN_BASE:
+                        return "too small to call"
+                    v = r.change
+                    if pd.isna(v):
+                        return "too small to call"
+                    return ("growing" if v > TREND_BAND_PCT else
+                            "declining" if v < -TREND_BAND_PCT else "flat")
+                bt["dir"] = bt.apply(_dir, axis=1)
 
-            # --- the recommendation ---------------------------------------
-            # Built from this pair's own brands and figures rather than a
-            # template with names substituted in. Every claim below names the
-            # brand and the number behind it, so it can be checked.
-            a_side = bt[bt.category == ca].sort_values("net_total", ascending=False)
-            b_side = bt[bt.category == cb].sort_values("net_total", ascending=False)
+                # --- the recommendation ---------------------------------------
+                # Built from this pair's own brands and figures rather than a
+                # template with names substituted in. Every claim below names the
+                # brand and the number behind it, so it can be checked.
+                a_side = bt[bt.category == ca].sort_values("net_total", ascending=False)
+                b_side = bt[bt.category == cb].sort_values("net_total", ascending=False)
 
-            def movers(side, n=2):
-                v = side.dropna(subset=["change"])
-                up = v[v.change > 10].sort_values("change", ascending=False).head(n)
-                dn = v[v.change < -10].sort_values("change").head(n)
-                return up, dn
+                def movers(side, n=2):
+                    v = side.dropna(subset=["change"])
+                    up = v[v.dir == "growing"].sort_values("change", ascending=False).head(n)
+                    dn = v[v.dir == "declining"].sort_values("change").head(n)
+                    return up, dn
 
-            def name_list(frame, with_cat=False):
-                """Brand names with their trend. Include the category when the
+                def name_list(frame, with_cat=False):
+                    """Brand names with their trend. Include the category when the
                 list mixes both sides — a brand can sell in two categories with
                 different trajectories, and unlabelled it reads as a
                 contradiction."""
-                parts = []
-                for _, r in frame.iterrows():
-                    tag = f" in {r.category}" if with_cat else ""
-                    gone = " — now at zero" if r.change <= -99 else ""
-                    parts.append(f"**{r.brand}**{tag} ({r.change:+.0f}%{gone})")
-                return ", ".join(parts)
+                    parts = []
+                    for _, r in frame.iterrows():
+                        tag = f" in {r.category}" if with_cat else ""
+                        gone = " — now at zero" if r.change <= -99 else ""
+                        parts.append(f"**{r.brand}**{tag} ({r.change:+.0f}%{gone})")
+                    return ", ".join(parts)
 
-            a_up, a_dn = movers(a_side)
-            b_up, b_dn = movers(b_side)
-            a_chg, b_chg = a_side.change.median(), b_side.change.median()
-            a_top = a_side.iloc[0] if len(a_side) else None
-            b_top = b_side.iloc[0] if len(b_side) else None
+                a_up, a_dn = movers(a_side)
+                b_up, b_dn = movers(b_side)
+                a_chg, b_chg = a_side.change.median(), b_side.change.median()
+                a_top = a_side.iloc[0] if len(a_side) else None
+                b_top = b_side.iloc[0] if len(b_side) else None
 
-            # strongest co-purchased brand combination, for affinity reads
-            bp_top = q(f"""
+                # strongest co-purchased brand combination, for affinity reads
+                bp_top = q(f"""
                 SELECT brand_a, brand_b, SUM(joint_baskets) AS baskets
                 FROM dash_brand_pairs
                 WHERE cat_a = '{ca}' AND cat_b = '{cb}' {af}
                 GROUP BY 1,2 ORDER BY baskets DESC LIMIT 1
             """)
 
-            lines = []
+                lines = []
 
-            if read == "substitutes":
-                strength = ("strongly" if lv < 0.5 else
-                            "moderately" if lv < 0.62 else "mildly")
-                lines.append(
-                    f"Customers {strength} choose between **{ca}** and "
-                    f"**{cb}** rather than buying both (lift {lv:.2f}). Demand "
-                    f"is more likely to move between them than to disappear if "
-                    f"you cut one.")
-
-                if pd.notna(a_chg) and pd.notna(b_chg) and abs(a_chg - b_chg) > 15:
-                    up_cat, dn_cat = (cb, ca) if b_chg > a_chg else (ca, cb)
-                    up_side = b_up if b_chg > a_chg else a_up
-                    dn_side = a_dn if b_chg > a_chg else b_dn
-                    detail = ""
-                    if len(up_side):
-                        detail += (f" The movement is concentrated in "
-                                   f"{name_list(up_side)} within {up_cat}.")
-                    if len(dn_side):
-                        detail += (f" On the {dn_cat} side, {name_list(dn_side)} "
-                                   f"{'are' if len(dn_side) > 1 else 'is'} "
-                                   f"giving ground.")
+                if read == "substitutes":
+                    strength = ("strongly" if lv < 0.5 else
+                                "moderately" if lv < 0.62 else "mildly")
                     lines.append(
-                        f"Demand is shifting toward **{up_cat}**.{detail} Weight "
-                        f"the buy that way rather than carrying full depth in "
-                        f"both — you are currently funding two ranges to serve "
-                        f"one customer decision.")
+                        f"Customers {strength} choose between **{ca}** and "
+                        f"**{cb}** rather than buying both (lift {lv:.2f}). Demand "
+                        f"is more likely to move between them than to disappear if "
+                        f"you cut one.")
+
+                    if pd.notna(a_chg) and pd.notna(b_chg) and abs(a_chg - b_chg) > 15:
+                        up_cat, dn_cat = (cb, ca) if b_chg > a_chg else (ca, cb)
+                        up_side = b_up if b_chg > a_chg else a_up
+                        dn_side = a_dn if b_chg > a_chg else b_dn
+                        detail = ""
+                        if len(up_side):
+                            detail += (f" The movement is concentrated in "
+                                       f"{name_list(up_side)} within {up_cat}.")
+                        if len(dn_side):
+                            detail += (f" On the {dn_cat} side, {name_list(dn_side)} "
+                                       f"{'are' if len(dn_side) > 1 else 'is'} "
+                                       f"giving ground.")
+                        lines.append(
+                            f"Demand is shifting toward **{up_cat}**.{detail} Weight "
+                            f"the buy that way rather than carrying full depth in "
+                            f"both — you are currently funding two ranges to serve "
+                            f"one customer decision.")
+                    else:
+                        lines.append(
+                            f"Neither side is clearly winning — {ca} is moving "
+                            f"{a_chg:+.0f}% and {cb} {b_chg:+.0f}%. Both are earning "
+                            f"their place, so avoid promoting them against each "
+                            f"other in the same week: you would be discounting a "
+                            f"sale you were already getting.")
+
+                    if a_top is not None and b_top is not None:
+                        lines.append(
+                            f"Before cutting depth, check the brand table. "
+                            f"**{a_top.brand}** carries ${a_top.net_total:,.0f} of "
+                            f"{ca} and **{b_top.brand}** ${b_top.net_total:,.0f} of "
+                            f"{cb} — a category-level signal usually comes down to "
+                            f"a handful of brands while the rest are unaffected.")
+
+                elif read == "affinity":
+                    lines.append(
+                        f"**{ca}** and **{cb}** get bought together "
+                        f"{'far ' if lv > 1.8 else ''}more than chance predicts "
+                        f"(lift {lv:.2f}).")
+                    if len(bp_top):
+                        r0 = bp_top.iloc[0]
+                        lines.append(
+                            f"The strongest combination is **{r0.brand_a}** with "
+                            f"**{r0.brand_b}** — {int(r0.baskets):,} transactions "
+                            f"contained both. That is the obvious bundle: it "
+                            f"formalises what customers already do rather than "
+                            f"trying to create a new habit.")
+                    lines.append(
+                        f"Treat par levels as linked. A stockout in {ca} now costs "
+                        f"you {cb} sales as well, so they should not be ordered "
+                        f"independently.")
+                    growing = pd.concat([a_up.head(1), b_up.head(1)])
+                    if len(growing):
+                        lines.append(
+                            f"{name_list(growing, with_cat=True)} "
+                            f"{'are' if len(growing) > 1 else 'is'} growing — the "
+                            f"strongest candidates to feature in the pairing.")
+
                 else:
                     lines.append(
-                        f"Neither side is clearly winning — {ca} is moving "
-                        f"{a_chg:+.0f}% and {cb} {b_chg:+.0f}%. Both are earning "
-                        f"their place, so avoid promoting them against each "
-                        f"other in the same week: you would be discounting a "
-                        f"sale you were already getting.")
+                        f"**{ca}** and **{cb}** have no meaningful relationship "
+                        f"(lift {lv:.2f}). Buying, pricing and merchandising "
+                        f"decisions on one carry no implication for the other.")
+                    interesting = pd.concat([a_up.head(1), a_dn.head(1),
+                                             b_up.head(1), b_dn.head(1)])
+                    if len(interesting):
+                        lines.append(
+                            f"Within them, though, "
+                            f"{name_list(interesting, with_cat=True)} "
+                            f"{'are' if len(interesting) > 1 else 'is'} moving "
+                            f"enough to be worth a separate look.")
 
-                if a_top is not None and b_top is not None:
-                    lines.append(
-                        f"Before cutting depth, check the brand table. "
-                        f"**{a_top.brand}** carries ${a_top.net_total:,.0f} of "
-                        f"{ca} and **{b_top.brand}** ${b_top.net_total:,.0f} of "
-                        f"{cb} — a category-level signal usually comes down to "
-                        f"a handful of brands while the rest are unaffected.")
-
-            elif read == "affinity":
+                n_bask = int(row.baskets)
                 lines.append(
-                    f"**{ca}** and **{cb}** get bought together "
-                    f"{'far ' if lv > 1.8 else ''}more than chance predicts "
-                    f"(lift {lv:.2f}).")
-                if len(bp_top):
-                    r0 = bp_top.iloc[0]
-                    lines.append(
-                        f"The strongest combination is **{r0.brand_a}** with "
-                        f"**{r0.brand_b}** — {int(r0.baskets):,} transactions "
-                        f"contained both. That is the obvious bundle: it "
-                        f"formalises what customers already do rather than "
-                        f"trying to create a new habit.")
-                lines.append(
-                    f"Treat par levels as linked. A stockout in {ca} now costs "
-                    f"you {cb} sales as well, so they should not be ordered "
-                    f"independently.")
-                growing = pd.concat([a_up.head(1), b_up.head(1)])
-                if len(growing):
-                    lines.append(
-                        f"{name_list(growing, with_cat=True)} "
-                        f"{'are' if len(growing) > 1 else 'is'} growing — the "
-                        f"strongest candidates to feature in the pairing.")
+                    f"*Based on {n_bask:,} transactions containing both categories.*"
+                    + ("  Confidence is limited at this volume." if n_bask < 300 else ""))
 
-            else:
-                lines.append(
-                    f"**{ca}** and **{cb}** have no meaningful relationship "
-                    f"(lift {lv:.2f}). Buying, pricing and merchandising "
-                    f"decisions on one carry no implication for the other.")
-                interesting = pd.concat([a_up.head(1), a_dn.head(1),
-                                         b_up.head(1), b_dn.head(1)])
-                if len(interesting):
-                    lines.append(
-                        f"Within them, though, "
-                        f"{name_list(interesting, with_cat=True)} "
-                        f"{'are' if len(interesting) > 1 else 'is'} moving "
-                        f"enough to be worth a separate look.")
+                st.markdown('<div class="howto"><b>What this suggests.</b> '
+                            + "<br><br>".join(lines) + "</div>",
+                            unsafe_allow_html=True)
 
-            n_bask = int(row.baskets)
-            lines.append(
-                f"*Based on {n_bask:,} transactions containing both categories.*"
-                + ("  Confidence is limited at this volume." if n_bask < 300 else ""))
+                # --- brand detail ---------------------------------------------
+                st.markdown("**Brands in these categories**")
+                show = bt.sort_values("net_total", ascending=False).head(18)
+                st.dataframe(pd.DataFrame({
+                    "Category": show.category,
+                    "Brand": show.brand,
+                    "Net $": show.net_total.round(0),
+                    "Change %": pd.to_numeric(show.change, errors="coerce").round(1),
+                    "Direction": show.dir,
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Net $": st.column_config.NumberColumn(
+                        help="Net sales across the whole loaded period.",
+                        format="$%d"),
+                    "Change %": st.column_config.NumberColumn(
+                        help="Second half of the period versus the first half. "
+                             "Shows which way the brand is moving.",
+                        format="%.1f%%"),
+                    "Direction": st.column_config.TextColumn(
+                        help=f"Growing is more than +{TREND_BAND_PCT:.0f}%, declining "
+                             f"is worse than -{TREND_BAND_PCT:.0f}%, anything "
+                             f"between is flat. A brand needs at least "
+                             f"${TREND_MIN_BASE:,.0f} net in BOTH halves to be "
+                             f"labelled; smaller ones read 'too small to call'."),
+                })
 
-            st.markdown('<div class="howto"><b>What this suggests.</b> '
-                        + "<br><br>".join(lines) + "</div>",
-                        unsafe_allow_html=True)
-
-            # --- brand detail ---------------------------------------------
-            st.markdown("**Brands in these categories**")
-            show = bt.sort_values("net_total", ascending=False).head(18)
-            st.dataframe(pd.DataFrame({
-                "Category": show.category,
-                "Brand": show.brand,
-                "Net $": show.net_total.round(0),
-                "Change %": pd.to_numeric(show.change, errors="coerce").round(1),
-                "Direction": show.dir,
-            }), use_container_width=True, hide_index=True, column_config={
-                "Net $": st.column_config.NumberColumn(
-                    help="Net sales across the whole loaded period.",
-                    format="$%d"),
-                "Change %": st.column_config.NumberColumn(
-                    help="Second half of the period versus the first half. "
-                         "Shows which way the brand is moving.",
-                    format="%.1f%%"),
-                "Direction": st.column_config.TextColumn(
-                    help="Growing is more than +10%, declining is worse than "
-                         "-10%, anything between is flat."),
-            })
-
-            # --- brand pairs ----------------------------------------------
-            bp = q(f"""
+                # --- brand pairs ----------------------------------------------
+                bp = q(f"""
                 SELECT brand_a, brand_b, SUM(joint_baskets) AS baskets
                 FROM dash_brand_pairs
                 WHERE cat_a = '{ca}' AND cat_b = '{cb}' {af}
                 GROUP BY 1,2 ORDER BY baskets DESC LIMIT 12
             """)
-            if not bp.empty:
-                st.markdown(f"**Brand combinations actually bought together**")
-                st.dataframe(pd.DataFrame({
-                    f"{ca} brand": bp.brand_a,
-                    f"{cb} brand": bp.brand_b,
-                    "Baskets": bp.baskets,
-                }), use_container_width=True, hide_index=True,
-                    column_config={"Baskets": st.column_config.NumberColumn(
-                        help="Transactions containing both. These are the "
-                             "specific combinations customers already choose.",
-                        format="%d")})
+                if not bp.empty:
+                    st.markdown(f"**Brand combinations actually bought together**")
+                    st.dataframe(pd.DataFrame({
+                        f"{ca} brand": bp.brand_a,
+                        f"{cb} brand": bp.brand_b,
+                        "Baskets": bp.baskets,
+                    }), use_container_width=True, hide_index=True,
+                        column_config={"Baskets": st.column_config.NumberColumn(
+                            help="Transactions containing both. These are the "
+                                 "specific combinations customers already choose.",
+                            format="%d")})
 
-            # --- product movers: one table per category, side by side -------
-            st.markdown("**Top products in these categories**")
-            tca, tcb = st.columns(2)
-            shown = 0
-            # dash_product_trend bakes its early/late split against the whole
-            # file, so it cannot follow the window. Where the week-level
-            # product table exists, use it and split the window itself.
-            for tcol, cat in ((tca, ca), (tcb, cb)):
-                csql = cat.replace("'", "''")
-                if table_exists("dash_brand_product_week"):
-                    raw = q(f"""
+                # --- product movers: one table per category, side by side -------
+                st.markdown("**Top products in these categories**")
+                tca, tcb = st.columns(2)
+                shown = 0
+                # dash_product_trend bakes its early/late split against the whole
+                # file, so it cannot follow the window. Where the week-level
+                # product table exists, use it and split the window itself.
+                for tcol, cat in ((tca, ca), (tcb, cb)):
+                    csql = cat.replace("'", "''")
+                    if table_exists("dash_brand_product_week"):
+                        raw = q(f"""
                         SELECT brand, product, iso_year, iso_week,
                                SUM(net) AS net
                         FROM dash_brand_product_week
                         {scoped(f"category = '{csql}'")}
                         GROUP BY 1,2,3,4
                     """)
-                    if raw.empty:
-                        pt = pd.DataFrame()
+                        if raw.empty:
+                            pt = pd.DataFrame()
+                        else:
+                            raw["net"] = pd.to_numeric(raw.net,
+                                                       errors="coerce").fillna(0)
+                            pt = (raw.groupby(["brand", "product"], as_index=False)
+                                     .net.sum()
+                                     .rename(columns={"net": "net_total"}))
+                            hv = win_halves(raw, "net", by=["brand", "product"])
+                            pt = pt.merge(hv, on=["brand", "product"], how="left")
+                            pt = pt.rename(columns={"early": "net_early",
+                                                    "late": "net_late"})
+                            pt = pt.nlargest(10, "net_total")
                     else:
-                        raw["net"] = pd.to_numeric(raw.net,
-                                                   errors="coerce").fillna(0)
-                        pt = (raw.groupby(["brand", "product"], as_index=False)
-                                 .net.sum()
-                                 .rename(columns={"net": "net_total"}))
-                        hv = win_halves(raw, "net", by=["brand", "product"])
-                        pt = pt.merge(hv, on=["brand", "product"], how="left")
-                        pt = pt.rename(columns={"early": "net_early",
-                                                "late": "net_late"})
-                        pt = pt.nlargest(10, "net_total")
-                else:
-                    pt = q(f"""
+                        pt = q(f"""
                         SELECT brand, product,
                                SUM(net_early) AS net_early,
                                SUM(net_late) AS net_late,
@@ -1655,33 +1699,34 @@ with t_insights:
                         WHERE category = '{csql}' {af}
                         GROUP BY 1,2 ORDER BY net_total DESC LIMIT 10
                     """)
-                with tcol:
-                    st.markdown(f"**{cat}**")
-                    if pt.empty:
-                        st.caption(f"No {cat} movement in this period.")
-                        continue
-                    pt["change"] = pct_change(pt.net_late, pt.net_early)
-                    shown += 1
-                    st.dataframe(pd.DataFrame({
-                        "Brand": pt.brand,
-                        "Product": pt["product"],
-                        "Net $": pt.net_total.round(0),
-                        "Change %": pd.to_numeric(
-                            pt.change, errors="coerce").round(1),
-                    }), use_container_width=True, hide_index=True,
-                        column_config={
-                            "Net $": st.column_config.NumberColumn(
-                                format="$%d"),
-                            "Change %": st.column_config.NumberColumn(
-                                help="Second half versus first half of the "
-                                     "selected window.",
-                                format="%.1f%%"),
-                        })
-            if shown:
-                st.markdown('<p class="note">Product names change often as '
-                            'SKUs turn over, so read these as examples of '
-                            'where the movement sits rather than a stable '
-                            'ranking.</p>', unsafe_allow_html=True)
+                    with tcol:
+                        st.markdown(f"**{cat}**")
+                        if pt.empty:
+                            st.caption(f"No {cat} movement in this period.")
+                            continue
+                        pt["change"] = pct_change(pt.net_late, pt.net_early)
+                        shown += 1
+                        st.dataframe(pd.DataFrame({
+                            "Brand": pt.brand,
+                            "Product": pt["product"],
+                            "Net $": pt.net_total.round(0),
+                            "Change %": pd.to_numeric(
+                                pt.change, errors="coerce").round(1),
+                        }), use_container_width=True, hide_index=True,
+                            column_config={
+                                "Net $": st.column_config.NumberColumn(
+                                    format="$%d"),
+                                "Change %": st.column_config.NumberColumn(
+                                    help="Second half versus first half of the "
+                                         "selected window.",
+                                    format="%.1f%%"),
+                            })
+                if shown:
+                    st.markdown('<p class="note">Product names change often as '
+                                'SKUs turn over, so read these as examples of '
+                                'where the movement sits rather than a stable '
+                                'ranking.</p>', unsafe_allow_html=True)
+    _frag_pair_drill()
 
     inv = q(f"""
         SELECT category, SUM(inv_cost) AS inv_cost, SUM(qoh) AS qoh,
@@ -1725,7 +1770,7 @@ with t_insights:
 
 
 # ------------------------------------------------------------------- brands
-with t_brands:
+def section_brands():
     HAVE_BW = table_exists("dash_brand_week")
     HAVE_BPW = table_exists("dash_brand_product_week")
 
@@ -1985,15 +2030,11 @@ with t_brands:
             lim = max(plot.rev_share.max(), plot.acq_share.max()) * 1.05
             fig.add_shape(type="line", x0=0, y0=0, x1=lim, y1=lim,
                           line=dict(color=MUTED, dash="dot", width=1))
-            fig.update_layout(height=440, margin=dict(l=0, r=0, t=10, b=0),
-                              xaxis_title="% of revenue",
-                              yaxis_title="% of first-basket appearances",
-                              legend=dict(orientation="h", y=1.1, x=0,
-                                          title_text=""),
-                              plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%")
-            fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%")
-            st.plotly_chart(fig, use_container_width=True, key="pc7")
+            fig.update_layout(xaxis_title="% of revenue",
+                              yaxis_title="% of first-basket appearances")
+            fig.update_xaxes(ticksuffix="%")
+            fig.update_yaxes(ticksuffix="%")
+            charts.show(fig, key="pc7", kind="scatter")
 
             over = plot[plot.acq_share > plot.rev_share * 1.25].nlargest(
                 5, "acq_share")
@@ -2069,17 +2110,19 @@ with t_brands:
     if bl.empty:
         st.info("No brand data for the selected stores and window.")
     else:
-        pick = st.selectbox("Pick a brand", bl.brand.tolist(),
-                            key="deep_brand", help=pick_help)
-        psql = pick.replace("'", "''")            # safe inside SQL literals
+        @st.fragment
+        def _frag_brand_deep():
+            pick = st.selectbox("Pick a brand", bl.brand.tolist(),
+                                key="deep_brand", help=pick_help)
+            psql = pick.replace("'", "''")            # safe inside SQL literals
 
-        def num0(v):
-            v = pd.to_numeric(v, errors="coerce")
-            return float(v) if pd.notna(v) else 0.0
+            def num0(v):
+                v = pd.to_numeric(v, errors="coerce")
+                return float(v) if pd.notna(v) else 0.0
 
-        # ---- snapshot ---------------------------------------------------
-        if HAVE_BW:
-            bwd = q(f"""
+            # ---- snapshot ---------------------------------------------------
+            if HAVE_BW:
+                bwd = q(f"""
                 SELECT category, iso_year, iso_week,
                        SUM(net) AS net, SUM(gm) AS gm, SUM(units) AS units,
                        SUM(first_basket_customers) AS first_basket
@@ -2087,61 +2130,61 @@ with t_brands:
                 {scoped(f"brand = '{psql}'")}
                 GROUP BY 1,2,3
             """)
-            for c in ("net", "gm", "units", "first_basket"):
-                if c in bwd.columns:
-                    bwd[c] = pd.to_numeric(bwd[c], errors="coerce").fillna(0)
-            net = float(bwd.net.sum()) if not bwd.empty else 0.0
-            gm = float(bwd.gm.sum()) if not bwd.empty else 0.0
-            units = float(bwd.units.sum()) if not bwd.empty else 0.0
-            fb = int(bwd.first_basket.sum()) if not bwd.empty else 0
-            hv = win_halves(bwd, "net")
-            e = float(hv["early"].sum()) if len(hv) else 0.0
-            l = float(hv["late"].sum()) if len(hv) else 0.0
-        else:
-            sc = q(f"""
+                for c in ("net", "gm", "units", "first_basket"):
+                    if c in bwd.columns:
+                        bwd[c] = pd.to_numeric(bwd[c], errors="coerce").fillna(0)
+                net = float(bwd.net.sum()) if not bwd.empty else 0.0
+                gm = float(bwd.gm.sum()) if not bwd.empty else 0.0
+                units = float(bwd.units.sum()) if not bwd.empty else 0.0
+                fb = int(bwd.first_basket.sum()) if not bwd.empty else 0
+                hv = win_halves(bwd, "net")
+                e = float(hv["early"].sum()) if len(hv) else 0.0
+                l = float(hv["late"].sum()) if len(hv) else 0.0
+            else:
+                sc = q(f"""
                 SELECT SUM(net) AS net, SUM(gm) AS gm, SUM(units) AS units,
                        SUM(first_basket_customers) AS first_basket
                 FROM dash_brand_scorecard
                 WHERE brand = '{psql}' {and_filter(keys)}
             """).iloc[0]
-            tr = q(f"""
+                tr = q(f"""
                 SELECT SUM(net_early) AS e, SUM(net_late) AS l
                 FROM dash_brand_trend
                 WHERE brand = '{psql}' {and_filter(keys)}
             """).iloc[0]
-            net, gm = num0(sc.net), num0(sc.gm)
-            units, fb = num0(sc.units), int(num0(sc.first_basket))
-            e, l = num0(tr.e), num0(tr.l)
-            bwd = pd.DataFrame()
+                net, gm = num0(sc.net), num0(sc.gm)
+                units, fb = num0(sc.units), int(num0(sc.first_basket))
+                e, l = num0(tr.e), num0(tr.l)
+                bwd = pd.DataFrame()
 
-        trend = (l / e - 1) * 100 if e > 0 else float("nan")
+            trend = (l / e - 1) * 100 if e > 0 else float("nan")
 
-        m = st.columns(4)
-        m[0].metric("Net sales", f"${net:,.0f}")
-        m[1].metric("Gross margin",
-                    f"{gm / net * 100:.1f}%" if net > 0 else "—",
-                    help=tip("gross margin"))
-        m[2].metric("Units", f"{int(units):,}")
-        m[3].metric("Trend (2nd half vs 1st)",
-                    f"{trend:+.1f}%" if pd.notna(trend) else "—",
-                    help="Net sales in the second half of the selected "
-                         "window versus the first half.")
-        if fb:
-            st.markdown(f'<p class="note"><b>{fb:,}</b> customers had '
-                        f'<b>{pick}</b> in their first-ever basket — '
-                        f'acquisition value on top of the sales line.</p>',
-                        unsafe_allow_html=True)
+            m = st.columns(4)
+            m[0].metric("Net sales", f"${net:,.0f}")
+            m[1].metric("Gross margin",
+                        f"{gm / net * 100:.1f}%" if net > 0 else "—",
+                        help=tip("gross margin"))
+            m[2].metric("Units", f"{int(units):,}")
+            m[3].metric("Trend (2nd half vs 1st)",
+                        f"{trend:+.1f}%" if pd.notna(trend) else "—",
+                        help="Net sales in the second half of the selected "
+                             "window versus the first half.")
+            if fb:
+                st.markdown(f'<p class="note"><b>{fb:,}</b> customers had '
+                            f'<b>{pick}</b> in their first-ever basket — '
+                            f'acquisition value on top of the sales line.</p>',
+                            unsafe_allow_html=True)
 
-        # ---- category mix + co-purchases ---------------------------------
-        if HAVE_BW and not bwd.empty:
-            cm = (bwd.groupby("category", as_index=False).net.sum()
-                     .query("net > 0").sort_values("net", ascending=False))
-            cmh = win_halves(bwd, "net", by=["category"])
-            cm = cm.merge(cmh, on="category", how="left")
-            cm["net_early"] = cm["early"].fillna(0)
-            cm["net_late"] = cm["late"].fillna(0)
-        else:
-            cm = q(f"""
+            # ---- category mix + co-purchases ---------------------------------
+            if HAVE_BW and not bwd.empty:
+                cm = (bwd.groupby("category", as_index=False).net.sum()
+                         .query("net > 0").sort_values("net", ascending=False))
+                cmh = win_halves(bwd, "net", by=["category"])
+                cm = cm.merge(cmh, on="category", how="left")
+                cm["net_early"] = cm["early"].fillna(0)
+                cm["net_late"] = cm["late"].fillna(0)
+            else:
+                cm = q(f"""
                 SELECT category,
                        SUM(net_total) AS net,
                        SUM(net_early) AS net_early,
@@ -2152,11 +2195,11 @@ with t_brands:
                 ORDER BY net DESC
             """)
 
-        # Co-purchase pairs are published without a week, so this block is
-        # whole-file whatever the slider says. Labelled rather than hidden:
-        # pairing behaviour is stable enough that the lifetime read is still
-        # the right input for bundling.
-        bp = q(f"""
+            # Co-purchase pairs are published without a week, so this block is
+            # whole-file whatever the slider says. Labelled rather than hidden:
+            # pairing behaviour is stable enough that the lifetime read is still
+            # the right input for bundling.
+            bp = q(f"""
             SELECT other, other_cat, SUM(baskets) AS baskets FROM (
                 SELECT brand_b AS other, cat_b AS other_cat,
                        SUM(joint_baskets) AS baskets
@@ -2172,133 +2215,130 @@ with t_brands:
             WHERE other <> '{psql}'
             GROUP BY 1, 2
         """)
-        if not bp.empty:
-            bp = bp.rename(columns={"other": "partner",
-                                    "other_cat": "partner_cat"})
+            if not bp.empty:
+                bp = bp.rename(columns={"other": "partner",
+                                        "other_cat": "partner_cat"})
 
-        left, right = st.columns(2)
+            left, right = st.columns(2)
 
-        with left:
-            st.markdown("##### Where its revenue sits")
-            if cm.empty:
-                st.info("No category detail for this brand in the selected "
-                        "window.")
+            with left:
+                st.markdown("##### Where its revenue sits")
+                if cm.empty:
+                    st.info("No category detail for this brand in the selected "
+                            "window.")
+                else:
+                    cm["share"] = cm.net / cm.net.sum() * 100
+                    cm["change"] = pct_change(cm["net_late"], cm["net_early"])
+                    cplot = cm.sort_values("net")
+                    fig = px.bar(cplot, x="net", y="category", orientation="h",
+                                 color="category",
+                                 color_discrete_map={c: cat_color(c)
+                                                     for c in cplot.category},
+                                 text=cplot["share"].map("{:.0f}%".format))
+                    fig.update_traces(textposition="outside", cliponaxis=False)
+                    fig.update_layout(showlegend=False,
+                                      xaxis_title="", yaxis_title="")
+                    fig.update_xaxes(showticklabels=False)
+                    charts.show(fig, key="deep_cm", kind="hbar", height=90 + 46 * len(cplot))
+                    st.caption("Bar labels are each category's share of the "
+                               "brand's net sales.")
+
+                    st.dataframe(pd.DataFrame({
+                        "Category": cm.category,
+                        "Net $": cm.net.round(0),
+                        "% of brand": cm["share"].round(1),
+                        "Change %": pd.to_numeric(cm["change"],
+                                                  errors="coerce").round(1),
+                    }), use_container_width=True, hide_index=True, column_config={
+                        "Net $": st.column_config.NumberColumn(format="$%d"),
+                        "% of brand": st.column_config.NumberColumn(
+                            help="Share of this brand's net sales.",
+                            format="%.1f%%"),
+                        "Change %": st.column_config.NumberColumn(
+                            help="Second half of the selected window versus the "
+                                 "first. Shows which way the brand is moving "
+                                 "inside each category.", format="%.1f%%"),
+                    })
+
+            with right:
+                st.markdown("##### Bought together")
+                if bp.empty:
+                    st.info("No co-purchase data for this brand — either it is "
+                            "usually bought alone, or the published file "
+                            "predates brand-pair tracking.")
+                else:
+                    tot = (bp.groupby("partner", as_index=False)
+                             .agg(baskets=("baskets", "sum")))
+                    # a partner's category is the one where it co-occurs with
+                    # the picked brand most often
+                    pcat = (bp.sort_values("baskets", ascending=False)
+                              .drop_duplicates("partner")
+                              .set_index("partner")["partner_cat"])
+                    tot["category"] = tot.partner.map(pcat)
+                    tot = tot.sort_values("baskets", ascending=False)
+                    tot["share"] = tot.baskets / tot.baskets.sum() * 100
+
+                    for _, r in tot.head(3).iterrows():
+                        st.markdown(
+                            f'<div class="alert a-ok"><b>{pick} + '
+                            f'{r.partner}</b> — {int(r.baskets):,} transactions '
+                            f'contained both ({r.share:.1f}% of all {pick} '
+                            f'pairings)</div>', unsafe_allow_html=True)
+
+                    show = tot.head(12)
+                    st.dataframe(pd.DataFrame({
+                        "Partner brand": show.partner,
+                        "Category": show.category,
+                        "Baskets together": show.baskets,
+                        "% of pairings": show["share"].round(1),
+                    }), use_container_width=True, hide_index=True, column_config={
+                        "Baskets together": st.column_config.NumberColumn(
+                            help="Transactions containing both brands.",
+                            format="%d"),
+                        "% of pairings": st.column_config.NumberColumn(
+                            help="Of all transactions where this brand appeared "
+                                 "alongside any other brand, how often it was "
+                                 "this one.", format="%.1f%%"),
+                    })
+                    if not WIN_FULL:
+                        st.markdown('<p class="note">Pairings cover the whole '
+                                    'loaded period, not your selected window — '
+                                    'basket co-occurrence is published without a '
+                                    'week.</p>', unsafe_allow_html=True)
+                    st.markdown('<p class="note">Partners from other categories '
+                                'are cross-sells — bundle and merchandise them '
+                                'together. Brands from this brand\'s own '
+                                'category that never appear here are likely '
+                                'substitutes: customers choose between you, not '
+                                'in addition to you.</p>', unsafe_allow_html=True)
+
+            # ---- top SKUs within a category ----------------------------------
+            st.markdown("##### Top SKUs")
+            if not HAVE_BPW:
+                st.info("Product-level brand detail is not in the published file "
+                        "yet. It appears after the next refresh.")
             else:
-                cm["share"] = cm.net / cm.net.sum() * 100
-                cm["change"] = pct_change(cm["net_late"], cm["net_early"])
-                cplot = cm.sort_values("net")
-                fig = px.bar(cplot, x="net", y="category", orientation="h",
-                             color="category",
-                             color_discrete_map={c: cat_color(c)
-                                                 for c in cplot.category},
-                             text=cplot["share"].map("{:.0f}%".format))
-                fig.update_traces(textposition="outside", cliponaxis=False)
-                fig.update_layout(height=90 + 46 * len(cplot),
-                                  showlegend=False,
-                                  margin=dict(l=0, r=0, t=10, b=0),
-                                  xaxis_title="", yaxis_title="",
-                                  plot_bgcolor="rgba(0,0,0,0)")
-                fig.update_xaxes(showticklabels=False)
-                st.plotly_chart(fig, use_container_width=True, key="deep_cm")
-                st.caption("Bar labels are each category's share of the "
-                           "brand's net sales.")
-
-                st.dataframe(pd.DataFrame({
-                    "Category": cm.category,
-                    "Net $": cm.net.round(0),
-                    "% of brand": cm["share"].round(1),
-                    "Change %": pd.to_numeric(cm["change"],
-                                              errors="coerce").round(1),
-                }), use_container_width=True, hide_index=True, column_config={
-                    "Net $": st.column_config.NumberColumn(format="$%d"),
-                    "% of brand": st.column_config.NumberColumn(
-                        help="Share of this brand's net sales.",
-                        format="%.1f%%"),
-                    "Change %": st.column_config.NumberColumn(
-                        help="Second half of the selected window versus the "
-                             "first. Shows which way the brand is moving "
-                             "inside each category.", format="%.1f%%"),
-                })
-
-        with right:
-            st.markdown("##### Bought together")
-            if bp.empty:
-                st.info("No co-purchase data for this brand — either it is "
-                        "usually bought alone, or the published file "
-                        "predates brand-pair tracking.")
-            else:
-                tot = (bp.groupby("partner", as_index=False)
-                         .agg(baskets=("baskets", "sum")))
-                # a partner's category is the one where it co-occurs with
-                # the picked brand most often
-                pcat = (bp.sort_values("baskets", ascending=False)
-                          .drop_duplicates("partner")
-                          .set_index("partner")["partner_cat"])
-                tot["category"] = tot.partner.map(pcat)
-                tot = tot.sort_values("baskets", ascending=False)
-                tot["share"] = tot.baskets / tot.baskets.sum() * 100
-
-                for _, r in tot.head(3).iterrows():
-                    st.markdown(
-                        f'<div class="alert a-ok"><b>{pick} + '
-                        f'{r.partner}</b> — {int(r.baskets):,} transactions '
-                        f'contained both ({r.share:.1f}% of all {pick} '
-                        f'pairings)</div>', unsafe_allow_html=True)
-
-                show = tot.head(12)
-                st.dataframe(pd.DataFrame({
-                    "Partner brand": show.partner,
-                    "Category": show.category,
-                    "Baskets together": show.baskets,
-                    "% of pairings": show["share"].round(1),
-                }), use_container_width=True, hide_index=True, column_config={
-                    "Baskets together": st.column_config.NumberColumn(
-                        help="Transactions containing both brands.",
-                        format="%d"),
-                    "% of pairings": st.column_config.NumberColumn(
-                        help="Of all transactions where this brand appeared "
-                             "alongside any other brand, how often it was "
-                             "this one.", format="%.1f%%"),
-                })
-                if not WIN_FULL:
-                    st.markdown('<p class="note">Pairings cover the whole '
-                                'loaded period, not your selected window — '
-                                'basket co-occurrence is published without a '
-                                'week.</p>', unsafe_allow_html=True)
-                st.markdown('<p class="note">Partners from other categories '
-                            'are cross-sells — bundle and merchandise them '
-                            'together. Brands from this brand\'s own '
-                            'category that never appear here are likely '
-                            'substitutes: customers choose between you, not '
-                            'in addition to you.</p>', unsafe_allow_html=True)
-
-        # ---- top SKUs within a category ----------------------------------
-        st.markdown("##### Top SKUs")
-        if not HAVE_BPW:
-            st.info("Product-level brand detail is not in the published file "
-                    "yet. It appears after the next refresh.")
-        else:
-            cats = q(f"""
+                cats = q(f"""
                 SELECT category, SUM(net) AS net
                 FROM dash_brand_product_week
                 {scoped(f"brand = '{psql}'")}
                 GROUP BY 1 HAVING SUM(net) > 0
                 ORDER BY net DESC
             """)
-            if cats.empty:
-                st.info(f"No product-level sales for {pick} in this window.")
-            else:
-                cl, cr = st.columns([2, 1])
-                cat_pick = cl.selectbox(
-                    "Category", cats.category.tolist(), key="deep_cat",
-                    help="Categories this brand sold in during the selected "
-                         "window, largest first.")
-                rank_by = cr.selectbox("Rank by", ["Net $", "Units",
-                                                   "Baskets", "Margin %"],
-                                       key="deep_rank")
-                csql = cat_pick.replace("'", "''")
+                if cats.empty:
+                    st.info(f"No product-level sales for {pick} in this window.")
+                else:
+                    cl, cr = st.columns([2, 1])
+                    cat_pick = cl.selectbox(
+                        "Category", cats.category.tolist(), key="deep_cat",
+                        help="Categories this brand sold in during the selected "
+                             "window, largest first.")
+                    rank_by = cr.selectbox("Rank by", ["Net $", "Units",
+                                                       "Baskets", "Margin %"],
+                                           key="deep_rank")
+                    csql = cat_pick.replace("'", "''")
 
-                sk = q(f"""
+                    sk = q(f"""
                     SELECT product, iso_year, iso_week,
                            SUM(net) AS net, SUM(gm) AS gm,
                            SUM(units) AS units, SUM(baskets) AS baskets
@@ -2306,131 +2346,125 @@ with t_brands:
                     {scoped(f"brand = '{psql}'", f"category = '{csql}'")}
                     GROUP BY 1,2,3
                 """)
-                if sk.empty:
-                    st.info("No SKUs for that combination in this window.")
-                else:
-                    for c in ("net", "gm", "units", "baskets"):
-                        sk[c] = pd.to_numeric(sk[c], errors="coerce").fillna(0)
-                    agg = (sk.groupby("product", as_index=False)
-                             .agg(net=("net", "sum"), gm=("gm", "sum"),
-                                  units=("units", "sum"),
-                                  baskets=("baskets", "sum")))
-                    hv = win_halves(sk, "net", by=["product"])
-                    agg = agg.merge(hv, on="product", how="left")
-                    agg["trend"] = pct_change(agg["late"], agg["early"])
-                    agg["margin"] = agg.gm / agg.net.replace(0, float("nan")) * 100
-                    agg["share"] = agg.net / agg.net.sum() * 100
-                    agg["wks"] = (sk[sk.units > 0]
-                                  .groupby("product").size()
-                                  .reindex(agg["product"]).fillna(0).values)
-
-                    sort_col = {"Net $": "net", "Units": "units",
-                                "Baskets": "baskets",
-                                "Margin %": "margin"}[rank_by]
-                    agg = agg.sort_values(sort_col, ascending=False)
-
-                    # A slider needs room to move. Brands with a handful of
-                    # SKUs in a category are common — show them all rather
-                    # than asking for a choice between 5 and 5.
-                    if len(agg) <= 6:
-                        show = agg
+                    if sk.empty:
+                        st.info("No SKUs for that combination in this window.")
                     else:
-                        n_show = st.slider("SKUs to show", 5,
-                                           min(50, len(agg)),
-                                           min(15, len(agg)),
-                                           key="deep_sku_n")
-                        show = agg.head(n_show)
+                        for c in ("net", "gm", "units", "baskets"):
+                            sk[c] = pd.to_numeric(sk[c], errors="coerce").fillna(0)
+                        agg = (sk.groupby("product", as_index=False)
+                                 .agg(net=("net", "sum"), gm=("gm", "sum"),
+                                      units=("units", "sum"),
+                                      baskets=("baskets", "sum")))
+                        hv = win_halves(sk, "net", by=["product"])
+                        agg = agg.merge(hv, on="product", how="left")
+                        agg["trend"] = pct_change(agg["late"], agg["early"])
+                        agg["margin"] = agg.gm / agg.net.replace(0, float("nan")) * 100
+                        agg["share"] = agg.net / agg.net.sum() * 100
+                        agg["wks"] = (sk[sk.units > 0]
+                                      .groupby("product").size()
+                                      .reindex(agg["product"]).fillna(0).values)
 
-                    s1, s2, s3 = st.columns(3)
-                    s1.metric("SKUs sold", f"{len(agg):,}")
-                    s2.metric(f"{cat_pick} net", f"${agg.net.sum():,.0f}")
-                    top3 = agg.nlargest(3, "net").net.sum()
-                    s3.metric("Top 3 SKU concentration",
-                              f"{top3 / agg.net.sum() * 100:.0f}%",
-                              help="Share of this brand's revenue in this "
-                                   "category coming from its three biggest "
-                                   "SKUs. High concentration means the "
-                                   "brand's performance here is really one "
-                                   "or two products — treat those par "
-                                   "levels as critical.")
+                        sort_col = {"Net $": "net", "Units": "units",
+                                    "Baskets": "baskets",
+                                    "Margin %": "margin"}[rank_by]
+                        agg = agg.sort_values(sort_col, ascending=False)
 
-                    st.dataframe(pd.DataFrame({
-                        "SKU": show["product"],
-                        "Net $": show.net.round(0),
-                        "% of category": show["share"].round(1),
-                        "Units": show.units.astype(int),
-                        "Baskets": show.baskets.astype(int),
-                        "Margin %": show.margin.round(1),
-                        "Trend %": pd.to_numeric(show["trend"],
-                                                 errors="coerce").round(1),
-                        "Weeks selling": show.wks.astype(int),
-                    }), use_container_width=True, hide_index=True,
-                        column_config={
-                        "Net $": st.column_config.NumberColumn(format="$%d"),
-                        "% of category": st.column_config.NumberColumn(
-                            help="Share of this brand's net sales within "
-                                 "this category and window.",
-                            format="%.1f%%"),
-                        "Margin %": st.column_config.NumberColumn(
-                            help=tip("gross margin"), format="%.1f%%"),
-                        "Trend %": st.column_config.NumberColumn(
-                            help="Second half of the selected window versus "
-                                 "the first half.", format="%.1f%%"),
-                        "Baskets": st.column_config.NumberColumn(
-                            help="Transactions containing this SKU.",
-                            format="%d"),
-                        "Weeks selling": st.column_config.NumberColumn(
-                            help="Weeks in the window where this SKU moved "
-                                 "at least one unit. A high net on few weeks "
-                                 "is a drop, not a staple.", format="%d"),
-                    })
+                        # A slider needs room to move. Brands with a handful of
+                        # SKUs in a category are common — show them all rather
+                        # than asking for a choice between 5 and 5.
+                        if len(agg) <= 6:
+                            show = agg
+                        else:
+                            n_show = st.slider("SKUs to show", 5,
+                                               min(50, len(agg)),
+                                               min(15, len(agg)),
+                                               key="deep_sku_n")
+                            show = agg.head(n_show)
 
-                    splot = show.sort_values("net")
-                    fig = px.bar(splot, x="net", y="product",
-                                 orientation="h",
-                                 color_discrete_sequence=[cat_color(cat_pick)])
-                    fig.update_layout(height=120 + 26 * len(splot),
-                                      showlegend=False,
-                                      margin=dict(l=0, r=0, t=10, b=0),
-                                      xaxis_title="net $", yaxis_title="",
-                                      plot_bgcolor="rgba(0,0,0,0)")
-                    fig.update_xaxes(gridcolor="rgba(0,0,0,.07)")
-                    st.plotly_chart(fig, use_container_width=True,
-                                    key="deep_sku")
-                    st.markdown(
-                        f'<p class="note">SKUs below '
-                        f'${PRODUCT_FLOOR:,.0f} in lifetime net sales are not '
-                        f'published at product level, so a very long tail of '
-                        f'one-off items will not appear here.</p>',
-                        unsafe_allow_html=True)
+                        s1, s2, s3 = st.columns(3)
+                        s1.metric("SKUs sold", f"{len(agg):,}")
+                        s2.metric(f"{cat_pick} net", f"${agg.net.sum():,.0f}")
+                        top3 = agg.nlargest(3, "net").net.sum()
+                        s3.metric("Top 3 SKU concentration",
+                                  f"{top3 / agg.net.sum() * 100:.0f}%",
+                                  help="Share of this brand's revenue in this "
+                                       "category coming from its three biggest "
+                                       "SKUs. High concentration means the "
+                                       "brand's performance here is really one "
+                                       "or two products — treat those par "
+                                       "levels as critical.")
 
-        # ---- category pull, full width -----------------------------------
-        if not bp.empty:
-            st.markdown("##### What it pulls along")
-            st.markdown('<p class="note">The partner brands above, rolled '
-                        'up by category: when this brand is in the basket, '
-                        'these are the aisles the rest of the basket comes '
-                        'from. Treat par levels as linked — running out '
-                        'here costs sales there.</p>',
-                        unsafe_allow_html=True)
-            bycat = (bp.groupby("partner_cat", as_index=False)
-                       .agg(baskets=("baskets", "sum"))
-                       .sort_values("baskets", ascending=False))
-            fig = px.bar(bycat, x="partner_cat", y="baskets",
-                         color="partner_cat",
-                         color_discrete_map={c: cat_color(c)
-                                             for c in bycat.partner_cat})
-            fig.update_layout(height=320, showlegend=False,
-                              margin=dict(l=0, r=0, t=10, b=0),
-                              xaxis_title="",
-                              yaxis_title="baskets together",
-                              plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_yaxes(gridcolor="rgba(0,0,0,.07)")
-            st.plotly_chart(fig, use_container_width=True, key="deep_pull")
+                        st.dataframe(pd.DataFrame({
+                            "SKU": show["product"],
+                            "Net $": show.net.round(0),
+                            "% of category": show["share"].round(1),
+                            "Units": show.units.astype(int),
+                            "Baskets": show.baskets.astype(int),
+                            "Margin %": show.margin.round(1),
+                            "Trend %": pd.to_numeric(show["trend"],
+                                                     errors="coerce").round(1),
+                            "Weeks selling": show.wks.astype(int),
+                        }), use_container_width=True, hide_index=True,
+                            column_config={
+                            "Net $": st.column_config.NumberColumn(format="$%d"),
+                            "% of category": st.column_config.NumberColumn(
+                                help="Share of this brand's net sales within "
+                                     "this category and window.",
+                                format="%.1f%%"),
+                            "Margin %": st.column_config.NumberColumn(
+                                help=tip("gross margin"), format="%.1f%%"),
+                            "Trend %": st.column_config.NumberColumn(
+                                help="Second half of the selected window versus "
+                                     "the first half.", format="%.1f%%"),
+                            "Baskets": st.column_config.NumberColumn(
+                                help="Transactions containing this SKU.",
+                                format="%d"),
+                            "Weeks selling": st.column_config.NumberColumn(
+                                help="Weeks in the window where this SKU moved "
+                                     "at least one unit. A high net on few weeks "
+                                     "is a drop, not a staple.", format="%d"),
+                        })
+
+                        splot = show.sort_values("net")
+                        fig = px.bar(splot, x="net", y="product",
+                                     orientation="h",
+                                     color_discrete_sequence=[cat_color(cat_pick)])
+                        fig.update_layout(showlegend=False,
+                                          xaxis_title="net $", yaxis_title="")
+                        charts.show(fig, key="deep_sku", kind="hbar", height=120 + 26 * len(splot))
+                        st.markdown(
+                            f'<p class="note">SKUs below '
+                            f'${PRODUCT_FLOOR:,.0f} in lifetime net sales are not '
+                            f'published at product level, so a very long tail of '
+                            f'one-off items will not appear here.</p>',
+                            unsafe_allow_html=True)
+
+            # ---- category pull, full width -----------------------------------
+            if not bp.empty:
+                st.markdown("##### What it pulls along")
+                st.markdown('<p class="note">The partner brands above, rolled '
+                            'up by category: when this brand is in the basket, '
+                            'these are the aisles the rest of the basket comes '
+                            'from. Treat par levels as linked — running out '
+                            'here costs sales there.</p>',
+                            unsafe_allow_html=True)
+                bycat = (bp.groupby("partner_cat", as_index=False)
+                           .agg(baskets=("baskets", "sum"))
+                           .sort_values("baskets", ascending=False))
+                fig = px.bar(bycat, x="partner_cat", y="baskets",
+                             color="partner_cat",
+                             color_discrete_map={c: cat_color(c)
+                                                 for c in bycat.partner_cat})
+                fig.update_layout(showlegend=False,
+                                  xaxis_title="",
+                                  yaxis_title="baskets together")
+                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)")
+                charts.show(fig, key="deep_pull", kind="bar")
+        _frag_brand_deep()
 
 
 # -------------------------------------------------------------- accessories
-with t_acc:
+def section_accessories():
     st.markdown("#### Accessory performance by store")
     st.markdown(
         '<div class="howto"><b>How to read this tab.</b> Pick a week and '
@@ -2614,7 +2648,7 @@ with t_acc:
 
 
 # -------------------------------------------------------------- redemptions
-with t_redeem:
+def section_redemptions():
     st.markdown("#### Loyalty Redemptions")
     st.markdown('<div class="howto"><b>How to read this tab.</b> '
                 'Redemptions are discounts given back to loyalty members. '
@@ -2709,24 +2743,14 @@ with t_redeem:
             # fixedrange on both y-axes: y2 overlays y and plotly rescales
             # them independently, so a zoom or pan detaches the rate line
             # from the bars.
-            fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0),
-                              xaxis=dict(fixedrange=True),
+            fig.update_layout(xaxis=dict(fixedrange=True),
                               yaxis=dict(title="Redemption $", tickformat="$~s",
-                                         gridcolor="rgba(0,0,0,.07)",
                                          fixedrange=True),
                               yaxis2=dict(title="Rate %", overlaying="y", side="right",
                                           showgrid=False, tickformat=".1f",
                                           ticksuffix="%", fixedrange=True),
-                              hovermode="x unified",
-                              legend=dict(orientation="h", y=1.12, x=0,
-                                          title_text=""),
-                              plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True, key="pc8",
-                            config={"scrollZoom": False, "displaylogo": False,
-                                    "modeBarButtonsToRemove": [
-                                        "zoom2d", "pan2d", "select2d",
-                                        "lasso2d", "zoomIn2d", "zoomOut2d",
-                                        "autoScale2d", "resetScale2d"]})
+                              hovermode="x unified")
+            charts.show(fig, key="pc8", kind="line", config=charts.plotly_config_static)
 
         with R:
             st.markdown("##### Redemption by store")
@@ -2741,13 +2765,11 @@ with t_redeem:
                              text="label")
                 fig.update_traces(textposition="outside", textfont_size=11,
                                   cliponaxis=False)
-                fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0),
-                                  yaxis_title="Redemption $", xaxis_title="",
+                fig.update_layout(yaxis_title="Redemption $", xaxis_title="",
                                   coloraxis_colorbar=dict(title="Rate %",
-                                                          ticksuffix="%"),
-                                  plot_bgcolor="rgba(0,0,0,0)")
-                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
-                st.plotly_chart(fig, use_container_width=True, key="pc9")
+                                                          ticksuffix="%"))
+                fig.update_yaxes(tickformat="$~s")
+                charts.show(fig, key="pc9", kind="bar")
                 st.markdown('<p class="note"><b>Bar height</b> = total redemption '
                             'dollars. <b>Color</b> = redemption rate (darker green '
                             '= higher engagement).</p>',
@@ -2814,15 +2836,10 @@ with t_redeem:
                                  color_discrete_sequence=[ACCENT])
                     fig.update_traces(textposition="outside",
                                       textfont_size=11, cliponaxis=False)
-                    fig.update_layout(height=260,
-                                      margin=dict(l=0, r=0, t=10, b=0),
-                                      xaxis_title="Redemption $",
+                    fig.update_layout(xaxis_title="Redemption $",
                                       yaxis_title="",
-                                      xaxis=dict(gridcolor="rgba(0,0,0,.07)",
-                                                 tickformat="$~s"),
-                                      plot_bgcolor="rgba(0,0,0,0)")
-                    st.plotly_chart(fig, use_container_width=True,
-                                    key="pc_channel")
+                                      xaxis=dict(tickformat="$~s"))
+                    charts.show(fig, key="pc_channel", kind="hbar", height=260)
 
         st.divider()
 
@@ -2895,14 +2912,10 @@ with t_redeem:
                       markers=True, color_discrete_sequence=[WARN])
         fig.update_traces(line=dict(width=2.5), marker=dict(size=6),
                           hovertemplate="%{y:.1f}%<extra></extra>")
-        fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
-                          yaxis_title="% of net sales", xaxis_title="",
-                          hovermode="x unified", showlegend=False,
-                          plot_bgcolor="rgba(0,0,0,0)")
-        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", ticksuffix="%",
-                         zeroline=False)
-        fig.update_xaxes(gridcolor="rgba(0,0,0,.04)")
-        st.plotly_chart(fig, use_container_width=True, key="pc10")
+        fig.update_layout(yaxis_title="% of net sales", xaxis_title="",
+                          hovermode="x unified", showlegend=False)
+        fig.update_yaxes(ticksuffix="%")
+        charts.show(fig, key="pc10", kind="line")
 
     # --- Brand redemption section (from original author, when table exists) ---
     st.divider()
@@ -3010,31 +3023,33 @@ with t_redeem:
                 f'not be matched to a brand or promo family.</p>',
                 unsafe_allow_html=True)
 
-        # --- Brand → SKU redemption drill-down -------------------------
-        st.divider()
-        st.markdown("##### Which SKUs were redeemed, by brand")
-        st.markdown(
-            '<div class="howto"><b>How to read this.</b> Pick a brand — or a '
-            'promo family like Secret Drops — to see what was actually rung '
-            'up for its redemptions. The same offer appears under different '
-            'names over time ("Loyalty …", the "Loytaly …" typo, "Travel '
-            'Club …"), so rows group by the product, not the offer name. '
-            'Where a menu item was swapped at the register, the SKU shown is '
-            'the one the customer actually received. A substitution that '
-            'could not be traced to a product is listed as unresolved rather '
-            'than by its offer name, so it is never mistaken for a SKU.'
-            '</div>',
-            unsafe_allow_html=True)
+        @st.fragment
+        def _frag_redeem_sku():
+            # --- Brand → SKU redemption drill-down -------------------------
+            st.divider()
+            st.markdown("##### Which SKUs were redeemed, by brand")
+            st.markdown(
+                '<div class="howto"><b>How to read this.</b> Pick a brand — or a '
+                'promo family like Secret Drops — to see what was actually rung '
+                'up for its redemptions. The same offer appears under different '
+                'names over time ("Loyalty …", the "Loytaly …" typo, "Travel '
+                'Club …"), so rows group by the product, not the offer name. '
+                'Where a menu item was swapped at the register, the SKU shown is '
+                'the one the customer actually received. A substitution that '
+                'could not be traced to a product is listed as unresolved rather '
+                'than by its offer name, so it is never mistaken for a SKU.'
+                '</div>',
+                unsafe_allow_html=True)
 
-        brand_opts = sorted(attributed.brand.dropna().unique())
-        sel_brand = st.selectbox("Select a brand", brand_opts,
-                                 key="redeem_brand_sku")
+            brand_opts = sorted(attributed.brand.dropna().unique())
+            sel_brand = st.selectbox("Select a brand", brand_opts,
+                                     key="redeem_brand_sku")
 
-        # Group by the matched product (strain-level) when the published file
-        # has it; older files only carry offer names. Offer-name variants —
-        # "Loyalty …", the "Loytaly …" typo — roll up into one row per strain.
-        try:
-            sku = q(f"""
+            # Group by the matched product (strain-level) when the published file
+            # has it; older files only carry offer names. Offer-name variants —
+            # "Loyalty …", the "Loytaly …" typo — roll up into one row per strain.
+            try:
+                sku = q(f"""
                 SELECT CASE
                          WHEN product IS NOT NULL THEN product
                          WHEN lower(offer_name) LIKE '%substitution%'
@@ -3055,10 +3070,10 @@ with t_redeem:
                 GROUP BY 1,2
                 ORDER BY spend DESC
             """)
-            if not len(sku):
-                raise ValueError("empty")
-        except Exception:
-            sku = q(f"""
+                if not len(sku):
+                    raise ValueError("empty")
+            except Exception:
+                sku = q(f"""
                 SELECT offer_name AS sku, category,
                        SUM(redemptions) AS redemptions,
                        SUM(redeem_value) AS spend,
@@ -3069,59 +3084,56 @@ with t_redeem:
                 ORDER BY spend DESC
             """)
 
-        if sku.empty:
-            st.info(f"No redeemed offers matched to {sel_brand}.")
-        else:
-            sku["cost_per_redemption"] = sku.spend / sku.redemptions.replace(
-                0, float("nan"))
+            if sku.empty:
+                st.info(f"No redeemed offers matched to {sel_brand}.")
+            else:
+                sku["cost_per_redemption"] = sku.spend / sku.redemptions.replace(
+                    0, float("nan"))
 
-            m = st.columns(3)
-            _real = sku[sku.sku.astype(str) != "Not resolved to a product"]
-            m[0].metric("SKUs redeemed", f"{len(_real):,}")
-            m[1].metric("Redemptions", f"{int(sku.redemptions.sum()):,}")
-            m[2].metric("Redemption $", f"${sku.spend.sum():,.0f}")
+                m = st.columns(3)
+                _real = sku[sku.sku.astype(str) != "Not resolved to a product"]
+                m[0].metric("SKUs redeemed", f"{len(_real):,}")
+                m[1].metric("Redemptions", f"{int(sku.redemptions.sum()):,}")
+                m[2].metric("Redemption $", f"${sku.spend.sum():,.0f}")
 
-            st.dataframe(pd.DataFrame({
-                "SKU / Offer": sku.sku,
-                "Category": sku.category,
-                "Redemptions": sku.redemptions,
-                "Spend $": sku.spend.round(0),
-                "Cost each": sku.cost_per_redemption.round(2),
-                "Avg basket": sku.avg_basket.round(2),
-            }), use_container_width=True, hide_index=True, column_config={
-                "Redemptions": st.column_config.NumberColumn(format="%d"),
-                "Spend $": st.column_config.NumberColumn(format="$%d"),
-                "Cost each": st.column_config.NumberColumn(format="$%.2f"),
-                "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
-            })
+                st.dataframe(pd.DataFrame({
+                    "SKU / Offer": sku.sku,
+                    "Category": sku.category,
+                    "Redemptions": sku.redemptions,
+                    "Spend $": sku.spend.round(0),
+                    "Cost each": sku.cost_per_redemption.round(2),
+                    "Avg basket": sku.avg_basket.round(2),
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Redemptions": st.column_config.NumberColumn(format="%d"),
+                    "Spend $": st.column_config.NumberColumn(format="$%d"),
+                    "Cost each": st.column_config.NumberColumn(format="$%.2f"),
+                    "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
+                })
 
-            top = sku.head(15)
-            fig = px.bar(top, x="spend", y="sku", orientation="h",
-                         color_discrete_sequence=[ACCENT],
-                         labels={"spend": "Redemption $", "sku": ""})
-            fig.update_layout(height=max(280, 36 * len(top)),
-                              margin=dict(l=0, r=0, t=10, b=0),
-                              yaxis=dict(autorange="reversed"),
-                              plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
-            st.plotly_chart(fig, use_container_width=True, key="pc17")
+                top = sku.head(15)
+                fig = px.bar(top, x="spend", y="sku", orientation="h",
+                             color_discrete_sequence=[ACCENT],
+                             labels={"spend": "Redemption $", "sku": ""})
+                fig.update_layout(yaxis=dict(autorange="reversed"))
+                fig.update_xaxes(tickformat="$~s")
+                charts.show(fig, key="pc17", kind="hbar", height=max(280, 36 * len(top)))
 
-        # --- Off-menu picks: what redeemers chose instead -------------------
-        st.divider()
-        st.markdown("##### Chosen instead — off-menu picks")
-        st.markdown(
-            '<div class="howto"><b>How to read this.</b> A substitution is '
-            'rung when the reward a customer wants is not in stock — they '
-            'pick something of similar value and the discount is written '
-            'down to the price of that item. Because the discount equals '
-            'what they took, the item is identifiable from the amount. Rows '
-            'where the customer received the advertised reward are excluded, '
-            'so what remains is the demand your rewards menu is not serving '
-            '— ranked by redemption dollars, a ready-made shortlist of '
-            'candidates. Not every substitution resolves; the unmatched '
-            'count is shown below.</div>',
-            unsafe_allow_html=True)
-        subs_raw = q(f"""
+            # --- Off-menu picks: what redeemers chose instead -------------------
+            st.divider()
+            st.markdown("##### Chosen instead — off-menu picks")
+            st.markdown(
+                '<div class="howto"><b>How to read this.</b> A substitution is '
+                'rung when the reward a customer wants is not in stock — they '
+                'pick something of similar value and the discount is written '
+                'down to the price of that item. Because the discount equals '
+                'what they took, the item is identifiable from the amount. Rows '
+                'where the customer received the advertised reward are excluded, '
+                'so what remains is the demand your rewards menu is not serving '
+                '— ranked by redemption dollars, a ready-made shortlist of '
+                'candidates. Not every substitution resolves; the unmatched '
+                'count is shown below.</div>',
+                unsafe_allow_html=True)
+            subs_raw = q(f"""
             SELECT offer_name, brand, product AS sku, category,
                    SUM(redemptions)  AS redemptions,
                    SUM(redeem_value) AS spend
@@ -3131,100 +3143,95 @@ with t_redeem:
               AND product IS NOT NULL {af}
             GROUP BY 1,2,3,4
         """)
-        if subs_raw.empty:
-            st.info("No substitutions resolved yet. They appear after the "
-                    "next data rebuild, once re-matching has run.")
-        else:
-            on = subs_raw.apply(
-                lambda r: is_on_menu(r.offer_name, r.brand, r.category, r.sku),
-                axis=1)
-            kept, menu_rows = subs_raw[~on], subs_raw[on]
-
-            subs = (kept.groupby(["sku", "category"], as_index=False)
-                        .agg(redemptions=("redemptions", "sum"),
-                             spend=("spend", "sum"),
-                             offers=("offer_name", "nunique"))
-                        .sort_values("spend", ascending=False))
-
-            if subs.empty:
-                st.info("Every resolved substitution was the advertised "
-                        "reward — no off-menu picks in this window.")
+            if subs_raw.empty:
+                st.info("No substitutions resolved yet. They appear after the "
+                        "next data rebuild, once re-matching has run.")
             else:
-                st.dataframe(pd.DataFrame({
-                    "SKU chosen": subs.sku,
-                    "Category": subs.category,
-                    "Times picked": subs.redemptions,
-                    "Redemption $": subs.spend.round(0),
-                    "Via # of tiers": subs.offers,
-                }), use_container_width=True, hide_index=True, column_config={
-                    "Times picked": st.column_config.NumberColumn(format="%d"),
-                    "Redemption $": st.column_config.NumberColumn(format="$%d"),
-                    "Via # of tiers": st.column_config.NumberColumn(
-                        format="%d"),
-                })
+                on = subs_raw.apply(
+                    lambda r: is_on_menu(r.offer_name, r.brand, r.category, r.sku),
+                    axis=1)
+                kept, menu_rows = subs_raw[~on], subs_raw[on]
 
-                st.markdown("###### Where the gap is, by tier")
-                tier = (kept.assign(tier=kept.offer_name)
-                            .groupby(["tier", "category"], as_index=False)
-                            .agg(picks=("redemptions", "sum"),
-                                 spend=("spend", "sum"))
-                            .sort_values(["tier", "spend"], ascending=False))
-                st.dataframe(pd.DataFrame({
-                    "Tier": tier.tier,
-                    "Category taken": tier.category,
-                    "Times picked": tier.picks,
-                    "Redemption $": tier.spend.round(0),
-                }), use_container_width=True, hide_index=True, column_config={
-                    "Times picked": st.column_config.NumberColumn(format="%d"),
-                    "Redemption $": st.column_config.NumberColumn(format="$%d"),
-                })
+                subs = (kept.groupby(["sku", "category"], as_index=False)
+                            .agg(redemptions=("redemptions", "sum"),
+                                 spend=("spend", "sum"),
+                                 offers=("offer_name", "nunique"))
+                            .sort_values("spend", ascending=False))
 
-            if len(menu_rows):
-                st.markdown(
-                    f'<p class="note">'
-                    f'{int(menu_rows.redemptions.sum()):,} substitutions were '
-                    f'the advertised reward for their tier and are excluded '
-                    f'above — the discount is also used as the ordinary way '
-                    f'to ring a reward, so substitution volume is an upper '
-                    f'bound on stockouts, not a measure of them.</p>',
-                    unsafe_allow_html=True)
+                if subs.empty:
+                    st.info("Every resolved substitution was the advertised "
+                            "reward — no off-menu picks in this window.")
+                else:
+                    st.dataframe(pd.DataFrame({
+                        "SKU chosen": subs.sku,
+                        "Category": subs.category,
+                        "Times picked": subs.redemptions,
+                        "Redemption $": subs.spend.round(0),
+                        "Via # of tiers": subs.offers,
+                    }), use_container_width=True, hide_index=True, column_config={
+                        "Times picked": st.column_config.NumberColumn(format="%d"),
+                        "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                        "Via # of tiers": st.column_config.NumberColumn(
+                            format="%d"),
+                    })
 
-            unres = q(f"""
+                    st.markdown("###### Where the gap is, by tier")
+                    tier = (kept.assign(tier=kept.offer_name)
+                                .groupby(["tier", "category"], as_index=False)
+                                .agg(picks=("redemptions", "sum"),
+                                     spend=("spend", "sum"))
+                                .sort_values(["tier", "spend"], ascending=False))
+                    st.dataframe(pd.DataFrame({
+                        "Tier": tier.tier,
+                        "Category taken": tier.category,
+                        "Times picked": tier.picks,
+                        "Redemption $": tier.spend.round(0),
+                    }), use_container_width=True, hide_index=True, column_config={
+                        "Times picked": st.column_config.NumberColumn(format="%d"),
+                        "Redemption $": st.column_config.NumberColumn(format="$%d"),
+                    })
+
+                if len(menu_rows):
+                    st.markdown(
+                        f'<p class="note">'
+                        f'{int(menu_rows.redemptions.sum()):,} substitutions were '
+                        f'the advertised reward for their tier and are excluded '
+                        f'above — the discount is also used as the ordinary way '
+                        f'to ring a reward, so substitution volume is an upper '
+                        f'bound on stockouts, not a measure of them.</p>',
+                        unsafe_allow_html=True)
+
+                unres = q(f"""
                 SELECT SUM(redemptions) AS n
                 FROM dash_offer_performance
                 WHERE match_method = 'unmatched'
                   AND lower(offer_name) LIKE '%substitution%' {af}
             """)
-            if len(unres) and pd.notna(unres.n.iloc[0]) and unres.n.iloc[0]:
-                st.markdown(
-                    f'<p class="note">{int(unres.n.iloc[0]):,} substitutions '
-                    f'could not be resolved to a product — usually a '
-                    f'redemption worth more than anything in the basket, or a '
-                    f'reward split across items.</p>',
-                    unsafe_allow_html=True)
+                if len(unres) and pd.notna(unres.n.iloc[0]) and unres.n.iloc[0]:
+                    st.markdown(
+                        f'<p class="note">{int(unres.n.iloc[0]):,} substitutions '
+                        f'could not be resolved to a product — usually a '
+                        f'redemption worth more than anything in the basket, or a '
+                        f'reward split across items.</p>',
+                        unsafe_allow_html=True)
 
-        st.divider()
-        st.markdown("##### Spend against basket size")
-        st.markdown('<p class="note">Each point is a brand or promo family. '
-                    'Right means redeemed often; up means customers spend '
-                    'big when they redeem. The upper right is where the '
-                    'programme is earning its keep.</p>',
-                    unsafe_allow_html=True)
-        fig = px.scatter(a, x="redemptions", y="avg_basket", size="spend",
-                         color="category", hover_name="brand", size_max=38,
-                         color_discrete_map={c: cat_color(c)
-                                             for c in a.category.unique()})
-        fig.update_layout(height=420, margin=dict(l=0, r=0, t=10, b=0),
-                          xaxis_title="Redemptions",
-                          yaxis_title="Average basket $",
-                          legend=dict(orientation="h", y=1.1, x=0,
-                                      title_text=""),
-                          plot_bgcolor="rgba(0,0,0,0)")
-        fig.update_xaxes(gridcolor="rgba(0,0,0,.07)")
-        fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$,.0f")
-        st.plotly_chart(fig, use_container_width=True, key="pc11")
+            st.divider()
+            st.markdown("##### Spend against basket size")
+            st.markdown('<p class="note">Each point is a brand or promo family. '
+                        'Right means redeemed often; up means customers spend '
+                        'big when they redeem. The upper right is where the '
+                        'programme is earning its keep.</p>',
+                        unsafe_allow_html=True)
+            fig = px.scatter(a, x="redemptions", y="avg_basket", size="spend",
+                             color="category", hover_name="brand", size_max=38,
+                             color_discrete_map={c: cat_color(c)
+                                                 for c in a.category.unique()})
+            fig.update_layout(xaxis_title="Redemptions",
+                              yaxis_title="Average basket $")
+            fig.update_yaxes(tickformat="$,.0f")
+            charts.show(fig, key="pc11", kind="scatter")
 
-        off = q(f"""
+            off = q(f"""
             SELECT offer_name, brand, category,
                    SUM(redemptions) AS redemptions,
                    SUM(redeem_value) AS spend,
@@ -3232,33 +3239,34 @@ with t_redeem:
             FROM dash_offer_performance {wf}
             GROUP BY 1,2,3 ORDER BY spend DESC
         """)
-        if not off.empty:
-            st.divider()
-            st.markdown("##### Individual offers")
-            off["cost_per_redemption"] = off.spend / off.redemptions.replace(
-                0, float("nan"))
-            st.dataframe(pd.DataFrame({
-                "Offer": off.offer_name,
-                "Brand": off.brand,
-                "Redemptions": off.redemptions,
-                "Spend $": off.spend.round(0),
-                "Cost each": off.cost_per_redemption.round(2),
-                "Avg basket": off.avg_basket.round(2),
-            }), use_container_width=True, hide_index=True, column_config={
-                "Spend $": st.column_config.NumberColumn(format="$%d"),
-                "Cost each": st.column_config.NumberColumn(format="$%.2f"),
-                "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
-            })
+            if not off.empty:
+                st.divider()
+                st.markdown("##### Individual offers")
+                off["cost_per_redemption"] = off.spend / off.redemptions.replace(
+                    0, float("nan"))
+                st.dataframe(pd.DataFrame({
+                    "Offer": off.offer_name,
+                    "Brand": off.brand,
+                    "Redemptions": off.redemptions,
+                    "Spend $": off.spend.round(0),
+                    "Cost each": off.cost_per_redemption.round(2),
+                    "Avg basket": off.avg_basket.round(2),
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Spend $": st.column_config.NumberColumn(format="$%d"),
+                    "Cost each": st.column_config.NumberColumn(format="$%.2f"),
+                    "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
+                })
 
-        st.markdown('<p class="note">These figures describe what redemptions '
-                    'cost and who used them. They do not show whether the '
-                    'offer caused the visit — redeemers are your most engaged '
-                    'customers by construction.</p>', unsafe_allow_html=True)
+            st.markdown('<p class="note">These figures describe what redemptions '
+                        'cost and who used them. They do not show whether the '
+                        'offer caused the visit — redeemers are your most engaged '
+                        'customers by construction.</p>', unsafe_allow_html=True)
+        _frag_redeem_sku()
 
 
 
 # -------------------------------------------------------------- projections
-with t_projections:
+def section_projections():
     st.markdown("#### Next Quarter Projection")
     st.markdown(f'<p class="note">Simple linear projections fitted to the '
                 f'<b>{len(WIN)} week{"s" if len(WIN) != 1 else ""}</b> you '
@@ -3321,14 +3329,9 @@ with t_projections:
                         name="Projected", mode="lines+markers",
                         line=dict(color=WARN, width=2, dash="dash"),
                         marker=dict(size=5))
-        fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0),
-                          yaxis=dict(title="Net $", tickformat="$~s",
-                                     gridcolor="rgba(0,0,0,.07)"),
-                          xaxis_title="", hovermode="x unified",
-                          legend=dict(orientation="h", y=1.12, x=0,
-                                      title_text=""),
-                          plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True, key="pc15")
+        fig.update_layout(yaxis=dict(title="Net $", tickformat="$~s"),
+                          xaxis_title="", hovermode="x unified")
+        charts.show(fig, key="pc15", kind="line")
         st.divider()
         heading("Category projections")
         proj_cat = q(f"""
@@ -3384,20 +3387,15 @@ with t_projections:
                 fig.add_bar(x=cat_proj.category, y=cat_proj.projected_quarter,
                             name="Projected 13 wks", marker_color=WARN,
                             opacity=.7)
-                fig.update_layout(height=360, margin=dict(l=0, r=0, t=10, b=0),
-                                  yaxis=dict(title="Net $", tickformat="$~s",
-                                             gridcolor="rgba(0,0,0,.07)"),
+                fig.update_layout(yaxis=dict(title="Net $", tickformat="$~s"),
                                   xaxis_title="", barmode="group",
-                                  hovermode="x unified",
-                                  legend=dict(orientation="h", y=1.12, x=0,
-                                              title_text=""),
-                                  plot_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig, use_container_width=True, key="pc16")
+                                  hovermode="x unified")
+                charts.show(fig, key="pc16", kind="bar")
             else:
                 st.info("Not enough category history to project.")
 
 # ----------------------------------------------------------------- glossary
-with t_gloss:
+def section_terms():
     st.markdown("#### What the terms mean")
     st.markdown('<p class="note">Everything on this dashboard, in plain '
                 'language. Terms with a dotted underline elsewhere show a '
@@ -3919,161 +3917,162 @@ def render_takeovers():
     st.download_button("Download scorecard (CSV)", score.to_csv(index=False),
                        "takeover_scorecard.csv", "text/csv", key="tk_dl")
 
-    # ---- detail view -------------------------------------------------------
-    st.divider()
-    pick = st.selectbox("Takeover to inspect",
-                        [t["name"] for t in TAKEOVERS], key="tk_pick")
-    tk = next(t for t in TAKEOVERS if t["name"] == pick)
-    s = details[pick]
+    @st.fragment
+    def _frag_takeover_detail():
+        # ---- detail view -------------------------------------------------------
+        st.divider()
+        pick = st.selectbox("Takeover to inspect",
+                            [t["name"] for t in TAKEOVERS], key="tk_pick")
+        tk = next(t for t in TAKEOVERS if t["name"] == pick)
+        s = details[pick]
 
-    st.caption(f"**{pick}** · {tk['start']} → {tk['end']} · {tk['notes']}")
-    if s.get("matched"):
-        st.caption("Matched brand names in the data: "
-                   + ", ".join(s["matched"]))
+        st.caption(f"**{pick}** · {tk['start']} → {tk['end']} · {tk['notes']}")
+        if s.get("matched"):
+            st.caption("Matched brand names in the data: "
+                       + ", ".join(s["matched"]))
 
-    if not s or s.get("status") == "upcoming":
-        st.info("This takeover has not started yet in the loaded data.")
-        return
-    du, pr, pe = s["during"], s["prior"], s["period"]
-    if du["net"] <= 0:
-        st.warning("No sales for this brand inside the takeover window. "
-                   "Check the matched brand names above against the menu.")
-        return
+        if not s or s.get("status") == "upcoming":
+            st.info("This takeover has not started yet in the loaded data.")
+            return
+        du, pr, pe = s["during"], s["prior"], s["period"]
+        if du["net"] <= 0:
+            st.warning("No sales for this brand inside the takeover window. "
+                       "Check the matched brand names above against the menu.")
+            return
 
-    if s["status"] == "active":
-        st.markdown(
-            f'<div class="alert a-warn">This takeover is <b>still running</b> '
-            f'— day <b>{du["days"]} of {s["planned_days"]}</b>. Figures are '
-            f'per day, so they are comparable, but the story is not '
-            f'finished.</div>', unsafe_allow_html=True)
+        if s["status"] == "active":
+            st.markdown(
+                f'<div class="alert a-warn">This takeover is <b>still running</b> '
+                f'— day <b>{du["days"]} of {s["planned_days"]}</b>. Figures are '
+                f'per day, so they are comparable, but the story is not '
+                f'finished.</div>', unsafe_allow_html=True)
 
-    m = st.columns(4)
-    m[0].metric("Net sales / day", f"${du['net_pd']:,.0f}",
-                delta=(f"{_lift(du['net_pd'], pr['net_pd']):+.0f}% vs prior 4 wks"
-                       if pr and pr["net_pd"] > 0 else None))
-    m[1].metric("Share of store", f"{du['share']:.1f}%",
-                delta=(f"{du['share'] - pr['share']:+.1f} pts vs prior"
-                       if pr and pd.notna(pr["share"]) else None))
-    if pd.notna(du["baskets_pd"]):
-        m[2].metric("Baskets w/ brand / day", f"{du['baskets_pd']:,.1f}",
-                    delta=(f"{_lift(du['baskets_pd'], pr['baskets_pd']):+.0f}%"
-                           if pr and pr["baskets_pd"] > 0 else None))
-    if pd.notna(du["units_pd"]):
-        m[3].metric("Units / day", f"{du['units_pd']:,.1f}",
-                    delta=(f"{_lift(du['units_pd'], pr['units_pd']):+.0f}%"
-                           if pr and pr["units_pd"] > 0 else None))
+        m = st.columns(4)
+        m[0].metric("Net sales / day", f"${du['net_pd']:,.0f}",
+                    delta=(f"{_lift(du['net_pd'], pr['net_pd']):+.0f}% vs prior 4 wks"
+                           if pr and pr["net_pd"] > 0 else None))
+        m[1].metric("Share of store", f"{du['share']:.1f}%",
+                    delta=(f"{du['share'] - pr['share']:+.1f} pts vs prior"
+                           if pr and pd.notna(pr["share"]) else None))
+        if pd.notna(du["baskets_pd"]):
+            m[2].metric("Baskets w/ brand / day", f"{du['baskets_pd']:,.1f}",
+                        delta=(f"{_lift(du['baskets_pd'], pr['baskets_pd']):+.0f}%"
+                               if pr and pr["baskets_pd"] > 0 else None))
+        if pd.notna(du["units_pd"]):
+            m[3].metric("Units / day", f"{du['units_pd']:,.1f}",
+                        delta=(f"{_lift(du['units_pd'], pr['units_pd']):+.0f}%"
+                               if pr and pr["units_pd"] > 0 else None))
 
-    # --- the two baselines, side by side ------------------------------------
-    st.markdown("##### During the takeover vs both baselines")
-    base_rows = []
-    for label, r in (("During takeover", du),
-                     ("Prior 4 weeks", pr),
-                     ("Rest of period (avg day)", pe)):
-        if not r:
-            continue
-        base_rows.append({
-            "Period": label, "Days": r["days"],
-            "Net/day": r["net_pd"], "Units/day": r["units_pd"],
-            "Baskets/day": r["baskets_pd"], "Share of store %": r["share"],
-            "Margin %": r["gm_pct"]})
-    st.dataframe(
-        pd.DataFrame(base_rows).style.format({
-            "Net/day": "${:,.0f}", "Units/day": "{:,.1f}",
-            "Baskets/day": "{:,.1f}", "Share of store %": "{:.1f}%",
-            "Margin %": "{:.0f}%"}),
-        use_container_width=True, hide_index=True)
-
-    # --- per-store breakdown -------------------------------------------------
-    st.markdown("##### Store by store")
-    st.markdown('<p class="note">Where the takeover landed. A brand that only '
-                'moved in one store tells you where its audience actually '
-                'shops — useful when negotiating the next takeover.</p>',
-                unsafe_allow_html=True)
-    st_rows = []
-    for k in keys:
-        ds = takeover_stats(daily, tk, [k])
-        if not ds or not ds.get("during") or ds["during"]["net"] <= 0:
-            continue
-        d_s, p_s = ds["during"], ds["prior"]
-        st_rows.append({
-            "Store": STORES.get(k, str(k)),
-            "Net/day": d_s["net_pd"],
-            "vs prior 4 wks %": _lift(d_s["net_pd"],
-                                      p_s["net_pd"] if p_s else np.nan),
-            "Share during %": d_s["share"],
-            "Share prior %": p_s["share"] if p_s else np.nan,
-            "Baskets/day": d_s["baskets_pd"]})
-    if st_rows:
+        # --- the two baselines, side by side ------------------------------------
+        st.markdown("##### During the takeover vs both baselines")
+        base_rows = []
+        for label, r in (("During takeover", du),
+                         ("Prior 4 weeks", pr),
+                         ("Rest of period (avg day)", pe)):
+            if not r:
+                continue
+            base_rows.append({
+                "Period": label, "Days": r["days"],
+                "Net/day": r["net_pd"], "Units/day": r["units_pd"],
+                "Baskets/day": r["baskets_pd"], "Share of store %": r["share"],
+                "Margin %": r["gm_pct"]})
         st.dataframe(
-            pd.DataFrame(st_rows).style.format({
-                "Net/day": "${:,.0f}", "vs prior 4 wks %": "{:+.0f}%",
-                "Share during %": "{:.1f}%", "Share prior %": "{:.1f}%",
-                "Baskets/day": "{:,.1f}"}),
+            pd.DataFrame(base_rows).style.format({
+                "Net/day": "${:,.0f}", "Units/day": "{:,.1f}",
+                "Baskets/day": "{:,.1f}", "Share of store %": "{:.1f}%",
+                "Margin %": "{:.0f}%"}),
             use_container_width=True, hide_index=True)
-    else:
-        st.info("No per-store data for this takeover and store selection.")
 
-    # --- daily chart with the window shaded ----------------------------------
-    st.markdown("##### Daily sales, takeover window shaded")
-    pat = "|".join(re.escape(p) for p in tk["patterns"])
-    b_all = daily[daily.store_key.isin(keys)
-                  & daily.brand.fillna("").str.lower().str.contains(pat,
-                                                                    na=False)]
-    ts = (b_all.groupby("day").net.sum().reset_index().sort_values("day"))
-    fig = px.bar(ts, x="day", y="net",
-                 color_discrete_sequence=[ACCENT_SOFT],
-                 labels={"day": "", "net": "Net sales $ / day"})
-    fig.add_vrect(x0=s["start"], x1=s["eff_end"], fillcolor=ACCENT,
-                  opacity=0.15, line_width=0,
-                  annotation_text="takeover", annotation_position="top left")
-    if pr and pr["net_pd"] > 0:
-        fig.add_hline(y=pr["net_pd"], line_dash="dot", line_color="#888",
-                      annotation_text="prior 4 wks / day",
-                      annotation_position="bottom right")
-    if pe["net_pd"] > 0:
-        fig.add_hline(y=pe["net_pd"], line_dash="dash", line_color=ACCENT,
-                      annotation_text="rest of period / day",
-                      annotation_position="top right")
-    fig.update_layout(height=340, margin=dict(l=0, r=0, t=20, b=0),
-                      plot_bgcolor="rgba(0,0,0,0)", showlegend=False)
-    fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
-    st.plotly_chart(fig, use_container_width=True, key="tk_chart")
+        # --- per-store breakdown -------------------------------------------------
+        st.markdown("##### Store by store")
+        st.markdown('<p class="note">Where the takeover landed. A brand that only '
+                    'moved in one store tells you where its audience actually '
+                    'shops — useful when negotiating the next takeover.</p>',
+                    unsafe_allow_html=True)
+        st_rows = []
+        for k in keys:
+            ds = takeover_stats(daily, tk, [k])
+            if not ds or not ds.get("during") or ds["during"]["net"] <= 0:
+                continue
+            d_s, p_s = ds["during"], ds["prior"]
+            st_rows.append({
+                "Store": STORES.get(k, str(k)),
+                "Net/day": d_s["net_pd"],
+                "vs prior 4 wks %": _lift(d_s["net_pd"],
+                                          p_s["net_pd"] if p_s else np.nan),
+                "Share during %": d_s["share"],
+                "Share prior %": p_s["share"] if p_s else np.nan,
+                "Baskets/day": d_s["baskets_pd"]})
+        if st_rows:
+            st.dataframe(
+                pd.DataFrame(st_rows).style.format({
+                    "Net/day": "${:,.0f}", "vs prior 4 wks %": "{:+.0f}%",
+                    "Share during %": "{:.1f}%", "Share prior %": "{:.1f}%",
+                    "Baskets/day": "{:,.1f}"}),
+                use_container_width=True, hide_index=True)
+        else:
+            st.info("No per-store data for this takeover and store selection.")
 
-    # --- top products during the window (local detail only) ------------------
-    fl = _fact_line()
-    if not fl.empty and "product" in fl.columns:
-        fl["day"] = pd.to_datetime(fl["txn_ts"], errors="coerce").dt.normalize()
-        win = fl[(fl.day >= s["start"]) & (fl.day <= s["eff_end"])
-                 & fl.store_key.isin(keys)
-                 & fl.brand.fillna("").str.lower().str.contains(pat, na=False)]
-        if not win.empty:
-            top = (win.groupby("product")
-                      .agg(net=("net_sales", "sum"),
-                           baskets=("basket_id", "nunique"))
-                      .reset_index()
-                      .sort_values("net", ascending=False).head(12))
-            st.markdown("##### What sold during the takeover")
-            st.dataframe(pd.DataFrame({
-                "Product": top["product"],
-                "Net $": top.net.round(0),
-                "Baskets": top.baskets,
-            }), use_container_width=True, hide_index=True, column_config={
-                "Net $": st.column_config.NumberColumn(format="$%d"),
-                "Baskets": st.column_config.NumberColumn(format="%d"),
-            })
+        # --- daily chart with the window shaded ----------------------------------
+        st.markdown("##### Daily sales, takeover window shaded")
+        pat = "|".join(re.escape(p) for p in tk["patterns"])
+        b_all = daily[daily.store_key.isin(keys)
+                      & daily.brand.fillna("").str.lower().str.contains(pat,
+                                                                        na=False)]
+        ts = (b_all.groupby("day").net.sum().reset_index().sort_values("day"))
+        fig = px.bar(ts, x="day", y="net",
+                     color_discrete_sequence=[ACCENT_SOFT],
+                     labels={"day": "", "net": "Net sales $ / day"})
+        fig.add_vrect(x0=s["start"], x1=s["eff_end"], fillcolor=ACCENT,
+                      opacity=0.15, line_width=0,
+                      annotation_text="takeover", annotation_position="top left")
+        if pr and pr["net_pd"] > 0:
+            fig.add_hline(y=pr["net_pd"], line_dash="dot", line_color="#888",
+                          annotation_text="prior 4 wks / day",
+                          annotation_position="bottom right")
+        if pe["net_pd"] > 0:
+            fig.add_hline(y=pe["net_pd"], line_dash="dash", line_color=ACCENT,
+                          annotation_text="rest of period / day",
+                          annotation_position="top right")
+        fig.update_layout(showlegend=False)
+        fig.update_yaxes(tickformat="$~s")
+        charts.show(fig, key="tk_chart", kind="bar", margin=dict(l=0, r=0, t=20, b=0))
 
-    # --- GWP / redemptions for the brand -------------------------------------
-    like = "(" + " OR ".join(
-        "LOWER(brand) LIKE '%" + p.replace("'", "''") + "%'"
-        for p in tk["patterns"]) + ")"
-    inwin = pd.DataFrame()
-    has_inwin = False
-    # Window-scoped only. dash_offer_performance carries no dates, so the
-    # whole-period view it powered has moved to the Discounting tab, where a
-    # 58-week baseline is the expected frame. A takeover page shows only
-    # numbers scoped to the takeover.
-    if table_exists("dash_redemption_day"):
-        inwin = q(f"""
+        # --- top products during the window (local detail only) ------------------
+        fl = _fact_line()
+        if not fl.empty and "product" in fl.columns:
+            fl["day"] = pd.to_datetime(fl["txn_ts"], errors="coerce").dt.normalize()
+            win = fl[(fl.day >= s["start"]) & (fl.day <= s["eff_end"])
+                     & fl.store_key.isin(keys)
+                     & fl.brand.fillna("").str.lower().str.contains(pat, na=False)]
+            if not win.empty:
+                top = (win.groupby("product")
+                          .agg(net=("net_sales", "sum"),
+                               baskets=("basket_id", "nunique"))
+                          .reset_index()
+                          .sort_values("net", ascending=False).head(12))
+                st.markdown("##### What sold during the takeover")
+                st.dataframe(pd.DataFrame({
+                    "Product": top["product"],
+                    "Net $": top.net.round(0),
+                    "Baskets": top.baskets,
+                }), use_container_width=True, hide_index=True, column_config={
+                    "Net $": st.column_config.NumberColumn(format="$%d"),
+                    "Baskets": st.column_config.NumberColumn(format="%d"),
+                })
+
+        # --- GWP / redemptions for the brand -------------------------------------
+        like = "(" + " OR ".join(
+            "LOWER(brand) LIKE '%" + p.replace("'", "''") + "%'"
+            for p in tk["patterns"]) + ")"
+        inwin = pd.DataFrame()
+        has_inwin = False
+        # Window-scoped only. dash_offer_performance carries no dates, so the
+        # whole-period view it powered has moved to the Discounting tab, where a
+        # 58-week baseline is the expected frame. A takeover page shows only
+        # numbers scoped to the takeover.
+        if table_exists("dash_redemption_day"):
+            inwin = q(f"""
             SELECT SUM(redemptions) AS redemptions,
                    SUM(redeem_value) AS spend
             FROM dash_redemption_day
@@ -4081,35 +4080,35 @@ def render_takeovers():
               AND day BETWEEN '{tk["start"]}'
                           AND '{s["eff_end"]:%Y-%m-%d}'
         """)
-        has_inwin = (not inwin.empty
-                     and pd.notna(inwin.redemptions.iloc[0])
-                     and inwin.redemptions.iloc[0] > 0)
-        if has_inwin:
-            st.divider()
-            st.markdown("##### Discount-attached sales in the window")
-            st.markdown('<p class="note">Sales lines for this brand that had '
-                        'a discount or promotion applied <b>during the '
-                        'takeover window</b>. These are paid baskets — worth '
-                        'checking against the sell-through above, since '
-                        'discounting can flatter a takeover. Free GWP units '
-                        'are counted separately below. Whole-period offer '
-                        'analysis lives on the Discounting tab.</p>',
-                        unsafe_allow_html=True)
-            g = st.columns(3)
-            g[0].metric("Discounted units",
-                        f"{int(inwin.redemptions.iloc[0]):,}")
-            g[1].metric("Net sales", f"${inwin.spend.iloc[0]:,.0f}")
-            g[2].metric("Avg unit price",
-                        f"${inwin.spend.iloc[0] / max(inwin.redemptions.iloc[0], 1):,.2f}")
+            has_inwin = (not inwin.empty
+                         and pd.notna(inwin.redemptions.iloc[0])
+                         and inwin.redemptions.iloc[0] > 0)
+            if has_inwin:
+                st.divider()
+                st.markdown("##### Discount-attached sales in the window")
+                st.markdown('<p class="note">Sales lines for this brand that had '
+                            'a discount or promotion applied <b>during the '
+                            'takeover window</b>. These are paid baskets — worth '
+                            'checking against the sell-through above, since '
+                            'discounting can flatter a takeover. Free GWP units '
+                            'are counted separately below. Whole-period offer '
+                            'analysis lives on the Discounting tab.</p>',
+                            unsafe_allow_html=True)
+                g = st.columns(3)
+                g[0].metric("Discounted units",
+                            f"{int(inwin.redemptions.iloc[0]):,}")
+                g[1].metric("Net sales", f"${inwin.spend.iloc[0]:,.0f}")
+                g[2].metric("Avg unit price",
+                            f"${inwin.spend.iloc[0] / max(inwin.redemptions.iloc[0], 1):,.2f}")
 
-    # --- GWP reconciliation: received vs processed ---------------------------
-    if table_exists("dash_gwp_receipt"):
-        # Promo stock usually lands a few days BEFORE the takeover opens.
-        # Count receipts from 14 days ahead of launch, or a brand whose
-        # delivery arrived early shows units out the door against zero
-        # received.
-        rec_from = (pd.Timestamp(tk["start"]) - pd.Timedelta(days=14)).date()
-        rec = q(f"""
+        # --- GWP reconciliation: received vs processed ---------------------------
+        if table_exists("dash_gwp_receipt"):
+            # Promo stock usually lands a few days BEFORE the takeover opens.
+            # Count receipts from 14 days ahead of launch, or a brand whose
+            # delivery arrived early shows units out the door against zero
+            # received.
+            rec_from = (pd.Timestamp(tk["start"]) - pd.Timedelta(days=14)).date()
+            rec = q(f"""
             SELECT product, product_sku,
                    SUM(units_received) AS received
             FROM dash_gwp_receipt
@@ -4117,29 +4116,29 @@ def render_takeovers():
               AND day BETWEEN '{rec_from}' AND '{s["eff_end"]:%Y-%m-%d}'
             GROUP BY 1,2 ORDER BY received DESC
         """)
-        if not rec.empty and rec.received.sum() > 0:
-            st.divider()
-            st.markdown("##### GWP reconciliation — in the door vs out of it")
-            st.markdown(
-                '<div class="howto"><b>How to read this.</b> The big tile is '
-                '<b>GWP so far</b>: every gift unit that left the shop during '
-                'the promotion, and it moves with each refresh. <b>Received</b> '
-                'is the GWP stock that arrived for the window, from the '
-                'inventory receipt reports — deliveries often land a few days '
-                'before launch, so the two weeks ahead of the window count '
-                'too. <b>On the GWP SKU</b> is units '
-                'rung properly on the promo\'s own "(GWP)" item. '
-                '<b>Mis-rung</b> is the discrepancy you asked about: sale '
-                'lines where staff keyed the <b>SKU number</b> instead of '
-                'the product — spotted because the line\'s "product" is a '
-                'bare number, and identified by matching that number back '
-                'to the receipt SKU. <b>Still out there</b> is stock on the '
-                'shelf — or units to chase down.</div>',
-                unsafe_allow_html=True)
+            if not rec.empty and rec.received.sum() > 0:
+                st.divider()
+                st.markdown("##### GWP reconciliation — in the door vs out of it")
+                st.markdown(
+                    '<div class="howto"><b>How to read this.</b> The big tile is '
+                    '<b>GWP so far</b>: every gift unit that left the shop during '
+                    'the promotion, and it moves with each refresh. <b>Received</b> '
+                    'is the GWP stock that arrived for the window, from the '
+                    'inventory receipt reports — deliveries often land a few days '
+                    'before launch, so the two weeks ahead of the window count '
+                    'too. <b>On the GWP SKU</b> is units '
+                    'rung properly on the promo\'s own "(GWP)" item. '
+                    '<b>Mis-rung</b> is the discrepancy you asked about: sale '
+                    'lines where staff keyed the <b>SKU number</b> instead of '
+                    'the product — spotted because the line\'s "product" is a '
+                    'bare number, and identified by matching that number back '
+                    'to the receipt SKU. <b>Still out there</b> is stock on the '
+                    'shelf — or units to chase down.</div>',
+                    unsafe_allow_html=True)
 
-            skus = ",".join("'" + str(x).replace("'", "''") + "'"
-                            for x in rec.product_sku.unique())
-            sus = q(f"""
+                skus = ",".join("'" + str(x).replace("'", "''") + "'"
+                                for x in rec.product_sku.unique())
+                sus = q(f"""
                 SELECT product AS sku, SUM(units) AS misrung,
                        COUNT(*) AS lines, SUM(net) AS net
                 FROM dash_suspect_lines
@@ -4148,29 +4147,29 @@ def render_takeovers():
                 GROUP BY 1
             """) if table_exists("dash_suspect_lines") else pd.DataFrame()
 
-            merged = rec.merge(
-                sus.rename(columns={"sku": "product_sku"}),
-                on="product_sku", how="left")
-            for c in ("misrung", "lines", "net"):
-                if c not in merged:
-                    merged[c] = 0
-            merged[["misrung", "lines", "net"]] = \
-                merged[["misrung", "lines", "net"]].fillna(0)
+                merged = rec.merge(
+                    sus.rename(columns={"sku": "product_sku"}),
+                    on="product_sku", how="left")
+                for c in ("misrung", "lines", "net"):
+                    if c not in merged:
+                        merged[c] = 0
+                merged[["misrung", "lines", "net"]] = \
+                    merged[["misrung", "lines", "net"]].fillna(0)
 
-            # Offer-attached sales lines for the brand in the window. This is
-            # NOT a GWP unit count — it counts paid lines that carried any
-            # promotion — so it is shown as context only and never used as
-            # the out-the-door basis below.
-            offer_lines = (float(inwin.redemptions.iloc[0])
-                           if has_inwin else np.nan)
+                # Offer-attached sales lines for the brand in the window. This is
+                # NOT a GWP unit count — it counts paid lines that carried any
+                # promotion — so it is shown as context only and never used as
+                # the out-the-door basis below.
+                offer_lines = (float(inwin.redemptions.iloc[0])
+                               if has_inwin else np.nan)
 
-            # Properly-rung GWP: units sold on the promo's own "(GWP)" SKU,
-            # published per product per day as dash_gwp_day. Preferred over
-            # the brand-level loyalty count because it is per SKU and moves
-            # daily while the promotion runs.
-            rung = pd.DataFrame()
-            if table_exists("dash_gwp_day"):
-                rung = q(f"""
+                # Properly-rung GWP: units sold on the promo's own "(GWP)" SKU,
+                # published per product per day as dash_gwp_day. Preferred over
+                # the brand-level loyalty count because it is per SKU and moves
+                # daily while the promotion runs.
+                rung = pd.DataFrame()
+                if table_exists("dash_gwp_day"):
+                    rung = q(f"""
                     SELECT product, SUM(units) AS rung
                     FROM dash_gwp_day
                     WHERE {like} {af}
@@ -4178,65 +4177,65 @@ def render_takeovers():
                                   AND '{s["eff_end"]:%Y-%m-%d}'
                     GROUP BY 1
                 """)
-            has_rung = not rung.empty
-            if has_rung:
-                merged = merged.merge(rung, on="product", how="left")
-            if "rung" not in merged:
-                merged["rung"] = 0.0
-            merged["rung"] = merged["rung"].fillna(0)
-            rung_tot = float(merged.rung.sum())
+                has_rung = not rung.empty
+                if has_rung:
+                    merged = merged.merge(rung, on="product", how="left")
+                if "rung" not in merged:
+                    merged["rung"] = 0.0
+                merged["rung"] = merged["rung"].fillna(0)
+                rung_tot = float(merged.rung.sum())
 
-            # The headline: how many GWP units left the shop during the
-            # window, by whatever route — rung on the GWP SKU (preferred) or
-            # loyalty redemptions (fallback) — plus mis-rung lines.
-            # Only units rung on the promo's own "(GWP)" SKU count as a gift
-            # leaving the shop. The brand-level offer count was previously
-            # used as a fallback here, which conflated promo-attached paid
-            # sales with free goods and could put out-the-door in the
-            # thousands against a 100-unit drop.
-            basis = rung_tot if has_rung else 0
-            out_door = merged.misrung.sum() + basis
-            received_tot = rec.received.sum()
+                # The headline: how many GWP units left the shop during the
+                # window, by whatever route — rung on the GWP SKU (preferred) or
+                # loyalty redemptions (fallback) — plus mis-rung lines.
+                # Only units rung on the promo's own "(GWP)" SKU count as a gift
+                # leaving the shop. The brand-level offer count was previously
+                # used as a fallback here, which conflated promo-attached paid
+                # sales with free goods and could put out-the-door in the
+                # thousands against a 100-unit drop.
+                basis = rung_tot if has_rung else 0
+                out_door = merged.misrung.sum() + basis
+                received_tot = rec.received.sum()
 
-            # Attach rate: GWP issued per paid brand unit in the window —
-            # the number to watch if the offer is "GWP with any purchase".
-            attach = np.nan
-            du = s.get("during") or {}
-            _upd = du.get("units_pd")
-            if has_rung and _upd is not None and pd.notna(_upd):
-                paid = _upd * du.get("days", 0) - rung_tot
-                if paid > 0:
-                    attach = out_door / paid * 100
+                # Attach rate: GWP issued per paid brand unit in the window —
+                # the number to watch if the offer is "GWP with any purchase".
+                attach = np.nan
+                du = s.get("during") or {}
+                _upd = du.get("units_pd")
+                if has_rung and _upd is not None and pd.notna(_upd):
+                    paid = _upd * du.get("days", 0) - rung_tot
+                    if paid > 0:
+                        attach = out_door / paid * 100
 
-            # --- hero tile: GWP so far ------------------------------------
-            _ee = s["eff_end"]
-            pct_stock = out_door / received_tot if received_tot > 0 else 0
-            sub = (f"{pct_stock:.0%} of the stock is out the door"
-                   + (f" · attach rate {attach:.1f}% of paid "
-                      f"{tk['name']} units" if pd.notna(attach) else "")
-                   + f" · data through {_ee:%b} {_ee.day}"
-                     " · updates with every refresh")
-            st.markdown(
-                '<div style="background:var(--tint);border:1px solid '
-                'var(--rule);border-left:4px solid var(--accent);'
-                'border-radius:10px;padding:1rem 1.3rem;'
-                'margin:.5rem 0 1rem 0;">'
-                '<div style="font-size:.76rem;text-transform:uppercase;'
-                'letter-spacing:.09em;color:var(--muted);">GWP so far — '
-                + tk["name"] + '</div>'
-                '<div style="font-size:2.5rem;font-weight:700;'
-                'color:var(--ink);line-height:1.15;">'
-                f"{int(out_door):,}"
-                '<span style="font-size:1.05rem;font-weight:400;'
-                'color:var(--muted);"> of '
-                f"{int(received_tot):,} received</span></div>"
-                f'<div style="font-size:.85rem;color:var(--body);">'
-                f'{sub}</div></div>', unsafe_allow_html=True)
+                # --- hero tile: GWP so far ------------------------------------
+                _ee = s["eff_end"]
+                pct_stock = out_door / received_tot if received_tot > 0 else 0
+                sub = (f"{pct_stock:.0%} of the stock is out the door"
+                       + (f" · attach rate {attach:.1f}% of paid "
+                          f"{tk['name']} units" if pd.notna(attach) else "")
+                       + f" · data through {_ee:%b} {_ee.day}"
+                         " · updates with every refresh")
+                st.markdown(
+                    '<div style="background:var(--tint);border:1px solid '
+                    'var(--rule);border-left:4px solid var(--accent);'
+                    'border-radius:10px;padding:1rem 1.3rem;'
+                    'margin:.5rem 0 1rem 0;">'
+                    '<div style="font-size:.76rem;text-transform:uppercase;'
+                    'letter-spacing:.09em;color:var(--muted);">GWP so far — '
+                    + tk["name"] + '</div>'
+                    '<div style="font-size:2.5rem;font-weight:700;'
+                    'color:var(--ink);line-height:1.15;">'
+                    f"{int(out_door):,}"
+                    '<span style="font-size:1.05rem;font-weight:400;'
+                    'color:var(--muted);"> of '
+                    f"{int(received_tot):,} received</span></div>"
+                    f'<div style="font-size:.85rem;color:var(--body);">'
+                    f'{sub}</div></div>', unsafe_allow_html=True)
 
-            # Which method moved the GWP: channel split of the properly-rung
-            # units (In-Store register / Non-Stop / Delivery).
-            if has_col("dash_gwp_day", "channel"):
-                gwp_ch = q(f"""
+                # Which method moved the GWP: channel split of the properly-rung
+                # units (In-Store register / Non-Stop / Delivery).
+                if has_col("dash_gwp_day", "channel"):
+                    gwp_ch = q(f"""
                     SELECT channel, SUM(units) AS units
                     FROM dash_gwp_day
                     WHERE {like} {af}
@@ -4244,70 +4243,71 @@ def render_takeovers():
                                   AND '{s["eff_end"]:%Y-%m-%d}'
                     GROUP BY 1 ORDER BY units DESC
                 """)
-                if not gwp_ch.empty and gwp_ch.units.sum() > 0:
-                    bits = " · ".join(
-                        f"**{r.channel}** {int(r.units):,}"
-                        for r in gwp_ch.itertuples())
-                    st.markdown("GWP by method: " + bits +
-                                "  \n*(properly-rung units only — mis-rung "
-                                "lines are counted in the tile above)*")
+                    if not gwp_ch.empty and gwp_ch.units.sum() > 0:
+                        bits = " · ".join(
+                            f"**{r.channel}** {int(r.units):,}"
+                            for r in gwp_ch.itertuples())
+                        st.markdown("GWP by method: " + bits +
+                                    "  \n*(properly-rung units only — mis-rung "
+                                    "lines are counted in the tile above)*")
 
-            c = st.columns(5)
-            c[0].metric("GWP out the door", f"{int(out_door):,}",
-                        help="Every GWP unit that left during the window, "
-                             "by any route.")
-            c[1].metric("Received", f"{int(received_tot):,}")
-            if has_rung:
-                c[2].metric("On the GWP SKU", f"{int(rung_tot):,}",
-                            help="Units rung on the promo's own '(GWP)' "
-                                 "item — per SKU, inside the window.")
-            else:
-                c[2].metric("On the GWP SKU", "—",
-                            help="Per-SKU GWP sales (dash_gwp_day) are not "
-                                 "published yet, so only mis-rung lines are "
-                                 "counted above. Out-the-door will read low "
-                                 "until the next refresh.")
-            c[3].metric("Mis-rung", f"{int(merged.misrung.sum()):,}",
-                        help="Sale lines keyed as a bare SKU number, matched "
-                             "to these GWP receipts.")
-            remaining = received_tot - out_door
-            c[4].metric("Still out there", f"{int(remaining):,}",
-                        help="Received minus out-the-door. Includes stock "
-                             "still on the shelf — check the back of house "
-                             "before chasing a gap.")
+                c = st.columns(5)
+                c[0].metric("GWP out the door", f"{int(out_door):,}",
+                            help="Every GWP unit that left during the window, "
+                                 "by any route.")
+                c[1].metric("Received", f"{int(received_tot):,}")
+                if has_rung:
+                    c[2].metric("On the GWP SKU", f"{int(rung_tot):,}",
+                                help="Units rung on the promo's own '(GWP)' "
+                                     "item — per SKU, inside the window.")
+                else:
+                    c[2].metric("On the GWP SKU", "—",
+                                help="Per-SKU GWP sales (dash_gwp_day) are not "
+                                     "published yet, so only mis-rung lines are "
+                                     "counted above. Out-the-door will read low "
+                                     "until the next refresh.")
+                c[3].metric("Mis-rung", f"{int(merged.misrung.sum()):,}",
+                            help="Sale lines keyed as a bare SKU number, matched "
+                                 "to these GWP receipts.")
+                remaining = received_tot - out_door
+                c[4].metric("Still out there", f"{int(remaining):,}",
+                            help="Received minus out-the-door. Includes stock "
+                                 "still on the shelf — check the back of house "
+                                 "before chasing a gap.")
 
-            tbl = pd.DataFrame({
-                "GWP item": merged["product"],
-                "SKU": merged["product_sku"],
-                "Received": merged.received.round(0),
-                "Mis-rung": merged.misrung.round(0),
-                "Mis-ring value $": merged.net.round(0),
-            })
-            cfg = {
-                "Received": st.column_config.NumberColumn(format="%d"),
-                "Mis-rung": st.column_config.NumberColumn(format="%d"),
-                "Mis-ring value $": st.column_config.NumberColumn(format="$%d"),
-            }
-            if has_rung:
-                tbl.insert(3, "On GWP SKU", merged.rung.round(0))
-                tbl["% of stock"] = (
-                    (merged.rung + merged.misrung)
-                    / merged.received.replace(0, np.nan) * 100).round(0)
-                cfg["On GWP SKU"] = st.column_config.NumberColumn(format="%d")
-                cfg["% of stock"] = st.column_config.NumberColumn(format="%d%%")
-            st.dataframe(tbl, use_container_width=True, hide_index=True,
-                         column_config=cfg)
-            if merged.misrung.sum() > 0:
-                st.markdown(
-                    '<div class="alert a-warn"><b>Mis-rung GWP found.</b> '
-                    'The lines above were keyed by SKU number rather than '
-                    'processed as gift-with-purchase. They count as ordinary '
-                    'sales in the till, which understates the GWP programme '
-                    'and muddies the brand\'s real margin.</div>',
-                    unsafe_allow_html=True)
+                tbl = pd.DataFrame({
+                    "GWP item": merged["product"],
+                    "SKU": merged["product_sku"],
+                    "Received": merged.received.round(0),
+                    "Mis-rung": merged.misrung.round(0),
+                    "Mis-ring value $": merged.net.round(0),
+                })
+                cfg = {
+                    "Received": st.column_config.NumberColumn(format="%d"),
+                    "Mis-rung": st.column_config.NumberColumn(format="%d"),
+                    "Mis-ring value $": st.column_config.NumberColumn(format="$%d"),
+                }
+                if has_rung:
+                    tbl.insert(3, "On GWP SKU", merged.rung.round(0))
+                    tbl["% of stock"] = (
+                        (merged.rung + merged.misrung)
+                        / merged.received.replace(0, np.nan) * 100).round(0)
+                    cfg["On GWP SKU"] = st.column_config.NumberColumn(format="%d")
+                    cfg["% of stock"] = st.column_config.NumberColumn(format="%d%%")
+                st.dataframe(tbl, use_container_width=True, hide_index=True,
+                             column_config=cfg)
+                if merged.misrung.sum() > 0:
+                    st.markdown(
+                        '<div class="alert a-warn"><b>Mis-rung GWP found.</b> '
+                        'The lines above were keyed by SKU number rather than '
+                        'processed as gift-with-purchase. They count as ordinary '
+                        'sales in the till, which understates the GWP programme '
+                        'and muddies the brand\'s real margin.</div>',
+                        unsafe_allow_html=True)
+    _frag_takeover_detail()
 
 
-with t_promo:
+def section_promo_lab():
     render_promo_lab()
 
 import numpy as np
@@ -4644,88 +4644,94 @@ def render_vm():
         'sales. Weeks are the same ISO weeks as the rest of the dashboard, so '
         'edge weeks are partly in and partly out of the window.</p>',
         unsafe_allow_html=True)
-    xref = q("SELECT * FROM dash_vm_takeover_xref")
-    if xref.empty:
-        st.info("No Takeover cross-reference in the loaded file yet.")
-    else:
-        if len(keys) != len(STORES):
-            xref = xref[xref.store_key.isin(keys)]
-        tks = list(dict.fromkeys(xref.takeover))
-        tk_pick = st.selectbox("Takeover", tks, key="vm_tk")
-        x = xref[xref.takeover == tk_pick].copy()
-        x["Store"] = x.store_key.map(STORES)
-        x["display"] = x.display.fillna("— not on floor set —")
+    @st.fragment
+    def _frag_vm_xref():
+        xref = q("SELECT * FROM dash_vm_takeover_xref")
+        if xref.empty:
+            st.info("No Takeover cross-reference in the loaded file yet.")
+        else:
+            if len(keys) != len(STORES):
+                xref = xref[xref.store_key.isin(keys)]
+            tks = list(dict.fromkeys(xref.takeover))
+            tk_pick = st.selectbox("Takeover", tks, key="vm_tk")
+            x = xref[xref.takeover == tk_pick].copy()
+            x["Store"] = x.store_key.map(STORES)
+            x["display"] = x.display.fillna("— not on floor set —")
 
-        # summary: per store x category, prior-4 avg vs during avg, with the
-        # most common display in each phase
-        def _mode(v):
-            v = v.dropna()
-            return v.mode().iloc[0] if not v.empty else "—"
-        summ = (x.groupby(["Store", "category", "phase"])
-                  .agg(net=("net", "mean"), slots=("slots", "mean"), display=("display", _mode))
-                  .unstack("phase"))
-        summ.columns = [f"{a}|{b}" for a, b in summ.columns]
-        need = {"net|prior 4 wks", "net|during"}
-        if need.issubset(summ.columns):
-            summ["Δ net/wk"] = summ["net|during"] / summ["net|prior 4 wks"].replace(0, np.nan) - 1
-            out = summ.reset_index()[["Store", "category", "net|prior 4 wks", "net|during",
-                                      "Δ net/wk", "display|prior 4 wks", "display|during"]]
-            out = out.rename(columns={"category": "Category",
-                                      "net|prior 4 wks": "Prior 4 wks avg",
-                                      "net|during": "During avg",
-                                      "display|prior 4 wks": "Typical display before",
-                                      "display|during": "Typical display during"})
-            out = out[(out["Prior 4 wks avg"] > 0) | (out["During avg"] > 0)]
-            st.dataframe(out.style.format({"Prior 4 wks avg": "${:,.0f}", "During avg": "${:,.0f}",
-                                           "Δ net/wk": "{:+.0%}"}, na_rep="—"),
-                         use_container_width=True, hide_index=True)
-        st.markdown('<p class="note">Read the display columns before the % — a category '
-                    'that gained a window AND a Takeover in the same week cannot '
-                    'separate the two; one whose display did not change is a cleaner '
-                    'read of the kiosk on its own.</p>', unsafe_allow_html=True)
+            # summary: per store x category, prior-4 avg vs during avg, with the
+            # most common display in each phase
+            def _mode(v):
+                v = v.dropna()
+                return v.mode().iloc[0] if not v.empty else "—"
+            summ = (x.groupby(["Store", "category", "phase"])
+                      .agg(net=("net", "mean"), slots=("slots", "mean"), display=("display", _mode))
+                      .unstack("phase"))
+            summ.columns = [f"{a}|{b}" for a, b in summ.columns]
+            need = {"net|prior 4 wks", "net|during"}
+            if need.issubset(summ.columns):
+                summ["Δ net/wk"] = summ["net|during"] / summ["net|prior 4 wks"].replace(0, np.nan) - 1
+                out = summ.reset_index()[["Store", "category", "net|prior 4 wks", "net|during",
+                                          "Δ net/wk", "display|prior 4 wks", "display|during"]]
+                out = out.rename(columns={"category": "Category",
+                                          "net|prior 4 wks": "Prior 4 wks avg",
+                                          "net|during": "During avg",
+                                          "display|prior 4 wks": "Typical display before",
+                                          "display|during": "Typical display during"})
+                out = out[(out["Prior 4 wks avg"] > 0) | (out["During avg"] > 0)]
+                st.dataframe(out.style.format({"Prior 4 wks avg": "${:,.0f}", "During avg": "${:,.0f}",
+                                               "Δ net/wk": "{:+.0%}"}, na_rep="—"),
+                             use_container_width=True, hide_index=True)
+            st.markdown('<p class="note">Read the display columns before the % — a category '
+                        'that gained a window AND a Takeover in the same week cannot '
+                        'separate the two; one whose display did not change is a cleaner '
+                        'read of the kiosk on its own.</p>', unsafe_allow_html=True)
 
-        with st.expander("Week by week"):
-            cat_pick = st.multiselect("Categories", sorted(x.category.unique()),
-                                      default=[c for c in ("Flower", "Vape", "Pre-Roll", "Edible")
-                                               if c in set(x.category)], key="vm_tk_cat")
-            wk = x[x.category.isin(cat_pick)].sort_values(["Store", "category", "iso_year", "iso_week"])
-            st.dataframe(wk[["Store", "category", "week_start", "phase", "covered_days",
-                             "slots", "display", "net", "units"]]
-                         .rename(columns={"category": "Category", "week_start": "Week of",
-                                          "phase": "Phase", "covered_days": "Days in window",
-                                          "slots": "Slots", "display": "On display",
-                                          "net": "Net", "units": "Units"})
-                         .style.format({"Net": "${:,.0f}", "Units": "{:,.0f}"}, na_rep="—"),
-                         use_container_width=True, hide_index=True)
+            with st.expander("Week by week"):
+                cat_pick = st.multiselect("Categories", sorted(x.category.unique()),
+                                          default=[c for c in ("Flower", "Vape", "Pre-Roll", "Edible")
+                                                   if c in set(x.category)], key="vm_tk_cat")
+                wk = x[x.category.isin(cat_pick)].sort_values(["Store", "category", "iso_year", "iso_week"])
+                st.dataframe(wk[["Store", "category", "week_start", "phase", "covered_days",
+                                 "slots", "display", "net", "units"]]
+                             .rename(columns={"category": "Category", "week_start": "Week of",
+                                              "phase": "Phase", "covered_days": "Days in window",
+                                              "slots": "Slots", "display": "On display",
+                                              "net": "Net", "units": "Units"})
+                             .style.format({"Net": "${:,.0f}", "Units": "{:,.0f}"}, na_rep="—"),
+                             use_container_width=True, hide_index=True)
+    _frag_vm_xref()
 
     # ---- brand drill ------------------------------------------------------
     st.markdown("##### Brand drill-down")
-    opts = sorted(bw.loc[bw.shelf_slots > 0, "brand"].unique())
-    pick = st.selectbox("Brand", opts, key="vm_brand")
-    one = bw[bw.brand == pick].copy()
-    one["Store"] = one.store_key.map(STORES)
-    chart = one.pivot_table(index="week_start", columns="Store", values="net", aggfunc="sum")
-    st.line_chart(chart)
-    st.dataframe(one.sort_values(["Store", "week_start"])
-                 [["Store", "week_start", "placement_state", "best_tier", "shelf_slots",
-                   "spotlight_slots", "bay_types", "takeover", "net", "units", "baskets"]]
-                 .assign(placement_state=lambda f: f.placement_state)
-                 .rename(columns={"week_start": "Week of", "placement_state": "State",
-                                  "best_tier": "Tier", "shelf_slots": "Slots",
-                                  "spotlight_slots": "Spotlight", "bay_types": "Bays",
-                                  "takeover": "Takeover"})
-                 .style.format({"net": "${:,.0f}", "units": "{:,.0f}"}, na_rep="—"),
-                 use_container_width=True, hide_index=True)
-    # every recorded position for that brand in the window
-    pos = q(f"""SELECT store_key, week_start, bay_raw, shelf_tier, position_label,
+    @st.fragment
+    def _frag_vm_brand():
+        opts = sorted(bw.loc[bw.shelf_slots > 0, "brand"].unique())
+        pick = st.selectbox("Brand", opts, key="vm_brand")
+        one = bw[bw.brand == pick].copy()
+        one["Store"] = one.store_key.map(STORES)
+        chart = one.pivot_table(index="week_start", columns="Store", values="net", aggfunc="sum")
+        st.line_chart(chart)
+        st.dataframe(one.sort_values(["Store", "week_start"])
+                     [["Store", "week_start", "placement_state", "best_tier", "shelf_slots",
+                       "spotlight_slots", "bay_types", "takeover", "net", "units", "baskets"]]
+                     .assign(placement_state=lambda f: f.placement_state)
+                     .rename(columns={"week_start": "Week of", "placement_state": "State",
+                                      "best_tier": "Tier", "shelf_slots": "Slots",
+                                      "spotlight_slots": "Spotlight", "bay_types": "Bays",
+                                      "takeover": "Takeover"})
+                     .style.format({"net": "${:,.0f}", "units": "{:,.0f}"}, na_rep="—"),
+                     use_container_width=True, hide_index=True)
+        # every recorded position for that brand in the window
+        pos = q(f"""SELECT store_key, week_start, bay_raw, shelf_tier, position_label,
                        brand_raw, product_hint, comment
                 FROM dash_vm_placement_week
                 WHERE pos_brand = '{pick.replace("'", "''")}' AND {cond}
                 ORDER BY store_key, week_start, bay_raw""")
-    if not pos.empty:
-        pos.insert(0, "Store", pos.pop("store_key").map(STORES))
-        with st.expander(f"Every recorded position for {pick} ({len(pos)})"):
-            st.dataframe(pos, use_container_width=True, hide_index=True)
+        if not pos.empty:
+            pos.insert(0, "Store", pos.pop("store_key").map(STORES))
+            with st.expander(f"Every recorded position for {pick} ({len(pos)})"):
+                st.dataframe(pos, use_container_width=True, hide_index=True)
+    _frag_vm_brand()
 
     # ---- data quality -----------------------------------------------------
     with st.expander("Floor-set coverage and data quality"):
@@ -4762,47 +4768,47 @@ def render_vm():
                         unsafe_allow_html=True)
 
 
-with t_takeover:
+def section_takeovers():
     render_takeovers()
 
-with t_vm:
+def section_visual_merch():
     render_vm()
 
 
 # ---------------------------------------------------------------- loyalty
-with t_loyalty:
+def section_loyalty():
     render_loyalty(q=q, keys=keys, keep=keep, stores=STORES,
                    heading=heading, table_exists=table_exists,
                    partial_week=PARTIAL_WEEK)
 
 
 # ------------------------------------------------ retention
-with t_retention:
+def section_retention():
     render_retention(q=q, keys=keys, stores=STORES,
                      heading=heading, table_exists=table_exists)
 
 
 # --------------------------------------------------- events
-with t_events:
+def section_events():
     render_events(q=q, keys=keys, stores=STORES,
                   heading=heading, table_exists=table_exists)
 
 
 # ------------------------------------------- audiences x events
-with t_audiences:
+def section_audiences():
     render_audiences(q=q, keys=keys, stores=STORES,
                      heading=heading, table_exists=table_exists)
 
 
 # ------------------------------------------------------------ discounting
-with t_discount:
+def section_discounting():
     render_discounting(q=q, keys=keys, keep=keep, stores=STORES,
                        heading=heading, table_exists=table_exists,
                        accent=ACCENT, series=SERIES)
 
 
 # -------------------------------------------------------- brand efficiency
-with t_bei:
+def section_brand_efficiency():
     render_bei(q=q, keys=keys, stores=STORES,
                heading=heading, table_exists=table_exists,
                accent=ACCENT, series=SERIES)
@@ -4846,7 +4852,7 @@ def scorecard_prefill(_con, store, week_start):
         dash.close()
 
 
-with t_scorecard:
+def section_gm_scorecard():
     try:
         scorecard_tab.render(scorecard_con(), user_email=None,
                              prefill_fn=scorecard_prefill)
@@ -4854,3 +4860,86 @@ with t_scorecard:
         st.error(f"The scorecard tab failed to load — {type(exc).__name__}: {exc}")
         st.caption("Every other tab is read-only and unaffected.")
 
+
+
+# ===========================================================================
+# Navigation
+#
+# The old page built 17 st.tabs and ran every body on every rerun, so a store
+# change re-queried and re-rendered sections nobody was looking at. Now one
+# section is selected (a pill strip that still reads like tabs) and ONLY that
+# section's function runs. Everything the sections share -- df, dfv, weeks,
+# WIN, keys, wf/af, scoped() and friends -- is computed once above, as module
+# globals, exactly as before.
+#
+# The selection lives in st.session_state["section"] and is mirrored to the
+# ?tab= query parameter, so a link opens on a section and a reload keeps the
+# place. Names and order are the old tab names and order.
+# ===========================================================================
+
+NAV = [
+    ("Charts",              "charts",         section_charts),
+    ("Insights",            "insights",       section_insights),
+    ("Brands",              "brands",         section_brands),
+    ("Brand Efficiency",    "brand-efficiency", section_brand_efficiency),
+    ("Accessories",         "accessories",    section_accessories),
+    ("Redemptions",         "redemptions",    section_redemptions),
+    ("Discounting",         "discounting",    section_discounting),
+    ("Loyalty",             "loyalty",        section_loyalty),
+    ("Retention",           "retention",      section_retention),
+    ("Events",              "events",         section_events),
+    ("Audiences",           "audiences",      section_audiences),
+    ("Takeovers",           "takeovers",      section_takeovers),
+    ("Visual Merch",        "visual-merch",   section_visual_merch),
+    ("Projections",         "projections",    section_projections),
+    ("Promo Lab",           "promo-lab",      section_promo_lab),
+    ("GM Scorecard",        "gm-scorecard",   section_gm_scorecard),
+    ("What the terms mean", "terms",          section_terms),
+]
+_NAV_LABELS = [n[0] for n in NAV]
+_NAV_BY_SLUG = {n[1]: n[0] for n in NAV}
+_NAV_SLUG = {n[0]: n[1] for n in NAV}
+_NAV_FN = {n[0]: n[2] for n in NAV}
+
+
+def _tab_from_url() -> str | None:
+    """Section label named by ?tab=, accepting a slug or the label itself."""
+    raw = st.query_params.get("tab")
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if not raw:
+        return None
+    raw = str(raw).strip().lower()
+    if raw in _NAV_BY_SLUG:
+        return _NAV_BY_SLUG[raw]
+    for lab in _NAV_LABELS:
+        if lab.lower() == raw or lab.lower().replace(" ", "-") == raw:
+            return lab
+    return None
+
+
+def _keep_section():
+    """A pill can be clicked off, leaving no section. Put it back."""
+    if st.session_state.get("section") is None:
+        st.session_state["section"] = st.session_state.get(
+            "_section_last", _NAV_LABELS[0])
+
+
+_url_pick = _tab_from_url()
+if st.session_state.get("section") not in _NAV_LABELS:
+    st.session_state["section"] = _url_pick or _NAV_LABELS[0]
+elif (_url_pick and _url_pick != st.session_state["section"]
+      and st.query_params.get("tab") != st.session_state.get("_tab_written")):
+    # The URL changed from outside (back button, pasted link): follow it.
+    st.session_state["section"] = _url_pick
+
+st.pills("Section", _NAV_LABELS, key="section", label_visibility="collapsed",
+         on_change=_keep_section)
+_sec = st.session_state.get("section") or _NAV_LABELS[0]
+st.session_state["_section_last"] = _sec
+if st.query_params.get("tab") != _NAV_SLUG[_sec]:
+    st.query_params["tab"] = _NAV_SLUG[_sec]
+st.session_state["_tab_written"] = _NAV_SLUG[_sec]
+
+with st.spinner(f"Loading {_sec}…"):
+    _NAV_FN[_sec]()

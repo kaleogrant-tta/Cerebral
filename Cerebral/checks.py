@@ -260,6 +260,126 @@ def check_stock_week(dash):
     z = q1(dash, f"select count(*) from {t} where products_stocked_out > products or products_unknown > products or products_on_floor_end > products")
     report("stock-week: product counters <= products", PASS if z == 0 else FAIL, f"{z} rows")
 
+
+# ------------------------------------------------- build-quality guards (2026-10)
+def _ym(y, w): return f"{y}-W{w:02d}"
+
+def check_margin_sanity(dash):
+    """(a) gm/net per store-week must sit in 10-80% once the week has real volume.
+    Reads dash_brand_week, so it catches a bad cost feed before the app does."""
+    t = "dash_brand_week"
+    if t not in tables(dash): report("margin sanity per store-week", SKIP, "table missing"); return
+    rows = dash.execute(f"""select store_key, iso_year, iso_week, sum(gm) g, sum(net) n, sum(gm)/sum(net) m
+        from {t} where store_key > 0 group by 1,2,3
+        having sum(net) > 20000 and (sum(gm)/sum(net) < 0.10 or sum(gm)/sum(net) > 0.80)
+        order by 1,2,3""").fetchall()
+    if not rows: report("margin sanity per store-week (10-80%, net > $20k)", PASS, "all store-weeks in range"); return
+    txt = "; ".join(f"store {sk} {_ym(y, w)} {m:.0%} (${n:,.0f})" for sk, y, w, g, n, m in rows[:12])
+    report("margin sanity per store-week (10-80%, net > $20k)", FAIL,
+           f"{len(rows)} store-weeks out of range: {txt}" + (" ..." if len(rows) > 12 else ""))
+
+def check_days_open(dash):
+    """(b) a week cannot have more than 7 trading days."""
+    t = "dash_basket_week"
+    if t not in tables(dash) or "days_open" not in cols(dash, t): report("days_open <= 7", SKIP, "table/column missing"); return
+    n = q1(dash, f"select count(*) from {t} where days_open > 7")
+    report("days_open <= 7 in dash_basket_week", PASS if n == 0 else FAIL,
+           f"{n} rows over 7 (Monday 00:xx Delivery orders counted as an 8th day?)")
+    if "days_open" in cols(dash, "dash_category_week"):
+        n = q1(dash, "select count(*) from dash_category_week where days_open > 7")
+        report("days_open <= 7 in dash_category_week", PASS if n == 0 else FAIL, f"{n} rows over 7")
+
+def check_redemption_drop(dash):
+    """(c) latest week's chain redemption $ vs the mean of the prior four weeks.
+    A missing Alpine file shows up as a cliff here even when the week row exists."""
+    t = "dash_basket_week"
+    if t not in tables(dash): report("redemption $ vs prior 4 weeks", SKIP, "table missing"); return
+    rows = dash.execute(f"""select iso_year, iso_week, sum(redeem_value) from {t}
+        group by 1,2 order by 1 desc, 2 desc limit 5""").fetchall()
+    if len(rows) < 5: report("redemption $ vs prior 4 weeks", SKIP, "fewer than 5 weeks"); return
+    (y, w, cur), prior = rows[0], rows[1:]
+    base = sum((r[2] or 0) for r in prior) / 4
+    cur = cur or 0
+    ratio = cur / base if base else 1
+    st = FAIL if ratio < 0.40 else WARN if ratio < 0.60 else PASS
+    report(f"redemption $ {_ym(y, w)} vs prior 4-week mean", st,
+           f"${cur:,.0f} vs ${base:,.0f} ({ratio:.0%}); WARN < 60%, FAIL < 40%")
+
+def check_store_zero_redemptions(dash):
+    """(c2) a store that rang baskets in the latest week but shows zero redemptions.
+    This is what an Alpine IQ export pulled with a location filter looks like
+    (12 Oct 2026: the W41 file held Union Square only; three stores read $0)."""
+    t = "dash_basket_week"
+    if t not in tables(dash): report("stores with zero redemptions, latest week", SKIP, "table missing"); return
+    y, w = dash.execute(f"select iso_year, iso_week from {t} group by 1,2 order by 1 desc, 2 desc limit 1").fetchone()
+    rows = dash.execute(f"""select store_key, sum(baskets), coalesce(sum(redeem_value), 0) from {t}
+        where iso_year = {y} and iso_week = {w} and store_key > 0 group by 1 order by 1""").fetchall()
+    bad = [f"store {k} ({int(b):,} baskets)" for k, b, r in rows if (b or 0) >= 200 and (r or 0) == 0]
+    report(f"stores with zero redemptions {_ym(y, w)}", FAIL if bad else PASS,
+           ("; ".join(bad) + " -- was the Alpine IQ export pulled with all locations selected?") if bad
+           else f"all {len(rows)} active stores have redemptions")
+
+def check_loyalty_store_ties(dash):
+    """(d) store rows (store_key > 0) must add up to the chain row (store_key = 0)
+    for the last 8 weeks. Catches any thin-cell cut creeping back in."""
+    for t in sorted(x for x in tables(dash) if x.startswith("dash_loyalty_")):
+        cs = cols(dash, t)
+        if "store_key" not in cs or "iso_week" not in cs: continue
+        metrics = [m for m in ("baskets", "net", "redemptions", "redeem_value") if m in cs]
+        if not metrics: continue
+        weeks = dash.execute(f'select distinct iso_year, iso_week from "{t}" order by 1 desc, 2 desc limit 8').fetchall()
+        if not weeks: report(f"loyalty store rows tie to chain: {t}", SKIP, "empty"); continue
+        lo = min(yw_ord(y, w) for y, w in weeks)
+        worst, where = 1.0, ""
+        for m in metrics:
+            for y, w, chain, stores in dash.execute(f"""select iso_year, iso_week,
+                    sum(case when store_key = 0 then {m} end), sum(case when store_key > 0 then {m} end)
+                    from "{t}" where iso_year*53 + iso_week >= ? group by 1,2 order by 1,2""", [lo]).fetchall():
+                if not chain: continue
+                r = (stores or 0) / chain
+                if r < worst: worst, where = r, f"{m} {_ym(y, w)}"
+        report(f"loyalty store rows tie to chain: {t}", PASS if worst >= 0.98 else FAIL,
+               f"worst {worst:.1%}" + (f" ({where})" if where else "") + " over last 8 weeks; need >= 98%")
+
+def check_newret_swing(dash):
+    """(e) new-customer share (chain, id_scope='all') moving > 5 points in a week
+    usually means an ID-matching change, not a real shift."""
+    t = "dash_newret_week"
+    if t not in tables(dash): report("new-customer share swing", SKIP, "table missing"); return
+    rows = dash.execute(f"""select iso_year, iso_week,
+            sum(case when segment='New' then customers end) * 1.0 / nullif(sum(customers), 0)
+        from {t} where store_key = 0 and id_scope = 'all' group by 1,2 order by 1 desc, 2 desc limit 2""").fetchall()
+    if len(rows) < 2 or rows[0][2] is None or rows[1][2] is None: report("new-customer share swing", SKIP, "fewer than 2 weeks"); return
+    (y, w, cur), (py, pw, prev) = rows
+    d = (cur - prev) * 100
+    report(f"new-customer share {_ym(y, w)} vs {_ym(py, pw)}", WARN if abs(d) > 5 else PASS,
+           f"{cur:.1%} vs {prev:.1%} ({d:+.1f} pts); WARN beyond 5 pts")
+
+def check_brand_name_collisions(dash):
+    """(f) brand names that differ only by case, spaces or punctuation but are not
+    mapped to one canonical in dash_brand_alias (e.g. 'Ruby Farms' vs 'Ruby')."""
+    t = "dash_brand_week"
+    if t not in tables(dash) or "dash_brand_alias" not in tables(dash): report("brand name collisions", SKIP, "table missing"); return
+    rows = dash.execute(f"""
+        with b as (select distinct brand from {t} where brand is not null),
+             c as (select b.brand, coalesce(a.canonical, b.brand) canon,
+                          regexp_replace(lower(strip_accents(b.brand)), '[^a-z0-9]', '', 'g') norm
+                   from b left join (select distinct alias, canonical from dash_brand_alias) a on a.alias = b.brand)
+        select norm, list(distinct brand order by brand) from c where norm <> ''
+        group by norm having count(distinct brand) > 1 and count(distinct canon) > 1 order by norm""").fetchall()
+    if not rows: report("brand name collisions (unaliased)", PASS, "none"); return
+    txt = "; ".join(" | ".join(b) for _, b in rows[:15])
+    report("brand name collisions (unaliased)", WARN, f"{len(rows)} groups: {txt}" + (" ..." if len(rows) > 15 else ""))
+
+def check_control_buffer(dash, db):
+    """(g) control store-days must not hold their own event inside the buffer.
+    NOT IMPLEMENTED: dash_events_detail publishes lift results, not the control-day
+    set, so the check means re-running the events_onsite.py control selection
+    (per-store blocked sets, CONTROL_WINDOW_DAYS, same-weekday filter) against
+    dim_event and fact_line - well over 30 lines. Left as an explicit SKIP."""
+    report("events: control days clear of own-store events", SKIP,
+           "not implemented (needs a re-run of events_onsite control selection)")
+
 # ------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
@@ -294,6 +414,11 @@ def main():
     run("event tracker", check_event_tracker, dash)
     run("takeover", check_takeover_calendar, dash); run("stock week", check_stock_week, dash)
     run("category stock", check_category_stock, dash)
+    print("-- build-quality guards")
+    run("margin sanity", check_margin_sanity, dash); run("days_open", check_days_open, dash)
+    run("redemption drop", check_redemption_drop, dash); run("zero-redemption stores", check_store_zero_redemptions, dash); run("loyalty ties", check_loyalty_store_ties, dash)
+    run("newret swing", check_newret_swing, dash); run("brand collisions", check_brand_name_collisions, dash)
+    run("control buffer", check_control_buffer, dash, db)
 
     counts = {s: sum(1 for _, st, _ in RESULTS if st == s) for s in (PASS, FAIL, WARN, SKIP)}
     print(f"== {counts[PASS]} pass, {counts[FAIL]} fail, {counts[WARN]} warn, {counts[SKIP]} skip")

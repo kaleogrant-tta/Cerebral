@@ -61,6 +61,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import charts
 import streamlit as st
 
 # Offer-name taxonomy. Order matters: substitutions are matched before the
@@ -142,17 +143,38 @@ def _classify(name) -> str:
 
 
 def _store_clause(keys, stores):
-    """Chain rollup when everything is selected, explicit list otherwise.
+    """Store filter for the per-store tables on this tab.
 
-    The promo and offer tables carry per-store rows only -- no store_key = 0
-    rollup -- so an all-selected view sums them. Kept as a helper so the
-    behaviour is stated once rather than repeated per query.
+    dash_discount_*, dash_promo_*, dash_offer_performance and
+    dash_redemption_* hold per-store rows only (store_key 1..4, no chain row),
+    so "all stores selected" is simply no filter: summing them gives the chain.
+
+    dash_loyalty_offer is DIFFERENT: it carries per-store rows AND a chain row
+    (store_key = 0) that is not the sum of them. Do not use this helper for it;
+    use _loyalty_store_clause().
     """
     if not keys:
         return "1 = 0"
     if stores and len(keys) == len(stores):
         return "1 = 1"
     return "store_key IN (" + ",".join(str(int(k)) for k in keys) + ")"
+
+
+def _loyalty_store_clause(keys, stores):
+    """Store filter for dash_loyalty_offer, which has a chain row (store_key 0).
+
+    All stores selected -> the chain row alone (summing every row would count
+    each redemption twice). A subset -> those stores' own rows, never the chain
+    row.
+    """
+    if not keys:
+        return "1 = 0"
+    if stores and len(keys) == len(stores):
+        return "store_key = 0"
+    ks = [str(int(k)) for k in keys if int(k) > 0]
+    if not ks:
+        return "1 = 0"
+    return "store_key > 0 AND store_key IN (" + ",".join(ks) + ")"
 
 
 def _money(x):
@@ -269,15 +291,11 @@ def _render_cost(q, where, keep, H, accent, pal, table_exists):
                     yaxis="y2", mode="lines",
                     line=dict(color="#7A8590", width=2))
     fig.update_layout(
-        barmode="stack", height=340,
-        margin=dict(l=0, r=0, t=10, b=0),
-        plot_bgcolor="rgba(0,0,0,0)",
-        yaxis=dict(title="Discount $", tickformat="$~s",
-                   gridcolor="rgba(0,0,0,.07)"),
+        barmode="stack",
+        yaxis=dict(title="Discount $", tickformat=charts.fmt_money()),
         yaxis2=dict(title="Rate %", overlaying="y", side="right",
-                    showgrid=False),
-        legend=dict(orientation="h", y=-.15))
-    st.plotly_chart(fig, use_container_width=True, key="disc_cost_trend")
+                    showgrid=False))
+    charts.show(fig, key="disc_cost_trend", kind="line")
 
     # --- by store and channel ---------------------------------------------
     cL, cR = st.columns(2)
@@ -398,11 +416,9 @@ def _render_cost(q, where, keep, H, accent, pal, table_exists):
                          color_discrete_sequence=[accent],
                          labels={"discount": "Allocated discount $",
                                  "brand": ""})
-            fig.update_layout(height=max(300, 32 * len(top)),
-                              margin=dict(l=0, r=0, t=10, b=0),
-                              plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
-            st.plotly_chart(fig, use_container_width=True, key="disc_brand")
+            fig.update_xaxes(tickformat=charts.fmt_money())
+            charts.show(fig, key="disc_brand", kind="hbar",
+                        height=max(300, 32 * len(top)))
 
 
 
@@ -501,10 +517,9 @@ def _render_groups(q, where, H, accent, pal, table_exists):
     with cR:
         fig = px.pie(kind, values="other", names="group_kind", hole=.55,
                      color_discrete_sequence=pal)
-        fig.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0),
-                          showlegend=False)
+        fig.update_layout(showlegend=False)
         fig.update_traces(textposition="inside", textinfo="percent")
-        st.plotly_chart(fig, use_container_width=True, key="disc_grp_kind")
+        charts.show(fig, key="disc_grp_kind", kind="pie")
 
     # --- per group --------------------------------------------------------
     st.markdown("**Every group**")
@@ -1020,10 +1035,9 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
     with cR:
         fig = px.pie(mix, values="spend", names="Discount type", hole=.55,
                      color_discrete_sequence=pal)
-        fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0),
-                          showlegend=False)
+        fig.update_layout(showlegend=False)
         fig.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig, use_container_width=True, key="disc_mix")
+        charts.show(fig, key="disc_mix", kind="pie")
 
     with st.expander("What each discount type means"):
         for t in mix["Discount type"]:
@@ -1080,12 +1094,9 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
         fig = px.bar(top, x="spend", y="offer_name", orientation="h",
                      color="Discount type", color_discrete_sequence=pal,
                      labels={"spend": "Net sales $", "offer_name": ""})
-        fig.update_layout(height=max(300, 34 * len(top)),
-                          margin=dict(l=0, r=0, t=10, b=0),
-                          plot_bgcolor="rgba(0,0,0,0)",
-                          legend=dict(orientation="h", y=-.12))
-        fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
-        st.plotly_chart(fig, use_container_width=True, key="disc_offers")
+        fig.update_xaxes(tickformat=charts.fmt_money())
+        charts.show(fig, key="disc_offers", kind="hbar",
+                    height=max(300, 34 * len(top)))
 
         # SKU drill-down for one offer, so a campaign can be opened up.
         one = st.selectbox("Open an offer", options=["—"] + list(det.offer_name),
@@ -1175,13 +1186,8 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
                     hover_name="brand", color_discrete_sequence=[accent],
                     labels={"repeat_rate": "Repeat rate %",
                             "churn_90": "Lapsed by 90 days %"})
-                fig.update_layout(height=380,
-                                  margin=dict(l=0, r=0, t=10, b=0),
-                                  plot_bgcolor="rgba(0,0,0,0)")
-                fig.update_xaxes(gridcolor="rgba(0,0,0,.07)")
-                fig.update_yaxes(gridcolor="rgba(0,0,0,.07)")
-                st.plotly_chart(fig, use_container_width=True,
-                                key="disc_brand_scatter")
+                fig.update_xaxes(showgrid=True)
+                charts.show(fig, key="disc_brand_scatter", kind="scatter")
                 st.markdown(
                     '<p class="note">Bubble size is spend. Bottom-right is '
                     'where you want a brand: customers came back and few '
@@ -1232,11 +1238,9 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
             fig = px.bar(pc.sort_values("spend"), x="spend", y="category",
                          orientation="h", color_discrete_sequence=[accent],
                          labels={"spend": "Spend $", "category": ""})
-            fig.update_layout(height=max(260, 34 * len(pc)),
-                              margin=dict(l=0, r=0, t=10, b=0),
-                              plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_xaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
-            st.plotly_chart(fig, use_container_width=True, key="disc_cat")
+            fig.update_xaxes(tickformat=charts.fmt_money())
+            charts.show(fig, key="disc_cat", kind="hbar",
+                        height=max(260, 34 * len(pc)))
 
     # --- 5. loyalty offer x tier ------------------------------------------
     if table_exists and table_exists("dash_loyalty_offer"):
@@ -1254,7 +1258,7 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
                    SUM(redemptions)  AS units,
                    SUM(redeem_value) AS spend
             FROM dash_loyalty_offer
-            WHERE {where}
+            WHERE {_loyalty_store_clause(keys, stores)}
             GROUP BY 1,2
         """)
         if lo.empty:
@@ -1279,8 +1283,6 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
             fig = px.bar(bytier, x="tier", y="spend",
                          color_discrete_sequence=[accent],
                          labels={"spend": "Net sales $", "tier": ""})
-            fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
-                              plot_bgcolor="rgba(0,0,0,0)")
-            fig.update_yaxes(gridcolor="rgba(0,0,0,.07)", tickformat="$~s")
-            st.plotly_chart(fig, use_container_width=True, key="disc_tier")
+            fig.update_yaxes(tickformat=charts.fmt_money())
+            charts.show(fig, key="disc_tier", kind="bar")
 

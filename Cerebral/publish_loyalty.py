@@ -16,15 +16,16 @@ tier ingest has not been run yet.
 STORE GRAIN
 -----------
 Every table carries store_key, plus a chain rollup at store_key = 0 computed
-BEFORE small-cell suppression. Always filter to exactly one of the two:
+from the same unsuppressed base as the store rows. Always filter to exactly one of the two:
 store_key = 0 for all stores, or store_key IN (...) for a subset. Summing
 across both double-counts.
 
 SUPPRESSION
 -----------
-Store-level cells below MIN_CELL distinct customers are dropped, so no
-published row describes a group small enough to expose one person's spend.
-The chain rollup is never suppressed, so all-store totals stay exact.
+No cells are dropped at build time: store rows must sum to the chain row.
+MIN_CELL (kept for compatibility, no longer applied here) is a presentation
+rule. Apply it in the app on the final drill-down only, after summing, and
+note thin cells at window level rather than deleting them from the table.
 
 PUBLISH.PY CHANGE REQUIRED
 --------------------------
@@ -74,7 +75,6 @@ def build_loyalty(con, min_cell: int = MIN_CELL) -> dict:
                    SUM(redeem)                                 AS redeem_value,
                    SUM(CASE WHEN redeem > 0 THEN 1 ELSE 0 END) AS redeem_baskets
             FROM base GROUP BY 1,2,3,4
-            HAVING COUNT(DISTINCT ck) >= {min_cell}
         ),
         chain AS (
             SELECT 0 AS store_key, iso_year, iso_week, tier,
@@ -132,7 +132,6 @@ def build_loyalty(con, min_cell: int = MIN_CELL) -> dict:
                    COUNT(DISTINCT ck) AS customers,
                    SUM(net) AS net, SUM(units) AS units
             FROM base GROUP BY 1,2,3,4,5
-            HAVING COUNT(DISTINCT ck) >= {min_cell}
         ),
         chain AS (
             SELECT 0 AS store_key, iso_year, iso_week, category, tier,
@@ -161,7 +160,6 @@ def build_loyalty(con, min_cell: int = MIN_CELL) -> dict:
                        COUNT(*) AS redemptions, SUM(redeem_amt) AS redeem_value,
                        AVG(basket_net) AS avg_basket
                 FROM base GROUP BY 1,2,3,4,5
-                HAVING COUNT(DISTINCT ck) >= {min_cell}
             ),
             chain AS (
                 SELECT 0 AS store_key, iso_year, iso_week, offer_name, tier,
@@ -194,7 +192,6 @@ def build_loyalty(con, min_cell: int = MIN_CELL) -> dict:
                    COUNT(*) AS baskets, SUM(net) AS net,
                    COUNT(DISTINCT ck) AS customers
             FROM base GROUP BY 1,2,3,4,5,6
-            HAVING COUNT(DISTINCT ck) >= {min_cell}
         ),
         chain AS (
             SELECT 0 AS store_key, iso_year, iso_week, tier, bin_label,

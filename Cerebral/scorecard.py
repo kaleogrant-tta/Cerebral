@@ -123,25 +123,50 @@ def stock_note(hist, r):
                  f"({idx*100:.0f}%), {out} stocked out")
 
 
-def control_limits(hist: pd.Series, n_baskets: float):
-    """Binomial control limits on penetration (framework 3.2)."""
-    if len(hist) < 4 or n_baskets <= 0:
+# One definition of "worth an alert", shared by scorecard.py, cerebral_app.py
+# and cerebral_public.py (import these, do not copy them).
+#   ALERT_Z        how many of the category's OWN week-to-week standard
+#                  deviations (prior BASELINE_WEEKS weeks, current week left
+#                  out) the latest week must sit from its baseline average
+#   ALERT_MIN_PTS  and the move must also be at least this big in absolute
+#                  terms (0.02 = 2 percentage points of penetration)
+#   ALERT_RUN      weeks in a row on one side of the baseline before the
+#                  "persistent shift" rule fires
+ALERT_Z = 3.0
+ALERT_MIN_PTS = 0.02
+ALERT_RUN = 10
+
+
+def control_limits(hist: pd.Series, n_baskets: float | None = None):
+    """Empirical control limits on penetration.
+
+    `hist` is the baseline: the prior BASELINE_WEEKS weeks, EXCLUDING the week
+    being tested. Returns (mean, lower, upper) where the band half-width is the
+    larger of ALERT_Z baseline standard deviations and ALERT_MIN_PTS, so a point
+    outside the band is exactly one with |z| > ALERT_Z AND a move of at least
+    ALERT_MIN_PTS. `n_baskets` is accepted for backward compatibility and unused
+    (the old binomial band ignored real week-to-week variation).
+    """
+    hist = pd.to_numeric(hist, errors="coerce").dropna()
+    if len(hist) < 4:
         return None, None, None
-    p = hist.mean()
-    se = (p * (1 - p) / n_baskets) ** 0.5
-    return p, p - 2 * se, p + 2 * se
+    p = float(hist.mean())
+    sd = float(hist.std(ddof=1))
+    w = max(ALERT_Z * sd, ALERT_MIN_PTS)
+    return p, p - w, p + w
 
 
 def run_rules(hist: pd.Series) -> str | None:
-    """7 consecutive on one side, or 6 consecutive in one direction."""
+    """ALERT_RUN consecutive on one side, or 6 consecutive in one direction."""
     if len(hist) < 7:
         return None
     base = hist.iloc[:-1].mean()
-    last7 = hist.tail(7)
-    if (last7 > base).all():
-        return "7 consecutive weeks above baseline"
-    if (last7 < base).all():
-        return "7 consecutive weeks below baseline"
+    lastn = hist.tail(ALERT_RUN)
+    if len(lastn) >= ALERT_RUN:
+        if (lastn > base).all():
+            return f"{ALERT_RUN} consecutive weeks above baseline"
+        if (lastn < base).all():
+            return f"{ALERT_RUN} consecutive weeks below baseline"
     last6 = hist.tail(6)
     d = last6.diff().dropna()
     if len(d) >= 5 and (d > 0).all():
@@ -198,7 +223,7 @@ def main() -> int:
 
     tot_baskets = cur.baskets.iloc[0]
     tot_net = cur.net.sum()
-    days = cur.days_open.iloc[0]
+    days = min(int(cur.days_open.iloc[0]), 7)
 
     # ---- header --------------------------------------------------------
     print()

@@ -56,6 +56,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import charts
 
 DOW_ORDER = [1, 2, 3, 4, 5, 6, 7]
 DOW_NAME = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday",
@@ -424,14 +425,10 @@ def render_promo_calendar(q, keys, stores, heading=None, table_exists=None,
             annotation_position="top right")
     fig.add_vline(x=weeks, line=dict(color="rgba(0,0,0,0.35)", dash="dot"))
     fig.update_layout(
-        height=330, margin=dict(l=10, r=10, t=30, b=10),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
-        xaxis=dict(title="Test length (weeks, alternating on/off)",
-                   gridcolor="rgba(0,0,0,0.07)"),
-        yaxis=dict(title="Smallest lift detectable", ticksuffix="%",
-                   gridcolor="rgba(0,0,0,0.07)"))
-    st.plotly_chart(fig, use_container_width=True)
+        xaxis=dict(title="Test length (weeks, alternating on/off)"),
+        yaxis=dict(title="Smallest lift detectable", ticksuffix="%"))
+    charts.show(fig, key="promo_len_curve", kind="curve")
 
     _note(
         "Where the curve crosses the dashed line is the shortest honest "

@@ -171,10 +171,23 @@ def render_events_cost(q, H, table_exists=None, howto=None):
     unrec = d[~d.cost_recorded]
     ctrl = rec[(rec.scope == SCOPE_SINGLE) & rec.measured
                & ~rec.event_type.isin(LOYALTY_TYPES)
-               & (rec.incremental_new >= MIN_INCREMENTAL)
                & (rec.min_controls >= MIN_CONTROLS)]
+    # No outcome filter here: keeping only events that already produced >= 5
+    # new customers would pool only the successes and understate the cost per
+    # customer several-fold. Only the data-quality rule (enough control days)
+    # applies. MIN_INCREMENTAL still gates the PER-EVENT figure further down.
     pooled = (ctrl.net_tta_cost.sum() / ctrl.incremental_new.sum()
               if ctrl.incremental_new.sum() > 0 else np.nan)
+    # Median over the same events. An event with no positive lift has no finite
+    # cost per customer; it counts as worse than every event that has one,
+    # rather than silently dropping out of the median.
+    _cpc = np.where(ctrl.incremental_new > 0,
+                    ctrl.net_tta_cost / ctrl.incremental_new.where(
+                        ctrl.incremental_new > 0), np.inf)
+    median_cpc = (float(np.median(_cpc)) if len(_cpc) else np.nan)
+    if np.isinf(median_cpc):
+        median_cpc = np.nan
+    n_nolift = int((ctrl.incremental_new <= 0).sum())
 
     c = st.columns(4)
     c[0].metric("Net cost, recorded events", _money(rec.net_tta_cost.sum()),
@@ -187,14 +200,20 @@ def render_events_cost(q, H, table_exists=None, howto=None):
     c[1].metric("Cost unrecorded", f"{len(unrec)}", "events",
                 help=tip("unrecorded"))
     c[2].metric("Pooled $ / net-new customer (lift)", _money(pooled),
-                f"{len(ctrl)} controlled events",
+                f"{len(ctrl)} events pooled",
                 help="Total net cost over total incremental new customers, "
-                     "single-store events with enough evidence only. The "
-                     "one number to quote if you quote one.")
+                     "across every costed single-store event that has enough "
+                     f"baseline days ({MIN_CONTROLS}+) - including events that "
+                     f"brought in no measurable new customers ({n_nolift} of "
+                     f"these {len(ctrl)}). The best single figure for the "
+                     "programme as a whole, but still an estimate: it rests on "
+                     "a modelled baseline and a modest number of events.")
     c[3].metric("Median $ / net-new customer (lift)",
-                _money(ctrl.cost_per_new_customer.median()),
-                "same events",
-                help="Half of controlled events did better than this.")
+                _money(median_cpc),
+                f"same {len(ctrl)} events",
+                help="Half of the pooled events did better than this. Events "
+                     "with no positive lift count as worse than any event that "
+                     "has a cost per customer.")
 
     if "realloc_delta" in d.columns:
         moved = d[d.realloc_delta.fillna(0) != 0]

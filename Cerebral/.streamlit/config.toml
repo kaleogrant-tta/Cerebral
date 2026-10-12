@@ -1,6 +1,8 @@
-# Cerebral — Streamlit theme
-# These are the widget colours theme.css cannot reach: store tags, slider,
-# tab underline, sidebar background. Keep them in sync with theme.css.
+# Cerebral - Streamlit theme
+# These are the things theme.css cannot reach: base colours, corner radius,
+# the table (dataframe) header and borders, fonts inside canvas widgets, and
+# which toolbar buttons Streamlit shows at all. Keep the colours in sync with
+# the :root block at the top of theme.css.
 
 [theme]
 primaryColor = "#0E7C66"
@@ -8,3 +10,39 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F3F6F4"
 textColor = "#4A3B34"
 font = "sans serif"
+codeFont = "monospace"
+
+# One radius for the whole app; theme.css uses the same 10px / 7px pair.
+baseRadius = "0.6rem"
+buttonRadius = "0.45rem"
+
+# Hairlines and links.
+borderColor = "#DDE3DF"
+linkColor = "#0E7C66"
+codeBackgroundColor = "#EEF3F0"
+codeTextColor = "#067A66"
+
+# Status colours, matched to --bad / --warn / --accent in theme.css so that
+# st.error, st.warning and st.success sit in the same family as the charts.
+redColor = "#B33218"
+orangeColor = "#B4632B"
+greenColor = "#0E7C66"
+blueColor = "#3B6E8F"
+
+# st.dataframe is drawn on a canvas, so CSS cannot touch its cells. These
+# are the only handles on it.
+dataframeBorderColor = "#DDE3DF"
+dataframeHeaderBackgroundColor = "#F3F6F4"
+
+# The sidebar is a slightly recessed rail; its widgets stay white.
+[theme.sidebar]
+backgroundColor = "#F6F8F7"
+secondaryBackgroundColor = "#FFFFFF"
+borderColor = "#DDE3DF"
+
+[client]
+# "minimal" drops Deploy and the developer menu entries for viewers.
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

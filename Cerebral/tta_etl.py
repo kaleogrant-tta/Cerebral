@@ -986,7 +986,7 @@ class Pipeline:
             self.con.execute(
                 f"DELETE FROM fact_inventory WHERE store_key = {store_key} "
                 f"AND snapshot_date = DATE '{snap}'")
-            self.con.execute("INSERT INTO fact_inventory SELECT * FROM out")
+            self.con.execute("INSERT INTO fact_inventory BY NAME SELECT * FROM out")   # source column (added by inv_ingest) stays NULL for real loads
             loaded[code] = len(out)
 
         return loaded

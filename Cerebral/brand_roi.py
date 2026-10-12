@@ -69,6 +69,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import charts
 
 # Brands below this in windowed net sales are noise: a handful of units,
 # a margin rate that swings on rounding, and no promo would ever be built
@@ -278,13 +279,8 @@ def _breakeven_curve(row: pd.Series, reach: float, depth: float,
         hovertemplate="Your plan: %{x:.0f}% off, %{y:,.0f}% more units<extra></extra>"))
 
     fig.update_layout(
-        height=340, margin=dict(l=10, r=10, t=30, b=10),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=1.14, x=0),
-        xaxis=dict(title="Discount depth", ticksuffix="%",
-                   gridcolor="rgba(0,0,0,0.07)"),
-        yaxis=dict(title="Extra units needed", ticksuffix="%",
-                   gridcolor="rgba(0,0,0,0.07)"))
+        xaxis=dict(title="Discount depth", ticksuffix="%"),
+        yaxis=dict(title="Extra units needed", ticksuffix="%"))
     return fig
 
 
@@ -455,8 +451,8 @@ def render_brand_roi(q, keys, stores, heading=None, table_exists=None,
 
     # ------------------------------------------------------------- curve
     st.markdown("### How the bar moves with depth")
-    st.plotly_chart(_breakeven_curve(row, reach, depth, lift, accent),
-                    use_container_width=True)
+    charts.show(_breakeven_curve(row, reach, depth, lift, accent),
+                key="broi_breakeven", kind="curve")
     _note(
         "The curve climbs faster than the discount does. Every point of "
         "markdown comes out of margin, so the volume needed to replace it "

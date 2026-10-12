@@ -35,6 +35,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import charts
 
 from heat import show_heat, matrix_heat
 
@@ -279,12 +280,8 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
                          color_discrete_map=TIER_COLORS,
                          labels={"atv": "Average basket", "channel": ""},
                          category_orders={"tier": TIER_ORDER})
-            fig.update_layout(height=320, margin=dict(t=10, b=10, l=0, r=0),
-                              paper_bgcolor="rgba(0,0,0,0)",
-                              plot_bgcolor="rgba(0,0,0,0)",
-                              legend_title_text="")
             fig.update_yaxes(tickprefix="$")
-            _wide(st.plotly_chart, fig, key="loy_ch")
+            charts.show(fig, key="loy_ch", kind="bar")
             thin = g[g.baskets < 30]
             if not thin.empty:
                 st.caption("Thin cells (under 30 baskets in this window) - "
@@ -398,11 +395,8 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
                   color_discrete_map=TIER_COLORS,
                   labels={"atv": "Average basket", "wk_date": ""},
                   category_orders={"tier": TIER_ORDER})
-    fig.update_layout(height=340, margin=dict(t=10, b=10, l=0, r=0),
-                      paper_bgcolor="rgba(0,0,0,0)",
-                      plot_bgcolor="rgba(0,0,0,0)", legend_title_text="")
     fig.update_yaxes(tickprefix="$")
-    _wide(st.plotly_chart, fig, key="loy_trend")
+    charts.show(fig, key="loy_trend", kind="line")
 
     # ---- enrolment --------------------------------------------------------
     if not table_exists or table_exists("dash_loyalty_enrollment"):
@@ -412,10 +406,7 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
             fig = px.bar(en, x="month", y="enrollments",
                          labels={"enrollments": "Enrolments", "month": ""})
             fig.update_traces(marker_color=TIER_COLORS["Frequent Flyer"])
-            fig.update_layout(height=280, margin=dict(t=10, b=10, l=0, r=0),
-                              paper_bgcolor="rgba(0,0,0,0)",
-                              plot_bgcolor="rgba(0,0,0,0)")
-            _wide(st.plotly_chart, fig, key="loy_enrol")
+            charts.show(fig, key="loy_enrol", kind="bar", height=charts.HEIGHTS["small"])
             st.caption(
                 "Chain-wide, from the Dutchie discount-group audit. Covers "
                 "the full audit history rather than the weeks slider.")

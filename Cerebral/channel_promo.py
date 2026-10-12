@@ -74,6 +74,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import charts
 
 DOW_ORDER = [1, 2, 3, 4, 5, 6, 7]
 DOW_NAME = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday",
@@ -256,13 +257,7 @@ def _trough_chart(dow: pd.DataFrame, stores: dict, store: int,
                       layer="below")
 
     fig.add_hline(y=100, line=dict(color="rgba(0,0,0,0.3)", dash="dot"))
-    fig.update_layout(
-        height=320, margin=dict(l=10, r=10, t=30, b=10),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=1.16, x=0),
-        yaxis=dict(title="Index vs store average",
-                   gridcolor="rgba(0,0,0,0.07)"),
-        xaxis=dict(gridcolor="rgba(0,0,0,0)"))
+    fig.update_layout(yaxis=dict(title="Index vs store average"))
     return fig
 
 
@@ -289,13 +284,8 @@ def _breakeven_curve(m_p, m_a, ratio, sigma, k, depth, lift,
         hovertemplate="Your plan: %{x:.0f}% off, "
                       "%{y:,.0f}% more<extra></extra>"))
     fig.update_layout(
-        height=330, margin=dict(l=10, r=10, t=30, b=10),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=1.15, x=0),
-        xaxis=dict(title="Discount depth", ticksuffix="%",
-                   gridcolor="rgba(0,0,0,0.07)"),
-        yaxis=dict(title="Extra volume needed", ticksuffix="%",
-                   gridcolor="rgba(0,0,0,0.07)"))
+        xaxis=dict(title="Discount depth", ticksuffix="%"),
+        yaxis=dict(title="Extra volume needed", ticksuffix="%"))
     return fig
 
 
@@ -372,8 +362,8 @@ def render_channel_promo(q, keys, stores, heading=None, table_exists=None,
         return
 
     # --------------------------------------------------- trough or peak
-    st.plotly_chart(_trough_chart(dow, stores, store, scope_days, accent),
-                    use_container_width=True)
+    charts.show(_trough_chart(dow, stores, store, scope_days, accent),
+                key="chp_trough", kind="curve")
     _note(
         f"Average net per day by weekday over the last {window} days, each "
         f"store indexed to its own average. <b>Ask this before the maths:</b> "
@@ -494,9 +484,9 @@ def render_channel_promo(q, keys, stores, heading=None, table_exists=None,
 
     # ------------------------------------------------------------- curve
     st.markdown("### How the bar moves with depth")
-    st.plotly_chart(
+    charts.show(
         _breakeven_curve(m_p, m_a, ratio, sigma, k, depth, lift, accent),
-        use_container_width=True)
+        key="chp_breakeven", kind="curve")
 
     # -------------------------------------------------- does it stick
     stick = _load_stick(q, store)

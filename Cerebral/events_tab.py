@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import charts
 
 from heat import show_heat
 from events_cost_tab import render_events_cost
@@ -324,11 +325,8 @@ from "a good day was chosen for the event."
                      error_y=(chi - off_curve["median"]).clip(lower=0),
                      error_y_minus=(off_curve["median"] - clo).clip(lower=0),
                      labels={"median": "Median lift", "off": "Days from event"})
-        fig.update_traces(marker_color="#00FFD4")
-        fig.update_layout(height=300, margin=dict(t=10, b=10, l=0, r=0),
-                          paper_bgcolor="rgba(0,0,0,0)",
-                          plot_bgcolor="rgba(0,0,0,0)")
-        fig.update_yaxes(tickformat=".0%")
+        fig.update_traces(marker_color=charts.color("accent"))
+        fig.update_yaxes(tickformat=charts.fmt_pct())
         st.caption(
             "**Why this chart matters most.** A real effect should appear on "
             "the day and not before it. An event on Thursday cannot raise "
@@ -338,7 +336,7 @@ from "a good day was chosen for the event."
             "shoulders either side is the signature of a genuine effect. Day "
             "+1 staying somewhat raised is normal: people who discovered you "
             "at an event come back.")
-        _wide(st.plotly_chart, fig, key="ev_offset")
+        charts.show(fig, key="ev_offset", kind="bar")
 
     st.divider()
 

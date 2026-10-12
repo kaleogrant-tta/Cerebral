@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
+import charts
 import streamlit as st
 
 MIN_COVERAGE = 0.90
@@ -166,13 +167,11 @@ def render_bei(*, q, keys, stores, heading, table_exists,
                     "<extra></extra>"),
                 showlegend=False))
             fig.update_layout(
-                height=460, margin=dict(l=10, r=10, t=10, b=10),
                 xaxis=dict(title="share of category inventory (at cost)",
-                           tickformat=".0%", range=[0, hi]),
+                           tickformat=charts.fmt_pct(), range=[0, hi]),
                 yaxis=dict(title="share of category sales",
-                           tickformat=".0%", range=[0, hi]),
-                plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True)
+                           tickformat=charts.fmt_pct(), range=[0, hi]))
+            charts.show(fig, key="bei_scatter", kind="scatter")
             st.caption("Dot size is net sales. Colour is the index itself — "
                        "red below break-even, green above.")
 

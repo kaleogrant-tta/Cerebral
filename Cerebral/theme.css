@@ -78,7 +78,7 @@
 
   /* Layout */
   --max-width:     1500px;
-  --pad-top:       2.2rem;
+  --pad-top:       3.8rem;   /* clears the fixed header strip */
 
   /* --- everything below is CSS-only: not read by Python ------------------ */
 
@@ -120,13 +120,41 @@
   --dur-enter: 260ms;
   --radius:    10px;
   --radius-sm: 7px;
+  --radius-lg: 14px;
+
+  /* Type scale (rem). One place to tune every heading and label size. */
+  --fs-h1:      2.2rem;
+  --fs-h2:      1.5rem;
+  --fs-h3:      1.2rem;
+  --fs-h4:      1.02rem;
+  --fs-body:    .94rem;
+  --fs-small:   .84rem;
+  --fs-micro:   .72rem;
+
+  /* Spacing rhythm: gaps between blocks, always from this ladder. */
+  --space-1:    .35rem;
+  --space-2:    .65rem;
+  --space-3:    1rem;
+  --space-4:    1.6rem;
+  --space-5:    2.4rem;
+
+  /* Chrome */
+  --rail-width: 17.5rem;
+  --nav-tray:   #EEF2EF;   /* background of the tab strip                   */
 }
 
-/* --- page ---------------------------------------------------------------- */
+/* ==========================================================================
+   1. PAGE
+   Base ground, page padding, and the Streamlit chrome we hide: the Deploy
+   button, the three-dot menu and the footer all read as "unfinished
+   prototype" to someone opening a shared link. config.toml also sets
+   toolbarMode to minimal; these rules are the belt to that pair of braces.
+   ========================================================================== */
 
 .block-container,
 [data-testid="stMainBlockContainer"] {
   padding-top: var(--pad-top);
+  padding-bottom: var(--space-5);
   max-width: var(--max-width);
 }
 
@@ -134,29 +162,86 @@
   background: var(--ground);
 }
 
+/* The header strip stays (the sidebar re-open button lives in it) but it
+   is opaque and slim. Opaque on purpose: a blurred translucent header smears
+   charts behind it on every redraw. */
 [data-testid="stHeader"] {
-  /* Opaque, no blur. A transparent blurred header smears charts behind it
-     every time Streamlit redraws the page. */
   background: var(--ground);
+  height: 2.6rem;
+  border-bottom: 0;
+}
+
+[data-testid="stToolbarActions"],
+[data-testid="stAppDeployButton"],
+[data-testid="stMainMenu"],
+[data-testid="stStatusWidget"],
+[data-testid="stDecoration"],
+#MainMenu,
+footer,
+[data-testid="stFooter"] {
+  display: none !important;
+}
+
+/* Make the re-open-sidebar button look like part of the rail. */
+[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarCollapseButton"] button {
+  border-radius: var(--radius-sm);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+[data-testid="stExpandSidebarButton"]:hover,
+[data-testid="stSidebarCollapseButton"] button:hover {
+  background: var(--signal-wash);
 }
 
 body, .stMarkdown, [data-testid="stAppViewContainer"] {
   font-family: var(--font-body);
+  font-size: var(--fs-body);
   color: var(--body);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
 
-h1, h2, h3, h4, h5 {
-  font-family: var(--font-display);
-  color: var(--ink);
-  letter-spacing: -0.021em;
-  font-weight: 600;
+/* Body copy: comfortable measure so paragraphs never run edge to edge. */
+[data-testid="stMarkdownContainer"] p {
+  line-height: 1.58;
 }
 
-h1 {
-  font-size: 2.35rem;
+[data-testid="stMarkdownContainer"] a {
+  color: var(--accent);
+  text-decoration-color: rgba(14, 124, 102, .35);
+  text-underline-offset: 2px;
+  transition: text-decoration-color var(--dur) var(--ease);
+}
+
+[data-testid="stMarkdownContainer"] a:hover { text-decoration-color: var(--accent); }
+
+::selection { background: var(--signal-glow); color: var(--ink); }
+
+/* ==========================================================================
+   2. TYPOGRAPHY
+   Scale: h1 2.2 / h2 1.5 / h3 1.2 / h4 1.02 / body .94 / small .84 / micro
+   .72 rem. Headings use the display face with tight tracking; everything
+   else is the body face. Spacing comes from the --space ladder: more room
+   above a heading than below, so it reads as belonging to what follows.
+   ========================================================================== */
+
+h1, h2, h3, h4, h5,
+[data-testid="stHeading"] h1,
+[data-testid="stHeading"] h2,
+[data-testid="stHeading"] h3,
+[data-testid="stHeading"] h4,
+[data-testid="stHeading"] h5 {
+  font-family: var(--font-display);
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: -0.021em;
+  line-height: 1.2;
+}
+
+h1, [data-testid="stHeading"] h1 {
+  font-size: var(--fs-h1);
   font-weight: 700;
   letter-spacing: -0.035em;
   margin-bottom: .1rem;
@@ -170,43 +255,193 @@ h1 {
   -webkit-text-fill-color: transparent;
 }
 
-h4 { font-size: 1.13rem; margin-top: .35rem; }
-h5 { font-size: .96rem; color: var(--body); letter-spacing: -.01em; }
+[data-testid="stHeading"] h2 {
+  font-size: var(--fs-h2);
+  padding: var(--space-3) 0 var(--space-1);
+}
 
-[data-testid="stCaptionContainer"] {
-  font-family: var(--font-data);
-  font-size: .74rem;
-  letter-spacing: .045em;
-  text-transform: uppercase;
+[data-testid="stHeading"] h3 {
+  font-size: var(--fs-h3);
+  padding: var(--space-2) 0 var(--space-1);
+}
+
+[data-testid="stHeading"] h4,
+h4 {
+  font-size: var(--fs-h4);
+  padding: var(--space-2) 0 .2rem;
+  margin-top: 0;
+}
+
+h5, [data-testid="stHeading"] h5 {
+  font-size: var(--fs-body);
+  color: var(--body);
+  letter-spacing: -.01em;
+}
+
+/* Captions: sentence case in the body face. Quiet, but readable. */
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p {
+  font-family: var(--font-body);
+  font-size: var(--fs-small);
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--muted);
+  line-height: 1.45;
 }
 
 hr, [data-testid="stDivider"] hr {
   border: none;
   height: 1px;
   background: linear-gradient(90deg, var(--hairline), var(--hairline-soft) 72%, transparent);
-  margin: 1.5rem 0 1.1rem;
+  margin: var(--space-4) 0 var(--space-3);
 }
 
-/* --- entrance ------------------------------------------------------------
-   Kept deliberately fast and shallow. This replays on every re-run, so it
-   has to read as a settle, not a performance. Six steps, then nothing. */
+code, [data-testid="stMarkdownContainer"] code {
+  font-family: var(--font-data);
+  font-size: .85em;
+  border-radius: 5px;
+}
+
+/* ==========================================================================
+   3. MOTION
+   One system. 120ms for press feedback, 200ms for hover and colour, 260ms
+   for things that appear. Streamlit re-runs the script on every widget
+   change, so entrances are attached only to things that MOUNT or become
+   visible (a tab panel being shown, a popover opening). Elements that merely
+   update in place keep their DOM node and do not replay anything.
+   ========================================================================== */
 
 @keyframes rise {
   from { opacity: 0; transform: translate3d(0, 6px, 0); }
   to   { opacity: 1; transform: none; }
 }
 
-/* Entrance animation intentionally NOT applied to page elements. Streamlit
-   re-runs the whole script on every widget change, so a global animation
-   replays constantly and reads as flicker, not polish. The rise keyframes
-   stay: dropdown popovers and the wordmark still use them, once each. */
+@keyframes fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* A tab panel fades and settles each time it is shown. Hidden panels are
+   display:none, so the animation restarts on every tab change and only then. */
+[data-testid="stTabPanel"] {
+  animation: rise var(--dur-enter) var(--ease-out) both;
+}
+
+/* First paint of the whole page. Plays once per page load. */
+[data-testid="stMainBlockContainer"] {
+  animation: fade var(--dur-enter) var(--ease) both;
+}
+
+/* Streamlit dims stale elements while a rerun is in flight. Ease it. */
+[data-stale="true"] {
+  transition: opacity var(--dur) var(--ease);
+}
+
+/* ==========================================================================
+   4. SIDEBAR - the app rail
+   A recessed column with a hairline edge, a brand mark on top, and small
+   quiet labels so the controls read as a toolbar, not a form.
+   ========================================================================== */
+
+[data-testid="stSidebar"] {
+  background: #F6F8F7;
+  border-right: 1px solid var(--hairline-soft);
+  min-width: 15rem;
+  transition: box-shadow var(--dur) var(--ease);
+}
+
+[data-testid="stSidebarContent"] {
+  padding-bottom: var(--space-4);
+}
+
+[data-testid="stSidebarUserContent"] {
+  padding: .4rem 1.2rem 1.2rem;
+}
+
+/* Brand mark: the sidebar title with a small accent chip in front of it. */
+[data-testid="stSidebar"] h3 {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  font-size: 1.28rem;
+  letter-spacing: -.03em;
+  padding: .1rem 0 var(--space-2);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--hairline-soft);
+}
+
+[data-testid="stSidebar"] h3::before {
+  content: "";
+  flex: none;
+  width: .7rem;
+  height: .7rem;
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--accent), var(--signal));
+  box-shadow: 0 0 0 3px var(--signal-wash);
+}
+
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--muted);
+}
+
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+}
+
+[data-testid="stSidebar"] hr,
+[data-testid="stSidebar"] [data-testid="stDivider"] hr {
+  margin: var(--space-3) 0;
+}
+
+/* "Data as of" line and the refresh button at the foot of the rail. */
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p strong {
+  font-family: var(--font-display);
+  font-size: .95rem;
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+
+[data-testid="stSidebar"] [data-testid="stButton"] button,
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
+  width: 100%;
+  justify-content: center;
+}
+
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] [data-testid="stIconMaterial"] {
+  transition: transform 400ms var(--ease-out);
+}
+
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover [data-testid="stIconMaterial"] {
+  transform: rotate(180deg);
+}
+
+[data-testid="stSidebarResizeHandle"] {
+  transition: background var(--dur) var(--ease);
+}
+
+[data-testid="stSidebarResizeHandle"]:hover { background: var(--signal-glow); }
+
+/* ==========================================================================
+   5. CARDS AND CONTAINERS
+   One card recipe: white, hairline, soft shadow, 10px corners. It is applied
+   to metrics, charts, tables, expanders and alerts individually.
+   ========================================================================== */
+
+/* Note: the app does not use st.container(border=True), and Streamlit draws
+   plain containers, fragments and bordered containers with the same test id,
+   so there is deliberately NO rule on stLayoutWrapper or stVerticalBlock here.
+   An earlier version had one and it put shadows on every fragment. If a
+   bordered container is added later, give it its own wrapper in Python. */
 
 /* --- metrics: the departures board ---------------------------------------
    The one place this dashboard spends its boldness. Tiers are First,
    Business and Economy; the loyalty programme issues boarding passes. So
    the headline numbers are set like a departures board: mono, tabular,
-   tight. The tabular figures are not decoration — they make columns of
+   tight. The tabular figures are not decoration, they make columns of
    numbers align, which is the single biggest legibility win on the page. */
 
 [data-testid="stMetric"] {
@@ -214,6 +449,7 @@ hr, [data-testid="stDivider"] hr {
   border: 1px solid var(--hairline);
   border-radius: var(--radius);
   padding: .85rem 1rem .8rem;
+  min-height: 6.6rem;   /* cards in one row stay the same height */
   box-shadow: var(--lift-1);
   position: relative;
   overflow: hidden;
@@ -222,7 +458,12 @@ hr, [data-testid="stDivider"] hr {
               border-color var(--dur) var(--ease);
 }
 
-/* Aqua rule across the top, drawn on hover only. */
+/* Metrics side by side stretch to the tallest one in the row. */
+[data-testid="stColumn"]:has([data-testid="stMetric"]) > [data-testid="stVerticalBlock"] { height: 100%; }
+[data-testid="stElementContainer"]:has(> [data-testid="stMetric"]) { flex: 1 1 auto; }
+[data-testid="stElementContainer"] > [data-testid="stMetric"] { height: 100%; box-sizing: border-box; }
+
+/* Accent rule across the top, drawn on hover only. */
 [data-testid="stMetric"]::after {
   content: "";
   position: absolute;
@@ -263,6 +504,13 @@ hr, [data-testid="stDivider"] hr {
 
 [data-testid="stMetricLabel"] p { font-family: var(--font-body); }
 
+/* Long labels wrap instead of ending in an ellipsis. */
+[data-testid="stMetricLabel"] p,
+[data-testid="stMetricLabel"] div {
+  white-space: normal;
+  text-overflow: clip;
+}
+
 [data-testid="stMetricDelta"] {
   font-family: var(--font-data);
   font-size: .78rem;
@@ -270,49 +518,166 @@ hr, [data-testid="stDivider"] hr {
   font-variant-numeric: tabular-nums;
 }
 
-/* --- tabs ----------------------------------------------------------------
-   Not sticky: a sticky, blurred tab strip overlaps charts and axis labels
-     while scrolling on Streamlit's redraw cycle. Plain and solid instead. */
+/* --- expanders ------------------------------------------------------------ */
 
-.stTabs [data-baseweb="tab-list"] {
-  gap: .15rem;
-  border-bottom: 1px solid var(--hairline);
-  background: var(--ground);
-  padding-bottom: 0;
+[data-testid="stExpander"] {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--lift-1);
+  overflow: hidden;
 }
 
-.stTabs [data-baseweb="tab"] {
-  padding: .55rem 1.05rem;
+[data-testid="stExpander"] summary {
   font-family: var(--font-body);
   font-weight: 500;
-  font-size: .89rem;
-  color: var(--muted);
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  transition: color var(--dur) var(--ease),
-              background var(--dur) var(--ease);
+  padding: .7rem 1rem;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 
-.stTabs [data-baseweb="tab"]:hover {
-  color: var(--ink);
+[data-testid="stExpander"] summary:hover {
   background: var(--signal-wash);
+  color: var(--ink);
 }
 
-.stTabs [aria-selected="true"] {
+/* The chevron turns rather than snaps. */
+[data-testid="stExpander"] summary [data-testid="stIconMaterial"] {
+  transition: transform var(--dur) var(--ease);
+}
+
+[data-testid="stExpander"] details[open] > summary [data-testid="stIconMaterial"] {
+  transform: rotate(90deg);
+}
+
+[data-testid="stExpanderDetails"] {
+  animation: fade var(--dur) var(--ease) both;
+}
+
+/* ==========================================================================
+   6. TABS - the main navigation
+   17 tabs do not fit on one line, so the strip wraps into a tray of pills
+   instead of hiding half of them behind a scroll arrow. The active tab is a
+   raised white pill. On phones the tray goes back to a single scrolling row.
+   Streamlit 1.65 builds tabs with react-aria: tabs are data-testid=stTab
+   inside role=tablist, and the moving underline is a child of the active
+   tab, which we hide because the pill replaces it.
+   ========================================================================== */
+
+[data-testid="stTabs"] [role="tablist"] {
+  flex-wrap: wrap;
+  gap: .2rem;
+  padding: .3rem;
+  background: var(--nav-tray);
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--radius-lg);
+  overflow: visible;
+  margin-bottom: var(--space-2);
+}
+
+[data-testid="stTab"] {
+  height: auto;
+  padding: .45rem .85rem;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-weight: 500;
+  color: var(--muted);
+  transition: color var(--dur) var(--ease),
+              background var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
+}
+
+[data-testid="stTab"] p,
+[data-testid="stTab"] [data-testid="stMarkdownContainer"] {
+  font-size: var(--fs-small);
+  font-weight: inherit;
+  color: inherit;
+  white-space: nowrap;
+}
+
+[data-testid="stTab"]:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, .7);
+}
+
+[data-testid="stTab"][aria-selected="true"] {
   color: var(--accent);
   font-weight: 600;
+  background: var(--surface);
+  box-shadow: var(--lift-1), 0 0 0 1px var(--hairline-soft);
 }
 
-.stTabs [data-baseweb="tab-highlight"] {
-  background: linear-gradient(90deg, var(--accent), var(--signal-ink));
-  height: 2.5px;
-  border-radius: 2px;
-  transition: all var(--dur) var(--ease-out);
+[data-testid="stTab"] .react-aria-SelectionIndicator { display: none; }
+
+/* Wrapping means nothing overflows, so the scroll arrows are never needed. */
+[data-testid="stTabsScrollLeft"],
+[data-testid="stTabsScrollRight"] { display: none; }
+
+/* --- section strip: st.pills, the primary navigation ---------------------
+   The strip is a role=radiogroup of buttons (data-variant=pills). It sits in
+   a tray, wraps onto a second line when it must, and the selected pill is a
+   solid accent with a lift, so you can always see where you are. The :has()
+   guard keeps this off any other button group the app may add. */
+
+[data-testid="stButtonGroup"]:has(button[data-variant="pills"]) [role="radiogroup"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+  padding: .35rem;
+  background: var(--nav-tray);
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--radius-lg);
 }
 
-.stTabs [data-baseweb="tab-border"] { background: transparent; }
+button[data-variant="pills"] {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: .3rem .85rem;
+  transition: color var(--dur) var(--ease),
+              background var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease),
+              transform var(--dur-fast) var(--ease);
+}
 
-/* --- charts --------------------------------------------------------------
-   Plotly draws on a transparent canvas; the card around it is CSS. */
+button[data-variant="pills"] p {
+  font-size: var(--fs-small);
+  font-weight: 500;
+  white-space: nowrap;
+  color: inherit;
+}
+
+button[data-variant="pills"]:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, .8);
+}
+
+button[data-variant="pills"]:active { transform: scale(.97); }
+
+[data-testid="stButtonGroup"] button[data-variant="pills"][aria-checked="true"] {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #FFFFFF !important;
+  box-shadow: var(--lift-2);
+}
+
+button[data-variant="pills"][aria-checked="true"] p { font-weight: 600; }
+
+/* On phones the strip becomes one swipeable row. */
+@media (max-width: 820px) {
+  [data-testid="stButtonGroup"]:has(button[data-variant="pills"]) [role="radiogroup"] {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  [data-testid="stButtonGroup"]:has(button[data-variant="pills"]) [role="radiogroup"]::-webkit-scrollbar { display: none; }
+  button[data-variant="pills"] { flex: none; }
+}
+
+/* ==========================================================================
+   7. CHARTS
+   Plotly draws on a transparent canvas; the card around it is CSS.
+   ========================================================================== */
 
 .stPlotlyChart,
 [data-testid="stPlotlyChart"] {
@@ -320,17 +685,12 @@ hr, [data-testid="stDivider"] hr {
   border: 1px solid var(--hairline);
   border-radius: var(--radius);
   box-shadow: var(--lift-1);
-  transition: box-shadow var(--dur) var(--ease);
-  /* No padding, no overflow:hidden — padding shrinks the plotting area and
-     overflow clips legend labels and the toolbar at the card edges. Charts
-     get the full width of the card, always. */
+  /* No padding and no overflow:hidden. Streamlit gives the chart a fixed
+     height, so padding would push the bottom of the plot out of its frame,
+     and clipping would cut legends and the toolbar at the card edges. */
 }
 
-.stPlotlyChart:hover,
-[data-testid="stPlotlyChart"]:hover { box-shadow: var(--lift-2); }
-
-/* Plotly's own hover card, restyled to match the page rather than the
-   default white box with a blue border. */
+/* Plotly's own hover card, restyled to match the page. */
 .hoverlayer .hovertext path,
 .hoverlayer .hovertext rect {
   fill: var(--surface) !important;
@@ -344,25 +704,27 @@ hr, [data-testid="stDivider"] hr {
   fill: var(--ink) !important;
 }
 
-/* Chart controls always visible — hiding them until hover made zoom,
-   pan and "download as PNG" effectively unreachable. */
+/* Chart controls always visible; hiding them until hover made zoom, pan
+   and download effectively unreachable. */
 .js-plotly-plot .modebar { opacity: .92; }
 
 .js-plotly-plot .modebar-btn path { fill: var(--muted); }
 .js-plotly-plot .modebar-btn:hover path { fill: var(--accent); }
 
-/* Plotly annotation labels — e.g. the volume callout on "Channel mix by
-   week". A dark label box with dark text renders as a solid black
-   rectangle; force a light label box so the dark text is readable. */
+/* Plotly annotation labels. A dark label box with dark text renders as a
+   solid black rectangle; force a light box so the dark text is readable. */
 .annotation .bg {
   fill: var(--surface) !important;
   fill-opacity: .95 !important;
   stroke: var(--hairline) !important;
 }
 
-/* --- tables --------------------------------------------------------------
-   The brand scorecard and SKU drill-down are read column-by-column, so
-   numerals go tabular here too. */
+/* ==========================================================================
+   8. TABLES
+   st.dataframe draws its cells on a canvas, so fonts, header colour and
+   gridlines come from config.toml (dataframe* options). CSS only frames it.
+   st.table and markdown tables are real HTML and are styled in full.
+   ========================================================================== */
 
 [data-testid="stDataFrame"],
 [data-testid="stTable"] {
@@ -370,29 +732,42 @@ hr, [data-testid="stDivider"] hr {
   border: 1px solid var(--hairline);
   box-shadow: var(--lift-1);
   overflow: hidden;
-  transition: box-shadow var(--dur) var(--ease);
 }
 
-[data-testid="stDataFrame"]:hover { box-shadow: var(--lift-2); }
-
-[data-testid="stDataFrame"] [role="gridcell"],
-[data-testid="stDataFrame"] .cell {
-  font-family: var(--font-data);
+[data-testid="stTable"] table,
+[data-testid="stMarkdownContainer"] table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--fs-small);
   font-variant-numeric: tabular-nums;
-  font-size: .82rem;
 }
 
-[data-testid="stDataFrame"] [role="columnheader"] {
-  background: var(--surface-2) !important;
-  font-family: var(--font-body);
-  font-size: .72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: .05em;
+[data-testid="stTable"] th,
+[data-testid="stMarkdownContainer"] th {
+  background: var(--surface-2);
   color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-align: left;
+  padding: .55rem .8rem;
+  border-bottom: 1px solid var(--hairline);
 }
 
-/* --- alerts -------------------------------------------------------------- */
+[data-testid="stTable"] td,
+[data-testid="stMarkdownContainer"] td {
+  padding: .5rem .8rem;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+
+[data-testid="stTable"] tbody tr:hover td,
+[data-testid="stMarkdownContainer"] tbody tr:hover td {
+  background: var(--signal-wash);
+}
+
+/* ==========================================================================
+   9. ALERTS AND CALLOUTS
+   ========================================================================== */
 
 .alert {
   border-left: 3px solid;
@@ -423,11 +798,17 @@ hr, [data-testid="stDivider"] hr {
   font-size: .88rem;
 }
 
-/* --- explanatory text ---------------------------------------------------- */
+/* Error, warning and success boxes get a coloured edge, so the no-data
+   screen reads as a clear status rather than a pink slab. */
+[data-testid="stAlert"] { border-left-width: 3px; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentError"])   { border-left-color: var(--bad); }
+[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) { border-left-color: var(--warn); }
+[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) { border-left-color: var(--accent); }
+[data-testid="stAlert"]:has([data-testid="stAlertContentInfo"])    { border-left-color: var(--series-3); }
 
 .note {
   color: var(--muted);
-  font-size: .82rem;
+  font-size: var(--fs-small);
   line-height: 1.5;
 }
 
@@ -454,136 +835,162 @@ hr, [data-testid="stDivider"] hr {
 
 .howto i { color: var(--signal-ink); font-style: italic; }
 
-/* --- controls ------------------------------------------------------------ */
+/* ==========================================================================
+   10. CONTROLS
+   Streamlit 1.65 widgets are built on react-aria, not BaseWeb: a select is
+   a role=group wrapper around an input, tags are [data-tag] spans, and the
+   open menu is a data-testid ending in VirtualDropdown. Selectors below
+   are written against that.
+   ========================================================================== */
 
-[data-baseweb="select"] > div {
-  border-radius: var(--radius-sm) !important;
-  border-color: var(--hairline) !important;
-  background: var(--surface) !important;
-  box-shadow: var(--lift-1);
+/* Select, multiselect: the framed wrapper around the input. */
+[data-testid="stSelectbox"] [role="group"],
+[data-testid="stMultiSelect"] [role="group"] {
+  border-radius: var(--radius-sm);
+  border-color: var(--hairline);
   transition: border-color var(--dur) var(--ease),
               box-shadow var(--dur) var(--ease);
 }
 
-[data-baseweb="select"] > div:hover {
-  border-color: var(--accent) !important;
-  box-shadow: var(--lift-2);
+[data-testid="stSelectbox"] [role="group"]:hover,
+[data-testid="stMultiSelect"] [role="group"]:hover {
+  border-color: var(--accent);
 }
 
-[data-baseweb="select"] > div:focus-within {
-  border-color: var(--accent) !important;
+[data-testid="stSelectbox"] [role="group"]:focus-within,
+[data-testid="stMultiSelect"] [role="group"]:focus-within {
+  border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--signal-glow);
 }
 
-/* Dropdown menus, tooltips and every other floating layer. These are the
-   "sloppy overlays": unstyled, they render as a hard white rectangle with a
-   grey border and no elevation, sitting flat on a cream page. */
-[data-baseweb="popover"] [role="listbox"],
-[data-baseweb="popover"] > div,
-[data-baseweb="menu"] {
-  background: var(--surface) !important;
-  border: 1px solid var(--hairline) !important;
-  border-radius: var(--radius) !important;
-  box-shadow: var(--lift-4) !important;
-  overflow: hidden;
+/* The wrapper nests a second role=group around the input; only the outer
+   one gets a frame, otherwise the focus ring draws a seam in the middle. */
+[data-testid="stSelectbox"] [role="group"] [role="group"],
+[data-testid="stMultiSelect"] [role="group"] [role="group"] {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* Selected values in a multiselect: soft green chips, not solid blocks. */
+[data-testid="stMultiSelect"] [data-tag] {
+  background: var(--tint-band);
+  color: var(--signal-ink);
+  border-radius: 6px;
+  font-weight: 500;
+  transition: background var(--dur) var(--ease);
+}
+
+[data-testid="stMultiSelect"] [data-tag]:hover { background: var(--signal-glow); }
+
+/* Open menus and tooltips: elevated, rounded, quick to appear. */
+[data-testid$="VirtualDropdown"],
+[data-testid="stSelectboxVirtualDropdown"] [role="listbox"],
+[data-testid="stTooltipContent"] {
+  border-radius: var(--radius);
+  box-shadow: var(--lift-4);
   animation: rise 140ms var(--ease-out) both;
 }
 
-[data-baseweb="menu"] li {
+[role="listbox"] [role="option"] {
   font-family: var(--font-body);
-  font-size: .87rem;
+  font-size: var(--fs-small);
   transition: background var(--dur-fast) var(--ease);
 }
 
-[data-baseweb="menu"] li:hover { background: var(--signal-wash) !important; }
+[role="listbox"] [role="option"]:hover,
+[role="listbox"] [role="option"][data-focused="true"] { background: var(--signal-wash); }
 
-[data-baseweb="tooltip"] {
-  background: var(--ink) !important;
-  color: var(--ground) !important;
-  border-radius: var(--radius-sm) !important;
-  box-shadow: var(--lift-3) !important;
-  font-family: var(--font-body) !important;
-  font-size: .8rem !important;
-  line-height: 1.45 !important;
-  padding: .5rem .7rem !important;
-  max-width: 320px;
-  border: none !important;
-}
-
-[data-baseweb="tooltip"] div { background: transparent !important; }
-
-/* Sliders */
-[data-testid="stSlider"] [role="slider"] {
-  box-shadow: var(--lift-2), 0 0 0 0 var(--signal-glow);
-  transition: box-shadow var(--dur) var(--ease),
-              transform var(--dur) var(--ease);
-}
-
-[data-testid="stSlider"] [role="slider"]:hover { transform: scale(1.12); }
-
-[data-testid="stSlider"] [role="slider"]:focus-visible {
-  box-shadow: var(--lift-2), 0 0 0 5px var(--signal-glow);
-  outline: none;
-}
-
-/* Buttons */
-.stButton > button,
-[data-testid="stDownloadButton"] > button {
+/* Buttons. Secondary is the default; primary is the one call to action. */
+[data-testid="stBaseButton-secondary"],
+[data-testid="stBaseButton-primary"] {
   border-radius: var(--radius-sm);
-  border: 1px solid var(--hairline);
-  background: var(--surface);
-  color: var(--ink);
   font-family: var(--font-body);
   font-weight: 500;
   font-size: .87rem;
-  box-shadow: var(--lift-1);
   transition: transform var(--dur-fast) var(--ease),
               box-shadow var(--dur) var(--ease),
               border-color var(--dur) var(--ease),
-              background var(--dur) var(--ease);
+              background var(--dur) var(--ease),
+              color var(--dur) var(--ease);
 }
 
-.stButton > button:hover,
-[data-testid="stDownloadButton"] > button:hover {
+[data-testid="stBaseButton-secondary"] {
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--lift-1);
+}
+
+[data-testid="stBaseButton-secondary"]:hover {
   border-color: var(--accent);
   background: var(--tint);
+  color: var(--accent);
   box-shadow: var(--lift-2);
   transform: translateY(-1px);
 }
 
-.stButton > button:active,
-[data-testid="stDownloadButton"] > button:active {
+[data-testid="stBaseButton-primary"]:hover {
+  box-shadow: var(--lift-2);
+  transform: translateY(-1px);
+}
+
+[data-testid="stBaseButton-secondary"]:active,
+[data-testid="stBaseButton-primary"]:active {
   transform: translateY(0);
   box-shadow: var(--lift-1);
 }
 
-/* Text inputs — the password gate is the first thing anyone sees. */
-[data-testid="stTextInput"] input {
+/* Text inputs: the framed wrapper takes the focus ring. */
+[data-testid="stTextInputRootElement"],
+[data-testid="stNumberInputContainer"] {
   border-radius: var(--radius-sm);
-  font-family: var(--font-body);
-  transition: box-shadow var(--dur) var(--ease);
+  transition: border-color var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
 }
 
-[data-testid="stTextInput"] input:focus {
+[data-testid="stTextInputRootElement"]:hover { border-color: var(--rule); }
+
+[data-testid="stTextInputRootElement"]:focus-within,
+[data-testid="stNumberInputContainer"]:focus-within {
+  border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--signal-glow);
-  border-color: var(--accent) !important;
 }
 
-/* Expanders */
-[data-testid="stExpander"] {
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius);
+[data-testid="stTextInputRootElement"] input { font-family: var(--font-body); }
+
+/* ==========================================================================
+   11. PASSWORD GATE
+   The gate is the only screen with a password field and no data. :has()
+   lets us spot it from CSS: when a password input is on the page, the
+   column that holds it becomes a raised sign-in card and the page drops
+   down to sit near the optical centre. Once the right password is entered
+   the field is gone and none of this applies, so the dashboard is untouched.
+   The app lays the gate out in columns, so the card is the column, not the
+   whole page.
+   ========================================================================== */
+
+[data-testid="stMainBlockContainer"]:has(input[type="password"]) {
+  padding-top: 14vh;
+}
+
+[data-testid="stColumn"]:has(input[type="password"]) > [data-testid="stVerticalBlock"] {
   background: var(--surface);
-  box-shadow: var(--lift-1);
-  overflow: hidden;
-  transition: box-shadow var(--dur) var(--ease);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-3);
+  padding: 1.8rem 1.8rem 2rem;
+  gap: .7rem;
 }
 
-[data-testid="stExpander"]:hover { box-shadow: var(--lift-2); }
+[data-testid="stMainBlockContainer"]:has(input[type="password"]) h3 {
+  font-size: 1.7rem;
+  letter-spacing: -.035em;
+  padding: 0;
+}
 
-[data-testid="stExpander"] summary { font-family: var(--font-body); font-weight: 500; }
-
-/* --- glossary hover markers ---------------------------------------------- */
+/* ==========================================================================
+   12. GLOSSARY HOVER MARKERS AND ENTRIES
+   ========================================================================== */
 
 .gloss {
   border-bottom: 1px dotted var(--rule);
@@ -607,8 +1014,6 @@ hr, [data-testid="stDivider"] hr {
   font-family: var(--font-data);
 }
 
-/* --- glossary entries ---------------------------------------------------- */
-
 .gloss-entry {
   margin: .1rem 0 .9rem 0;
   padding-left: .85rem;
@@ -629,6 +1034,10 @@ hr, [data-testid="stDivider"] hr {
   font-size: .9rem;
   line-height: 1.58;
 }
+
+/* ==========================================================================
+   13. TITLE WORDMARK
+   ========================================================================== */
 
 /* --- title wordmark: holographic foil ------------------------------------
    The effect is on the word, not a card behind it. That constraint drives
@@ -779,7 +1188,10 @@ h1.holo-title:hover::after {
   h1.holo-title { font-size: 2.15rem; }
 }
 
-/* --- scrollbar ----------------------------------------------------------- */
+
+/* ==========================================================================
+   14. SCROLLBAR, FOCUS AND RESPONSIVE FLOOR
+   ========================================================================== */
 
 ::-webkit-scrollbar { width: 11px; height: 11px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -793,8 +1205,6 @@ h1.holo-title:hover::after {
 
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
-/* --- quality floor ------------------------------------------------------- */
-
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -803,20 +1213,40 @@ h1.holo-title:hover::after {
 
 @media (max-width: 820px) {
   :root { --pad-top: 1.2rem; }
-  h1 { font-size: 1.85rem; }
+  h1, [data-testid="stHeading"] h1 { font-size: 1.85rem; }
+  [data-testid="stHeading"] h2 { font-size: 1.3rem; }
   [data-testid="stMetricValue"] { font-size: 1.32rem; }
-  .stTabs [data-baseweb="tab"] { padding: .5rem .7rem; font-size: .82rem; }
-  .stTabs [data-baseweb="tab-list"] { position: static; }
+  [data-testid="stMetric"] { min-height: 0; }
+
+  /* Tabs go back to one swipeable row, with the scrollbar hidden. */
+  [data-testid="stTabs"] [role="tablist"] {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  [data-testid="stTabs"] [role="tablist"]::-webkit-scrollbar { display: none; }
+  [data-testid="stTab"] { padding: .45rem .7rem; flex: none; }
+
+  [data-testid="stMainBlockContainer"]:has(input[type="password"]) { padding-top: 6vh; }
 }
+
+/* ==========================================================================
+   15. REDUCED MOTION
+   Anyone who asks their system for less motion gets none: no entrances, no
+   lifts, no sweeping highlights. State changes still happen, just instantly.
+   ========================================================================== */
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 1ms !important;
     animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
   }
   [data-testid="stMetric"]:hover,
-  .stButton > button:hover { transform: none; }
+  [data-testid="stBaseButton-secondary"]:hover,
+  [data-testid="stBaseButton-primary"]:hover { transform: none; }
   /* The wordmark keeps its foil, it just holds one fixed refraction rather
      than drifting, and the hover glimmer does not sweep. */
   h1.holo-title,

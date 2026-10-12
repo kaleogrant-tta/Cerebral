@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import charts
 
 from heat import show_heat, matrix_heat
 
@@ -332,12 +333,8 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
                          labels={"survival": "Share reaching this basket",
                                  "seq_label": ""},
                          category_orders={"first_channel": CHANNEL_ORDER})
-            fig.update_layout(height=320, margin=dict(t=10, b=10, l=0, r=0),
-                              paper_bgcolor="rgba(0,0,0,0)",
-                              plot_bgcolor="rgba(0,0,0,0)",
-                              legend_title_text="")
-            fig.update_yaxes(tickformat=".0%")
-            _wide(st.plotly_chart, fig, key="ret_seq")
+            fig.update_yaxes(tickformat=charts.fmt_pct())
+            charts.show(fig, key="ret_seq", kind="bar")
 
             st.caption(
                 "The drop from basket 1 to basket 2 is the single biggest "
@@ -384,14 +381,9 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
                               labels={ycol: metric, "month": ""},
                               category_orders={"first_channel":
                                                CHANNEL_ORDER})
-                fig.update_layout(height=340,
-                                  margin=dict(t=10, b=10, l=0, r=0),
-                                  paper_bgcolor="rgba(0,0,0,0)",
-                                  plot_bgcolor="rgba(0,0,0,0)",
-                                  legend_title_text="")
                 if ycol == "repeat_rate":
-                    fig.update_yaxes(tickformat=".0%")
-                _wide(st.plotly_chart, fig, key="ret_rolling")
+                    fig.update_yaxes(tickformat=charts.fmt_pct())
+                charts.show(fig, key="ret_rolling", kind="line")
 
                 latest = r[r.month == r.month.max()]
                 if not latest.empty:
@@ -440,12 +432,8 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
                                  "gap_bucket": ""},
                          category_orders={"gap_bucket": GAP_ORDER,
                                           "first_channel": CHANNEL_ORDER})
-            fig.update_layout(height=320, margin=dict(t=10, b=10, l=0, r=0),
-                              paper_bgcolor="rgba(0,0,0,0)",
-                              plot_bgcolor="rgba(0,0,0,0)",
-                              legend_title_text="")
-            fig.update_yaxes(tickformat=".0%")
-            _wide(st.plotly_chart, fig, key="ret_gaps")
+            fig.update_yaxes(tickformat=charts.fmt_pct())
+            charts.show(fig, key="ret_gaps", kind="bar")
 
     # ---- cohorts --------------------------------------------------------
     if not table_exists or table_exists("dash_retention_cohort"):
@@ -484,13 +472,8 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
                                       "cohort_month": ""},
                               category_orders={"first_channel":
                                                CHANNEL_ORDER})
-                fig.update_layout(height=340,
-                                  margin=dict(t=10, b=10, l=0, r=0),
-                                  paper_bgcolor="rgba(0,0,0,0)",
-                                  plot_bgcolor="rgba(0,0,0,0)",
-                                  legend_title_text="")
-                fig.update_yaxes(tickformat=".0%")
-                _wide(st.plotly_chart, fig, key="ret_cohort")
+                fig.update_yaxes(tickformat=charts.fmt_pct())
+                charts.show(fig, key="ret_cohort", kind="line")
 
                 with st.expander("Cohort detail"):
                     t = gg.copy()

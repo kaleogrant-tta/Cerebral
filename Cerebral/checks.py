@@ -305,6 +305,20 @@ def check_redemption_drop(dash):
     report(f"redemption $ {_ym(y, w)} vs prior 4-week mean", st,
            f"${cur:,.0f} vs ${base:,.0f} ({ratio:.0%}); WARN < 60%, FAIL < 40%")
 
+def check_store_zero_redemptions(dash):
+    """(c2) a store that rang baskets in the latest week but shows zero redemptions.
+    This is what an Alpine IQ export pulled with a location filter looks like
+    (12 Oct 2026: the W41 file held Union Square only; three stores read $0)."""
+    t = "dash_basket_week"
+    if t not in tables(dash): report("stores with zero redemptions, latest week", SKIP, "table missing"); return
+    y, w = dash.execute(f"select iso_year, iso_week from {t} group by 1,2 order by 1 desc, 2 desc limit 1").fetchone()
+    rows = dash.execute(f"""select store_key, sum(baskets), coalesce(sum(redeem_value), 0) from {t}
+        where iso_year = {y} and iso_week = {w} and store_key > 0 group by 1 order by 1""").fetchall()
+    bad = [f"store {k} ({int(b):,} baskets)" for k, b, r in rows if (b or 0) >= 200 and (r or 0) == 0]
+    report(f"stores with zero redemptions {_ym(y, w)}", FAIL if bad else PASS,
+           ("; ".join(bad) + " -- was the Alpine IQ export pulled with all locations selected?") if bad
+           else f"all {len(rows)} active stores have redemptions")
+
 def check_loyalty_store_ties(dash):
     """(d) store rows (store_key > 0) must add up to the chain row (store_key = 0)
     for the last 8 weeks. Catches any thin-cell cut creeping back in."""
@@ -402,7 +416,7 @@ def main():
     run("category stock", check_category_stock, dash)
     print("-- build-quality guards")
     run("margin sanity", check_margin_sanity, dash); run("days_open", check_days_open, dash)
-    run("redemption drop", check_redemption_drop, dash); run("loyalty ties", check_loyalty_store_ties, dash)
+    run("redemption drop", check_redemption_drop, dash); run("zero-redemption stores", check_store_zero_redemptions, dash); run("loyalty ties", check_loyalty_store_ties, dash)
     run("newret swing", check_newret_swing, dash); run("brand collisions", check_brand_name_collisions, dash)
     run("control buffer", check_control_buffer, dash, db)
 

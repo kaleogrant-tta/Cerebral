@@ -48,6 +48,8 @@ from brand_roi import render_brand_roi
 from channel_promo import render_channel_promo
 from promo_calendar import render_promo_calendar
 import scorecard_tab
+from scorecard import (ALERT_MIN_PTS, ALERT_RUN, ALERT_Z,
+                       control_limits as control_band, run_rules as run_rule)
 from scorecard_prefill import fetch_prefill
 
 
@@ -107,6 +109,13 @@ def is_on_menu(offer_name, brand, category, product):
 DASH_FILE = "cerebral_dash.duckdb"
 CACHE_MINUTES = 30
 BASELINE_WEEKS = 13
+# Brand trend labels: ±20% and at least $5,000 net in BOTH halves, otherwise
+# "too small to call" (small brands swing by more than 10% on pure noise).
+TREND_BAND_PCT = 20.0
+TREND_MIN_BASE = 5000.0
+# Scorecard week-on-week deltas are blank when the category had fewer than
+# this many baskets in either week (tiny categories swing 20-40% on noise).
+WOW_MIN_BASKETS = 50
 
 STORES = {1: "DTBK", 2: "5th Avenue", 3: "Soho", 4: "Union Square"}
 
@@ -629,29 +638,8 @@ def and_filter(keys: list[int]) -> str:
 # Analysis helpers
 # ===========================================================================
 
-def control_band(hist: pd.Series, n: float):
-    if len(hist) < 4 or n <= 0:
-        return None, None, None
-    p = hist.mean()
-    se = (p * (1 - p) / n) ** .5
-    return p, p - 2 * se, p + 2 * se
-
-
-def run_rule(s: pd.Series) -> str | None:
-    if len(s) < 7:
-        return None
-    base = s.iloc[:-1].mean()
-    l7 = s.tail(7)
-    if (l7 > base).all():
-        return "7 consecutive weeks above baseline"
-    if (l7 < base).all():
-        return "7 consecutive weeks below baseline"
-    d = s.tail(6).diff().dropna()
-    if len(d) >= 5 and (d > 0).all():
-        return "6 consecutive weeks rising"
-    if len(d) >= 5 and (d < 0).all():
-        return "6 consecutive weeks falling"
-    return None
+# control_band() and run_rule() are imported from scorecard.py (one shared
+# definition of the alert thresholds: ALERT_Z, ALERT_MIN_PTS, ALERT_RUN).
 
 
 # ===========================================================================
@@ -732,15 +720,15 @@ weeks = (df[["iso_year", "iso_week"]].drop_duplicates()
 # show: two days against seven reads as a 70% collapse. The week is kept and
 # compared PER TRADING DAY, and labelled, rather than dropped — three days of
 # data is still information.
-_wk_days = (df.groupby(["iso_year", "iso_week"])["days_open"].max()
-              .rename("days_open").reset_index())
+# The latest ISO week is partial only if the data stops before that week's
+# Sunday. (days_open is NOT used for this: Monday 00:00-01:00 delivery orders
+# make some complete weeks read as 8 "days", so a median of it misfires.)
 _last = weeks.iloc[-1]
-_last_days = int(_wk_days[(_wk_days.iso_year == _last.iso_year)
-                          & (_wk_days.iso_week == _last.iso_week)]
-                 ["days_open"].iloc[0])
-_typical = int(_wk_days["days_open"].median())
-PARTIAL_WEEK = _last_days < _typical
-PARTIAL_DAYS = _last_days
+_last_wk_start = pd.Timestamp.fromisocalendar(int(_last.iso_year),
+                                              int(_last.iso_week), 1)
+_last_txn = pd.Timestamp(meta.last_txn).normalize()
+PARTIAL_WEEK = bool(_last_txn < _last_wk_start + pd.Timedelta(days=6))
+PARTIAL_DAYS = int(min(7, max(1, (_last_txn - _last_wk_start).days + 1)))
 n_wk = st.sidebar.slider("Weeks shown", 4, max(len(weeks), 4),
                          min(26, len(weeks)), key="n_weeks",
                          help="How many of the most recent weeks every "
@@ -816,6 +804,17 @@ def win_halves(frame: pd.DataFrame, value: str, by: list[str] | None = None):
     f = frame.copy()
     f["_wk"] = f.iso_year.astype(int) * 100 + f.iso_week.astype(int)
     ordered = sorted(f["_wk"].unique())
+    # A partial trailing week is not comparable with full ones: leave it out
+    # of the late half (only when it is the newest week in this frame).
+    if PARTIAL_WEEK and len(ordered) > 2:
+        _lw = int(weeks.iloc[-1].iso_year) * 100 + int(weeks.iloc[-1].iso_week)
+        if ordered[-1] == _lw:
+            f = f[f["_wk"] != _lw]
+            ordered = ordered[:-1]
+    # Equal week counts in both halves: an odd window drops its oldest week.
+    if len(ordered) % 2 == 1 and len(ordered) > 1:
+        f = f[f["_wk"] != ordered[0]]
+        ordered = ordered[1:]
     cut = ordered[len(ordered) // 2] if len(ordered) > 1 else ordered[0] + 1
     f["_half"] = f["_wk"].map(lambda v: "early" if v < cut else "late")
     grp = (by or []) + ["_half"]
@@ -870,18 +869,21 @@ def section_charts():
              .agg(net=("net", "sum"), baskets=("baskets", "first"),
                   days=("days_open", "max"))
              .reset_index().sort_values("wk_date"))
+    # days_open can read 8 on a complete week (Monday-after-midnight delivery
+    # orders), so a divisor never exceeds 7.
+    wk["days"] = wk["days"].clip(upper=7)
     wk["atv"] = wk.net / wk.baskets
     wk["net_pd"] = wk.net / wk.days
     wk["bkt_pd"] = wk.baskets / wk.days
     cur = wk.iloc[-1]
     prev = wk.iloc[-2] if len(wk) > 1 else None
 
-    is_partial = PARTIAL_WEEK and len(wk) and cur.days < wk.days.median()
+    is_partial = bool(PARTIAL_WEEK and len(wk))
 
     if is_partial:
         st.markdown(
             f'<div class="alert a-warn">The latest week is still in progress '
-            f'— <b>{int(cur.days)} of {int(wk.days.median())} trading days</b>. '
+            f'— <b>{PARTIAL_DAYS} of 7 days</b>. '
             f'Its totals are therefore lower than a full week, so the headline '
             f'figures below are shown <b>per trading day</b> to stay '
             f'comparable. Charts show actual totals.</div>',
@@ -990,7 +992,8 @@ def section_charts():
                     help="Divides each week by the days it actually traded. A "
                          "week in progress, or one containing a closure, "
                          "otherwise reads as a collapse in volume.")
-            tx["value"] = tx.baskets / tx.days_open if per_day else tx.baskets
+            tx["value"] = (tx.baskets / tx.days_open.clip(upper=7)
+                          if per_day else tx.baskets)
             tx["trend"] = tx["value"].rolling(4, min_periods=2).mean()
 
             _cur, _prev = tx.iloc[-1], (tx.iloc[-2] if len(tx) > 1 else None)
@@ -1188,9 +1191,13 @@ def section_charts():
         cat = st.selectbox("Category", order)
         d = dfv[dfv.category == cat].sort_values(["iso_year", "iso_week"]).copy()
         if len(d) >= 5:
-            d["base"] = d.penetration.rolling(BASELINE_WEEKS, min_periods=4).mean()
-            d["se"] = ((d.base * (1 - d.base)) / d.baskets) ** .5
-            d["ucl"], d["lcl"] = d.base + 2 * d.se, d.base - 2 * d.se
+            # Same rule as the Alerts panel: baseline = prior 13 weeks, the
+            # week being tested left out; half-width = ALERT_Z baseline SDs,
+            # never narrower than ALERT_MIN_PTS.
+            _prior = d.penetration.shift(1).rolling(BASELINE_WEEKS, min_periods=4)
+            d["base"] = _prior.mean()
+            d["hw"] = np.maximum(ALERT_Z * _prior.std(ddof=1), ALERT_MIN_PTS)
+            d["ucl"], d["lcl"] = d.base + d.hw, d.base - d.hw
             fig = go.Figure()
             fig.add_scatter(x=d.wk_date, y=d.ucl * 100, line=dict(width=0),
                             showlegend=False, hoverinfo="skip")
@@ -1292,10 +1299,8 @@ def section_insights():
     st.markdown("#### Alerts")
     howto("alerts")
 
-    # Alerts run on the last COMPLETE week. Penetration is a ratio so it is
-    # not distorted by a short week, but basket counts are, and the control
-    # limits are built from those — a two-day week has wide limits and noisy
-    # penetration, which produces alarming alerts about nothing.
+    # Alerts run on the last COMPLETE week: a two-day week gives a noisy
+    # penetration figure, which produces alarming alerts about nothing.
     alert_weeks = weeks.iloc[:-1] if PARTIAL_WEEK else weeks
     if PARTIAL_WEEK and len(weeks) >= 2:
         _aw = alert_weeks.iloc[-1]
@@ -1321,16 +1326,16 @@ def section_insights():
             h = h.sort_values(["iso_year", "iso_week"])
             if len(h) < 4:
                 continue
-            base, lcl, ucl = control_band(h.penetration, r.baskets)
+            base, lcl, ucl = control_band(h.penetration)
             if base is not None:
                 if r.penetration < lcl:
                     alerts.append(("bad", r.category,
                         f"penetration {r.penetration*100:.1f}% is below the lower "
-                        f"control limit {lcl*100:.1f}% (baseline {base*100:.1f}%)"))
+                        f"alert limit {lcl*100:.1f}% (baseline {base*100:.1f}%)"))
                 elif r.penetration > ucl:
                     alerts.append(("ok", r.category,
                         f"penetration {r.penetration*100:.1f}% is above the upper "
-                        f"control limit {ucl*100:.1f}% (baseline {base*100:.1f}%)"))
+                        f"alert limit {ucl*100:.1f}% (baseline {base*100:.1f}%)"))
             rr = run_rule(pd.concat([h.penetration, pd.Series([r.penetration])]))
             if rr:
                 alerts.append(("bad" if ("below" in rr or "falling" in rr) else "ok",
@@ -1355,11 +1360,14 @@ def section_insights():
     if len(sc_weeks) > 1:
         py, pw = sc_weeks.iloc[-2]
         pv = df[(df.iso_year == py) & (df.iso_week == pw)][
-            ["category", "per100", "penetration"]].rename(
-            columns={"per100": "pp", "penetration": "pn"})
+            ["category", "per100", "penetration", "baskets_with"]].rename(
+            columns={"per100": "pp", "penetration": "pn",
+                     "baskets_with": "bw_prev"})
         cur = cur.merge(pv, on="category", how="left")
         cur["d100"] = (cur.per100 / cur.pp - 1) * 100
         cur["dpen"] = (cur.penetration - cur.pn) * 100
+        _thin = (cur.baskets_with < WOW_MIN_BASKETS) | (cur.bw_prev < WOW_MIN_BASKETS)
+        cur.loc[_thin, ["d100", "dpen"]] = np.nan
     cur = cur.sort_values("net", ascending=False)
     st.dataframe(pd.DataFrame({
         "Category": cur.category,
@@ -1381,7 +1389,9 @@ def section_insights():
         "$/100 bkt": st.column_config.NumberColumn(
             help=tip("$/100 baskets"), format="$%d"),
         "Δ WoW %": st.column_config.NumberColumn(
-            help="Change in $/100 baskets versus last week. " + tip("Δ WoW"),
+            help="Change in $/100 baskets versus last week. " + tip("Δ WoW")
+                 + f" Blank when the category had under {WOW_MIN_BASKETS} "
+                   "baskets in either week - too few to read.",
             format="%.1f%%"),
         "Penetration %": st.column_config.NumberColumn(
             help=tip("penetration"), format="%.1f%%"),
@@ -1465,9 +1475,15 @@ def section_insights():
                 st.info("Not enough brand-level volume in this pair to break down.")
             else:
                 bt["change"] = pct_change(bt.net_late, bt.net_early)
-                bt["dir"] = bt.change.apply(
-                    lambda v: "growing" if pd.notna(v) and v > 10 else
-                              ("declining" if pd.notna(v) and v < -10 else "flat"))
+                def _dir(r):
+                    if min(r.net_early, r.net_late) < TREND_MIN_BASE:
+                        return "too small to call"
+                    v = r.change
+                    if pd.isna(v):
+                        return "too small to call"
+                    return ("growing" if v > TREND_BAND_PCT else
+                            "declining" if v < -TREND_BAND_PCT else "flat")
+                bt["dir"] = bt.apply(_dir, axis=1)
 
                 # --- the recommendation ---------------------------------------
                 # Built from this pair's own brands and figures rather than a
@@ -1478,8 +1494,8 @@ def section_insights():
 
                 def movers(side, n=2):
                     v = side.dropna(subset=["change"])
-                    up = v[v.change > 10].sort_values("change", ascending=False).head(n)
-                    dn = v[v.change < -10].sort_values("change").head(n)
+                    up = v[v.dir == "growing"].sort_values("change", ascending=False).head(n)
+                    dn = v[v.dir == "declining"].sort_values("change").head(n)
                     return up, dn
 
                 def name_list(frame, with_cat=False):
@@ -1617,8 +1633,11 @@ def section_insights():
                              "Shows which way the brand is moving.",
                         format="%.1f%%"),
                     "Direction": st.column_config.TextColumn(
-                        help="Growing is more than +10%, declining is worse than "
-                             "-10%, anything between is flat."),
+                        help=f"Growing is more than +{TREND_BAND_PCT:.0f}%, declining "
+                             f"is worse than -{TREND_BAND_PCT:.0f}%, anything "
+                             f"between is flat. A brand needs at least "
+                             f"${TREND_MIN_BASE:,.0f} net in BOTH halves to be "
+                             f"labelled; smaller ones read 'too small to call'."),
                 })
 
                 # --- brand pairs ----------------------------------------------

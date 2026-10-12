@@ -67,17 +67,21 @@ GLOSSARY: dict[str, str] = {
 
     # --- statistical machinery, explained without statistics -------------
     "control limits":
-        "The normal range for this category, worked out from the last 13 "
-        "weeks. Roughly 95% of ordinary weeks land inside the shaded band. A "
-        "point outside it is unusual enough to be worth a look — not proof "
-        "anything is wrong, just a prompt to check.",
+        "The normal range for this category, worked out from the 13 weeks "
+        "before the week being checked, using how much that category itself "
+        "normally moves from week to week. A week only counts as outside it "
+        "if it is more than three of those typical swings away AND at least "
+        "two percentage points from the baseline. Most ordinary weeks stay "
+        "inside; roughly 2 in 100 category-weeks have gone outside it over the "
+        "past year. A point outside is worth a look — not proof anything is "
+        "wrong, just a prompt to check.",
 
     "baseline":
         "The average of the last 13 weeks. The dotted line the shaded band is "
         "built around.",
 
     "run rule":
-        "Seven weeks in a row on the same side of the baseline, or six weeks "
+        "Ten weeks in a row on the same side of the baseline, or six weeks "
         "moving the same direction. This catches slow erosion — a category "
         "losing a little every week never triggers an alarm on any single "
         "week, but it will have lost a fifth of its reach by the end of a "
@@ -276,7 +280,7 @@ SECTIONS: dict[str, str] = {
         "The shaded band is the normal range based on the last 13 weeks. The "
         "green line is what actually happened. Circled points fell outside "
         "normal.\n\n"
-        "One point outside the band is worth a look. Seven consecutive weeks "
+        "One point outside the band is worth a look. Ten consecutive weeks "
         "on one side matters more, even if every point stays inside — that is "
         "a trend rather than a bad week.",
 

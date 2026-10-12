@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -130,29 +131,9 @@ def cats_by_size(df: pd.DataFrame) -> list[str]:
     return tot.index.tolist()
 
 
-def limits(hist: pd.Series, n: float):
-    if len(hist) < 4 or n <= 0:
-        return None, None, None
-    p = hist.mean()
-    se = (p * (1 - p) / n) ** 0.5
-    return p, p - 2 * se, p + 2 * se
-
-
-def run_rule(s: pd.Series) -> str | None:
-    if len(s) < 7:
-        return None
-    base = s.iloc[:-1].mean()
-    last7 = s.tail(7)
-    if (last7 > base).all():
-        return "7 consecutive weeks above baseline"
-    if (last7 < base).all():
-        return "7 consecutive weeks below baseline"
-    d = s.tail(6).diff().dropna()
-    if len(d) >= 5 and (d > 0).all():
-        return "6 consecutive weeks rising"
-    if len(d) >= 5 and (d < 0).all():
-        return "6 consecutive weeks falling"
-    return None
+# Alert rules live in scorecard.py (one definition, shared). Do not copy them.
+from scorecard import (ALERT_MIN_PTS, ALERT_RUN, ALERT_Z,  # noqa: E402
+                       control_limits as limits, run_rules as run_rule)
 
 
 def build_alerts(df: pd.DataFrame) -> list[dict]:
@@ -180,17 +161,17 @@ def build_alerts(df: pd.DataFrame) -> list[dict]:
         h = h.sort_values(["iso_year", "iso_week"])
         if len(h) < 4:
             continue
-        base, lcl, ucl = limits(h.penetration, r.baskets)
+        base, lcl, ucl = limits(h.penetration)
         if base is not None:
             if r.penetration < lcl:
                 out.append(dict(sev="bad", cat=r.category,
                                 msg=f"penetration {r.penetration*100:.1f}% is below the "
-                                    f"lower control limit {lcl*100:.1f}% "
+                                    f"lower alert limit {lcl*100:.1f}% "
                                     f"(13-week baseline {base*100:.1f}%)"))
             elif r.penetration > ucl:
                 out.append(dict(sev="ok", cat=r.category,
                                 msg=f"penetration {r.penetration*100:.1f}% is above the "
-                                    f"upper control limit {ucl*100:.1f}% "
+                                    f"upper alert limit {ucl*100:.1f}% "
                                     f"(13-week baseline {base*100:.1f}%)"))
         rr = run_rule(pd.concat([h.penetration, pd.Series([r.penetration])]))
         if rr:
@@ -333,17 +314,21 @@ with tab_charts:
         st.divider()
         st.markdown("##### Penetration with control limits")
         st.markdown('<p class="note">Share of baskets containing the category, '
-                    'against a rolling 13-week mean ±2 standard errors. Points '
-                    'outside the band are worth investigating; a run of seven '
-                    'on one side is a trend even inside it.</p>',
+                    f'against the prior 13 weeks. The band is {ALERT_Z:g} standard '
+                    f"deviations of the category's own week-to-week movement, "
+                    f'and a move under {ALERT_MIN_PTS*100:g} points never counts. '
+                    f'Points outside it are worth investigating; {ALERT_RUN} weeks in a row '
+                    f'on one side is a shift even inside it.</p>',
                     unsafe_allow_html=True)
 
         cat = st.selectbox("Category", cats_by_size(dfw), key="ctrl_cat")
         d = dfw[dfw.category == cat].sort_values(["iso_year", "iso_week"]).copy()
         if len(d) >= 5:
-            d["base"] = d.penetration.rolling(BASELINE_WEEKS, min_periods=4).mean()
-            d["se"] = ((d.base * (1 - d.base)) / d.baskets) ** .5
-            d["ucl"], d["lcl"] = d.base + 2 * d.se, d.base - 2 * d.se
+            # Baseline = the prior 13 weeks, EXCLUDING the week being tested.
+            _prior = d.penetration.shift(1).rolling(BASELINE_WEEKS, min_periods=4)
+            d["base"] = _prior.mean()
+            d["se"] = np.maximum(ALERT_Z * _prior.std(ddof=1), ALERT_MIN_PTS)
+            d["ucl"], d["lcl"] = d.base + d.se, d.base - d.se
             fig = go.Figure()
             fig.add_scatter(x=d.wk_date, y=d.ucl * 100, line=dict(width=0),
                             showlegend=False, hoverinfo="skip")
@@ -444,7 +429,7 @@ with tab_insights:
                 st.markdown(f'<div class="alert {cls}"><b>{a["cat"]}</b> — '
                             f'{a["msg"]}</div>', unsafe_allow_html=True)
         st.markdown('<p class="note">A single week outside the limits is a '
-                    'prompt to look. A run of seven weeks on one side is the '
+                    f'prompt to look. A run of {ALERT_RUN} weeks on one side is the '
                     'signal that matters — slow erosion never trips a '
                     'threshold but compounds over a quarter.</p>',
                     unsafe_allow_html=True)

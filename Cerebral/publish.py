@@ -346,11 +346,19 @@ def build(src: str, dest: str) -> dict:
         WITH bw AS (
             SELECT store_key, iso_year, iso_week, channel,
                    COUNT(*)                    AS baskets,
-                   COUNT(DISTINCT date_key)    AS days_open,
                    SUM(basket_net)             AS net_all,
                    AVG(basket_lines)           AS avg_lines
             FROM fb WHERE NOT is_return
             GROUP BY 1,2,3,4
+        ),
+        sd AS (
+            -- trading days per STORE-week (not per channel), counted on the
+            -- same shifted clock that assigns iso_week, so a Monday 00:xx
+            -- Delivery order is a Sunday of the closing week, not an 8th day.
+            SELECT store_key, iso_year, iso_week,
+                   LEAST(7, COUNT(DISTINCT CAST(txn_ts - INTERVAL {WEEK_BOUNDARY_HOUR} HOUR AS DATE))) AS days_open
+            FROM fb WHERE NOT is_return
+            GROUP BY 1,2,3
         ),
         cw AS (
             SELECT store_key, iso_year, iso_week, channel, category,
@@ -362,15 +370,22 @@ def build(src: str, dest: str) -> dict:
             GROUP BY 1,2,3,4,5
         ),
         {_sk}
-        SELECT cw.*, bw.baskets, bw.days_open, bw.net_all, bw.avg_lines,
+        SELECT cw.*, bw.baskets, sd.days_open, bw.net_all, bw.avg_lines,
                sk.skus_in_stock, sk.skus_out, sk.floor_units_end
         FROM cw JOIN bw USING (store_key, iso_year, iso_week, channel)
+        LEFT JOIN sd USING (store_key, iso_year, iso_week)
         LEFT JOIN sk USING (store_key, iso_year, iso_week, category)
     """)
 
     # --- basket totals per store x channel x week ------------------------
-    con.execute("""
+    con.execute(f"""
         CREATE TABLE dash_basket_week AS
+        WITH sd AS (
+            SELECT store_key, iso_year, iso_week,
+                   LEAST(7, COUNT(DISTINCT CAST(txn_ts - INTERVAL {WEEK_BOUNDARY_HOUR} HOUR AS DATE))) AS days_open
+            FROM fb WHERE NOT is_return
+            GROUP BY 1,2,3
+        )
         SELECT store_key, iso_year, iso_week, channel,
                COUNT(*)                        AS baskets,
                SUM(basket_net)                 AS net,
@@ -379,8 +394,9 @@ def build(src: str, dest: str) -> dict:
                SUM(CASE WHEN basket_lines = 1 THEN 1 ELSE 0 END) AS single_line,
                SUM(CASE WHEN used_redemption THEN 1 ELSE 0 END)  AS redeem_baskets,
                SUM(loyalty_redeem)             AS redeem_value,
-               COUNT(DISTINCT date_key)        AS days_open
-        FROM fb WHERE NOT is_return
+               ANY_VALUE(sd.days_open)         AS days_open
+        FROM fb LEFT JOIN sd USING (store_key, iso_year, iso_week)
+        WHERE NOT is_return
         GROUP BY 1,2,3,4
     """)
 

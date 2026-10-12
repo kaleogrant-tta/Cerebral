@@ -143,17 +143,38 @@ def _classify(name) -> str:
 
 
 def _store_clause(keys, stores):
-    """Chain rollup when everything is selected, explicit list otherwise.
+    """Store filter for the per-store tables on this tab.
 
-    The promo and offer tables carry per-store rows only -- no store_key = 0
-    rollup -- so an all-selected view sums them. Kept as a helper so the
-    behaviour is stated once rather than repeated per query.
+    dash_discount_*, dash_promo_*, dash_offer_performance and
+    dash_redemption_* hold per-store rows only (store_key 1..4, no chain row),
+    so "all stores selected" is simply no filter: summing them gives the chain.
+
+    dash_loyalty_offer is DIFFERENT: it carries per-store rows AND a chain row
+    (store_key = 0) that is not the sum of them. Do not use this helper for it;
+    use _loyalty_store_clause().
     """
     if not keys:
         return "1 = 0"
     if stores and len(keys) == len(stores):
         return "1 = 1"
     return "store_key IN (" + ",".join(str(int(k)) for k in keys) + ")"
+
+
+def _loyalty_store_clause(keys, stores):
+    """Store filter for dash_loyalty_offer, which has a chain row (store_key 0).
+
+    All stores selected -> the chain row alone (summing every row would count
+    each redemption twice). A subset -> those stores' own rows, never the chain
+    row.
+    """
+    if not keys:
+        return "1 = 0"
+    if stores and len(keys) == len(stores):
+        return "store_key = 0"
+    ks = [str(int(k)) for k in keys if int(k) > 0]
+    if not ks:
+        return "1 = 0"
+    return "store_key > 0 AND store_key IN (" + ",".join(ks) + ")"
 
 
 def _money(x):
@@ -1237,7 +1258,7 @@ def render_discounting(q, keys, keep, stores, heading=None, table_exists=None,
                    SUM(redemptions)  AS units,
                    SUM(redeem_value) AS spend
             FROM dash_loyalty_offer
-            WHERE {where}
+            WHERE {_loyalty_store_clause(keys, stores)}
             GROUP BY 1,2
         """)
         if lo.empty:

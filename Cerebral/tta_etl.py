@@ -624,6 +624,41 @@ class Pipeline:
         line["cogs"] = line["units"] * line["unit_cost"]
         line["gross_margin"] = line["net_sales"] - line["cogs"]
 
+        # --- independent net from the POS register ----------------------
+        # Every dollar above comes from the Breakdown's NetSales, so a bad
+        # Breakdown month passes net_reconciliation by construction (Union
+        # Square, Sept 2023: every product priced at a third; the register
+        # export for the same month was fine). The register export carries
+        # each transaction's TotalInvoice and PosTax; invoice minus tax is an
+        # independent net for the same receipts. Small drift (about 1%) is
+        # normal between the two Dutchie subsystems. A large gap means the
+        # Breakdown is wrong, and the POS total is the better number: every
+        # line of the load is rescaled to it, and the check says so loudly.
+        rescaled, pos_net = False, 0.0
+        if "TotalInvoice" in pos.columns and "PosTax" in pos.columns:
+            _pr = pos[~pos["is_return"]] if "is_return" in pos.columns else pos
+            _pr = _pr[pd.to_numeric(_pr["PosId"], errors="coerce").isin(line["basket_id"])]
+            pos_net = float((pd.to_numeric(_pr["TotalInvoice"], errors="coerce").fillna(0.0)
+                             - pd.to_numeric(_pr["PosTax"], errors="coerce").fillna(0.0)).sum())
+            _ours = line.loc[~line["is_return"], "net_sales"] if "is_return" in line.columns else line["net_sales"]
+            our_net = float(_ours.sum())
+            pos_ratio = pos_net / our_net if our_net > 0 else 1.0
+            pos_gap = abs(pos_ratio - 1.0)
+            rescaled = pos_net > 0 and pos_gap > THRESHOLDS["pos_net_rescale"]
+            if rescaled:
+                line["net_sales"] = line["net_sales"] * pos_ratio
+                line["gross_margin"] = line["net_sales"] - line["cogs"]
+            check("pos_net_reconciliation",
+                  pos_gap <= THRESHOLDS["pos_net_tolerance"],
+                  f"POS invoice-minus-tax ${pos_net:,.0f} vs breakdown-derived ${our_net:,.0f} "
+                  f"(ratio {pos_ratio:.4f}, gap {pos_gap*100:.2f}%)"
+                  + (f" -- BREAKDOWN REJECTED: every line rescaled x{pos_ratio:.4f} to the POS total"
+                     if rescaled else ""),
+                  warn=True)
+        else:
+            check("pos_net_reconciliation", True,
+                  "POS export has no TotalInvoice/PosTax columns; independent net check skipped")
+
         excluded_cat_mask = line["category"] == "EXCLUDE"
         excluded_cat_units = float(line.loc[excluded_cat_mask, "units"].sum())
         excluded_cat_lines = int(excluded_cat_mask.sum())
@@ -693,10 +728,14 @@ class Pipeline:
                 _top = "; ".join(f"{v:+.0f} {str(p)[:45]}" for p, v in _d.head(8).items())
                 checks[-1]["detail"] += f" | {len(_d)} product(s) differ (+ = more in POS lines): {_top}"
 
-        net_gap = abs(line["net_sales"].sum() - det["NetSales"].sum()) / max(det["NetSales"].sum(), 1)
+        # After a POS rescale the Breakdown is the rejected number, so the
+        # derived net is checked against the POS register total instead.
+        _ref_net = pos_net if rescaled else float(det["NetSales"].sum())
+        _ref_name = "POS register total" if rescaled else "breakdown"
+        net_gap = abs(line["net_sales"].sum() - _ref_net) / max(_ref_net, 1)
         check("net_reconciliation",
               net_gap <= THRESHOLDS["net_recon_tolerance"],
-              f"derived net revenue differs from breakdown by {net_gap*100:.3f}%",
+              f"derived net revenue differs from {_ref_name} by {net_gap*100:.3f}%",
               warn=net_gap <= THRESHOLDS["net_recon_fail"])
 
         # --- fact_basket --------------------------------------------------

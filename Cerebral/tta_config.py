@@ -224,6 +224,12 @@ THRESHOLDS = {
     "qty_recon_fail":      0.005,   # 0.5%
     "net_recon_tolerance": 0.005,   # 0.5%
     "net_recon_fail":      0.020,   # 2.0%
+    # Independent net from the POS register (TotalInvoice - PosTax) against
+    # the Breakdown-derived net. Normal drift is ~1%. Above the rescale line
+    # the Breakdown is treated as wrong and the load is rescaled to the POS
+    # total (WARN, never FAIL -- the POS number is the better one).
+    "pos_net_tolerance":   0.03,    # 3%  -> WARN above this
+    "pos_net_rescale":     0.25,    # 25% -> rescale the load to the POS total
 }
 
 

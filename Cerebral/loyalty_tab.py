@@ -181,6 +181,15 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
         st.info("No loyalty data in the selected week range.")
         return
 
+    # Tier is each customer's CURRENT tier, applied to all of their history.
+    tiers_built = ""
+    if not table_exists or table_exists("dash_loyalty_meta"):
+        _m = q("SELECT * FROM dash_loyalty_meta")
+        if not _m.empty and pd.notna(_m.iloc[0].get("tiers_built_at")):
+            tiers_built = str(_m.iloc[0]["tiers_built_at"])[:10]
+    cur_tier = ("by CURRENT tier"
+                + (f" (assigned {tiers_built})" if tiers_built else ""))
+
     agg = {"customers": "sum", "baskets": "sum", "net": "sum",
            "redeem_value": "sum", "redeem_baskets": "sum"}
     summ = _derive(_order(wkv.groupby("tier", as_index=False).agg(agg)))
@@ -194,6 +203,12 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
                       "since it is already a per-basket figure.")
         c.caption(f"{r.baskets:,.0f} baskets · {_money(r.net)}")
 
+    st.caption(
+        f"Tiers below are shown {cur_tier}. Each customer's tier today is "
+        "applied to all of their history, including weeks before they "
+        "enrolled, so gaps between tiers overstate real differences in "
+        "behaviour (the heaviest shoppers are the ones who later enrolled).")
+
     if partial_week:
         st.caption(
             "The latest week is still in progress. Average basket is "
@@ -202,7 +217,7 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
     st.divider()
 
     # ---- how much they shop ----------------------------------------------
-    H("How much they shop")
+    H(f"How much they shop, {cur_tier}")
     show = summ.copy()
     show["share"] = show.net / show.net.sum()
     show_heat(st, pd.DataFrame({
@@ -328,10 +343,16 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
         off = _clip(q(f"SELECT * FROM dash_loyalty_offer WHERE {where}"), keep)
         if not off.empty:
             with st.expander("Top offers by redemption value"):
+                off = off.assign(
+                    _bx=pd.to_numeric(off.avg_basket, errors="coerce")
+                        * off.redemptions,
+                    _bw=off.redemptions.where(off.avg_basket.notna(), 0))
                 g = (off.groupby(["tier", "offer_name"], as_index=False)
                      .agg({"redemptions": "sum", "redeem_value": "sum",
-                           "avg_basket": "mean"})
+                           "_bx": "sum", "_bw": "sum"})
                      .sort_values("redeem_value", ascending=False).head(25))
+                # Weighted by redemptions, not an average of weekly averages.
+                g["avg_basket"] = g["_bx"] / g["_bw"].replace(0, np.nan)
                 _wide(st.dataframe, pd.DataFrame({
                     "Tier": g.tier,
                     "Offer": g.offer_name,
@@ -384,12 +405,16 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
     st.divider()
 
     # ---- trend ------------------------------------------------------------
-    H("Average basket by week")
+    H(f"Average basket by week, {cur_tier}")
     t = wkv.copy()
     t["wk_date"] = _wk_date(t)
     t["atv"] = pd.to_numeric(t.net, errors="coerce") / \
         pd.to_numeric(t.baskets, errors="coerce").replace(0, np.nan)
-    t = t.groupby(["wk_date", "tier"], as_index=False)["atv"].mean()
+    # Weighted by baskets across stores (not a mean of per-row averages).
+    t = t.groupby(["wk_date", "tier"], as_index=False).agg(
+        _n=("net", lambda x: pd.to_numeric(x, errors="coerce").sum()),
+        _b=("baskets", lambda x: pd.to_numeric(x, errors="coerce").sum()))
+    t["atv"] = t._n / t._b.replace(0, np.nan)
     t = t.sort_values(["tier", "wk_date"])
     fig = px.line(t, x="wk_date", y="atv", color="tier",
                   color_discrete_map=TIER_COLORS,
@@ -437,8 +462,9 @@ def render_loyalty(q, keys, keep, stores, heading=None, table_exists=None,
                 cov = (f"\n\n**Match rate.** {rate * 100:.1f}% of transacting "
                        f"customers resolve to a tier. Unmatched customers "
                        f"fall to Non-Loyalty, which slightly overstates that "
-                       f"tier. Tier assignments last rebuilt "
-                       f"{str(m.tiers_built_at)[:16]}.")
+                       f"tier. Tiers are each customer's CURRENT tier, "
+                       f"assigned {str(m.tiers_built_at)[:16]} and applied "
+                       f"to all history, including before enrolment.")
         st.markdown(
             """
 **Tiers.** *Frequent Flyer* is the Dutchie `Travel Club Frequent Flyer`

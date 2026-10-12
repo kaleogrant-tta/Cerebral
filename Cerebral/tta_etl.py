@@ -278,6 +278,102 @@ class LoadResult:
         return all(c["pass"] for c in self.checks)
 
 
+# ---------------------------------------------------------------------------
+# History re-keying
+#
+# customer_key is decided once, when a period is loaded. The crosswalk keeps
+# learning afterwards, so older baskets can sit under a name-hash key while the
+# same person now arrives under an Alpine ID and is counted as "new". These
+# helpers move history onto the crosswalk's Alpine ID. Only rows whose key is
+# a crosswalk name_hash with ambiguous = FALSE and a non-null alpine_id are
+# touched -- the same rule as Pipeline._identity_map(), so history and new
+# loads always agree. Shared by Pipeline.rekey_history and rekey_customers.py.
+# ---------------------------------------------------------------------------
+
+_XW_OK = "x.ambiguous = FALSE AND x.alpine_id IS NOT NULL"
+
+
+def _table_exists(con, name: str) -> bool:
+    return bool(con.execute(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+        [name]).fetchone()[0])
+
+
+def rekey_preview(con) -> dict:
+    """Count what rekey_apply would change, without changing anything."""
+    out = {"baskets_rekeyed": 0, "lines_rekeyed": 0,
+           "distinct_customers_merged": 0, "alpine_ids_targeted": 0}
+    if not (_table_exists(con, "customer_xwalk") and _table_exists(con, "fact_basket")):
+        return out
+    # cheap exit: nothing to do
+    if not con.execute(f"""
+        SELECT EXISTS (SELECT 1 FROM fact_basket b JOIN customer_xwalk x
+                       ON b.customer_key = x.name_hash WHERE {_XW_OK})
+            OR EXISTS (SELECT 1 FROM fact_line l JOIN customer_xwalk x
+                       ON l.customer_key = x.name_hash WHERE {_XW_OK})
+    """).fetchone()[0]:
+        return out
+    out["baskets_rekeyed"] = con.execute(f"""
+        SELECT COUNT(*) FROM fact_basket b JOIN customer_xwalk x
+        ON b.customer_key = x.name_hash WHERE {_XW_OK}""").fetchone()[0]
+    out["lines_rekeyed"] = con.execute(f"""
+        SELECT COUNT(*) FROM fact_line l JOIN customer_xwalk x
+        ON l.customer_key = x.name_hash WHERE {_XW_OK}""").fetchone()[0]
+    merged, targets = con.execute(f"""
+        SELECT COUNT(DISTINCT k), COUNT(DISTINCT a) FROM (
+            SELECT b.customer_key k, x.alpine_id a FROM fact_basket b
+              JOIN customer_xwalk x ON b.customer_key = x.name_hash WHERE {_XW_OK}
+            UNION
+            SELECT l.customer_key, x.alpine_id FROM fact_line l
+              JOIN customer_xwalk x ON l.customer_key = x.name_hash WHERE {_XW_OK})
+    """).fetchone()
+    out["distinct_customers_merged"] = merged
+    out["alpine_ids_targeted"] = targets
+    return out
+
+
+def rekey_apply(con) -> dict:
+    """Re-key fact_basket / fact_line (and fact_redemption) in ONE transaction.
+
+    Idempotent: after a run no row's customer_key is a mappable name_hash, so
+    a second run finds nothing and returns zeros without opening a transaction.
+    customer_known is "customer_key IS NOT NULL" and a re-key never changes
+    that, so it needs no update.
+    """
+    counts = rekey_preview(con)
+    if counts["baskets_rekeyed"] == 0 and counts["lines_rekeyed"] == 0:
+        counts["redemptions_rekeyed"] = 0
+        return counts
+    has_red = _table_exists(con, "fact_redemption")
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute(f"""
+            UPDATE fact_basket AS b SET customer_key = x.alpine_id
+            FROM customer_xwalk x
+            WHERE b.customer_key = x.name_hash AND {_XW_OK}""")
+        con.execute(f"""
+            UPDATE fact_line AS l
+            SET customer_key = x.alpine_id, customer_source = 'alpine_xwalk'
+            FROM customer_xwalk x
+            WHERE l.customer_key = x.name_hash AND {_XW_OK}""")
+        if has_red:
+            n = con.execute(f"""
+                SELECT COUNT(*) FROM fact_redemption r JOIN customer_xwalk x
+                ON r.customer_key = x.name_hash WHERE {_XW_OK}""").fetchone()[0]
+            con.execute(f"""
+                UPDATE fact_redemption AS r SET customer_key = x.alpine_id
+                FROM customer_xwalk x
+                WHERE r.customer_key = x.name_hash AND {_XW_OK}""")
+            counts["redemptions_rekeyed"] = n
+        else:
+            counts["redemptions_rekeyed"] = 0
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    return counts
+
+
 class Pipeline:
     def __init__(self, db_path: str):
         self.con = duckdb.connect(db_path)
@@ -983,6 +1079,20 @@ class Pipeline:
             "INSERT INTO load_log VALUES (now(), ?, ?, ?, ?, ?, ?, ?, ?)",
             [res.store_key, res.period, len(res.fact_line), len(res.fact_basket),
              res.ok, warns, CONFIG_VERSION, res.source_files])
+
+        # The crosswalk was updated in build() (before this write), so history
+        # can now be moved onto it. No-op when nothing needs re-keying.
+        r = self.rekey_history()
+        print(f"  re-key: {r['baskets_rekeyed']:,} baskets, {r['lines_rekeyed']:,} lines, "
+              f"{r['distinct_customers_merged']:,} name-hash customers merged")
+
+    def rekey_history(self) -> dict:
+        """Move history keyed by a name hash onto the crosswalk's Alpine ID.
+
+        One transaction. Returns {baskets_rekeyed, lines_rekeyed,
+        distinct_customers_merged, ...}. See rekey_apply().
+        """
+        return rekey_apply(self.con)
 
     def load_inventory(self, inv: pd.DataFrame, snapshot_date: str) -> dict[str, int]:
         """Load an inventory snapshot.

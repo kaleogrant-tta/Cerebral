@@ -46,8 +46,8 @@ DATA
                        brands by net-sales share, so it is directional for
                        "is this brand already being discounted" and is NOT a
                        per-brand cost figure. The page says this out loud.
-  dash_promo_brand     redeemer cohort churn, for whether past discounting on
-                       this brand bought a lasting customer.
+  dash_promo_brand     every customer who bought the brand at a store (not only
+                       redeemers), for whether buyers of this brand came back.
 
 None of these carry a date grain except dash_bei's own window, so this
 section is whole-period and honours the store filter only, never the weeks
@@ -207,11 +207,15 @@ def _load_realized(q, keys: list[int], brand: str) -> dict | None:
     }
 
 
-def _load_cohort(q, keys: list[int], brand: str) -> pd.Series | None:
+def _load_cohort(q, keys: list[int], brand: str) -> pd.DataFrame | None:
+    """One row per store. Customer counts are NOT added across stores: a
+    shopper at two stores would count twice, and distinct customers cannot
+    be recovered from per-store counts."""
     ks = ",".join(str(k) for k in _real_keys(keys))
     safe = brand.replace("'", "''")
     df = q(f"""
-        SELECT SUM(customers) AS customers,
+        SELECT store_key,
+               SUM(customers) AS customers,
                SUM(repeat_buyers) AS repeat_buyers,
                SUM(spend_sum) AS spend_sum,
                SUM(gm_sum) AS gm_sum,
@@ -219,10 +223,11 @@ def _load_cohort(q, keys: list[int], brand: str) -> pd.Series | None:
                SUM(churned_90) AS churned_90
         FROM dash_promo_brand
         WHERE store_key IN ({ks}) AND brand = '{safe}'
+        GROUP BY 1 ORDER BY 1
     """)
-    if df.empty or pd.isna(df.iloc[0]["customers"]):
+    if df.empty or pd.isna(df["customers"]).all():
         return None
-    return df.iloc[0]
+    return df
 
 
 # ------------------------------------------------------------ the model
@@ -501,17 +506,40 @@ def render_brand_roi(q, keys, stores, heading=None, table_exists=None,
 
     # -------------------------------------------------------- did it stick
     cohort = _load_cohort(q, keys, brand)
-    if cohort is not None and float(cohort["customers"] or 0) > 0:
-        st.markdown("### Did past discounting buy a lasting customer?")
-        customers = float(cohort["customers"])
-        churn60 = float(cohort["churned_60"] or 0) / customers
-        repeat = float(cohort["repeat_buyers"] or 0) / customers
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Redeemers", f"{customers:,.0f}")
-        c2.metric("Came back", _pct(repeat))
-        c3.metric("Gone at 60 days", _pct(churn60))
+    if cohort is not None and float(cohort["customers"].sum() or 0) > 0:
+        st.markdown("### Did buyers of this brand come back?")
+        tot = cohort[["customers", "repeat_buyers", "churned_60"]].astype(float).sum()
+        repeat = tot["repeat_buyers"] / tot["customers"]
+        churn60 = tot["churned_60"] / tot["customers"]
+        if len(cohort) == 1:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Buyers", f"{tot['customers']:,.0f}")
+            c2.metric("Came back", _pct(repeat))
+            c3.metric("Gone at 60 days", _pct(churn60))
+        else:
+            rows = []
+            for _, r in cohort.iterrows():
+                n = float(r["customers"] or 0)
+                rows.append({
+                    "Store": stores.get(int(r["store_key"]), str(r["store_key"])),
+                    "Buyers": n,
+                    "Came back": (float(r["repeat_buyers"] or 0) / n
+                                  if n else np.nan),
+                    "Gone at 60 days": (float(r["churned_60"] or 0) / n
+                                        if n else np.nan)})
+            st.dataframe(
+                pd.DataFrame(rows).style.format({
+                    "Buyers": "{:,.0f}", "Came back": "{:.0%}",
+                    "Gone at 60 days": "{:.0%}"}),
+                use_container_width=True, hide_index=True)
+            _note(
+                "Buyers are counted per store. A shopper who bought this "
+                "brand at two stores appears in both rows, so the rows are "
+                "not added into a chain total.")
         _note(
-            "These are people who took an offer on this brand at some point, "
-            "not the customers the simulation above is about. If most of "
-            "them churned inside 60 days, the discount bought units rather "
-            "than a relationship, and the margin math is the whole story.")
+            "These are <b>all customers who bought this brand</b> at the "
+            "store, whether or not they used an offer. <b>Gone at 60 days</b> "
+            "means they last bought it more than 60 days before the end of "
+            "the data, counted over the whole history, so it is high for "
+            "almost every brand. Redemption-based cohorts (people who "
+            "actually used an offer) are not yet published.")

@@ -102,22 +102,23 @@ GLOSSARY: dict[str, str] = {
 
     # --- basket relationships --------------------------------------------
     "co-purchase lift":
-        "Whether two categories get bought together more or less often than "
-        "chance would predict. Above 1.3 means genuine affinity — put them "
-        "near each other. Below 0.7 means customers pick one or the other. "
-        "Around 1.0 means no relationship.\n\n"
-        "Only baskets already containing two or more categories are counted. "
-        "Over half of all baskets hold a single item, and including those "
-        "makes every pair look like a substitute, which tells you nothing.",
+        "How often two categories land in the same basket, compared with how "
+        "often their sizes alone would suggest.\n\n"
+        "Only baskets already containing two or more categories are counted "
+        "(over half of all baskets hold a single item). In those baskets even "
+        "unrelated big categories score below 1.0, so 1.0 is NOT the neutral "
+        "point. Pairs are read against the median pair instead: well below it "
+        "(under 0.7x the median) is labelled substitutes, well above it (over "
+        "1.3x) is labelled affinity. It is a relative read, not proof.",
 
     "substitutes":
-        "Two categories customers choose between rather than buying together. "
-        "Worth knowing before you cut one — the demand may just move rather "
-        "than disappear.",
+        "A pair that shares baskets far less often than the typical pair. It "
+        "may be two categories customers choose between, so demand could move "
+        "rather than disappear if you cut one - worth checking before acting.",
 
     "affinity":
-        "Two categories customers tend to buy on the same visit. Candidates "
-        "for adjacent placement, bundles, or an upsell prompt.",
+        "A pair that shares baskets far more often than the typical pair. "
+        "Candidates for adjacent placement, bundles, or an upsell prompt.",
 
     # --- inventory --------------------------------------------------------
     "SSI":
@@ -304,7 +305,7 @@ SECTIONS: dict[str, str] = {
         "meaningful.",
 
     "lift":
-        "Which categories get bought together, and which get chosen between. "
+        "Which categories get bought together more or less than the typical pair. "
         "Useful for menu layout, bundles and deciding whether cutting a "
         "category would move demand elsewhere or simply lose it.",
 

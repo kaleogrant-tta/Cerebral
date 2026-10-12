@@ -164,13 +164,27 @@ def _detail_for_metric(ev, sd, chain, metric):
     blocked = {sk: _expand(set(g["event_date"])) | chain_blocked
                for sk, g in ev[~ev.is_offsite].groupby("store_key")}
 
+    # Days on which each store hosts its own on-site event, buffered. A store
+    # in this set is TREATED that day, so it can never be a control for
+    # another store's event (H3). Sibling stores of a multi-store event are
+    # covered because each has its own dim_event row on the same date.
+    onsite = ev[~ev.is_offsite]
+    own_event_days = {sk: _expand(set(g["event_date"]))
+                      for sk, g in onsite.groupby("store_key")}
+    sibling_stores = {}
+    if "airtable_record_id" in ev.columns:
+        for rid, g in onsite.groupby("airtable_record_id"):
+            if rid:
+                sibling_stores[rid] = set(int(k) for k in g["store_key"])
+
     rows = []
     for _, e in ev.iterrows():
         sk = 0 if e.is_offsite else int(e.store_key)
         if sk not in by_store:
             continue
         blk = chain_blocked if sk == 0 else blocked.get(sk, chain_blocked)
-        others = [k for k in by_store if k not in (sk, 0)]
+        sibs = sibling_stores.get(e.get("airtable_record_id", ""), set())
+        others = [k for k in by_store if k not in (sk, 0) and k not in sibs]
         for off in OFFSETS:
             day = e["event_date"] + pd.Timedelta(days=off)
             own, nc, obs, base = _lift(by_store[sk], day, blk)
@@ -179,15 +193,22 @@ def _detail_for_metric(ev, sd, chain, metric):
             did = np.nan
             drift = np.nan
             counterfactual = base
+            controls_used = 0
             if e.has_control:
+                clean = [k for k in others
+                         if day not in own_event_days.get(k, ())]
                 vals = [_lift(by_store[k], day,
                               blocked.get(k, chain_blocked))[0]
-                        for k in others]
+                        for k in clean]
                 vals = [v for v in vals if np.isfinite(v)]
+                controls_used = len(vals)
                 if vals:
                     drift = float(np.mean(vals))
                     did = own - drift
                     counterfactual = base * (1 + drift)
+                else:
+                    # no clean control store: unmeasured, not "no drift"
+                    counterfactual = np.nan
             incremental = obs - counterfactual
             rows.append({
                 "metric": metric, "event_id": e.event_id,
@@ -200,7 +221,8 @@ def _detail_for_metric(ev, sd, chain, metric):
                 "store_key": sk, "is_offsite": bool(e.is_offsite),
                 "has_control": bool(e.has_control), "offset": off,
                 "own_lift": own, "control_drift": drift, "did": did,
-                "n_controls": nc,
+                "n_controls": nc, "controls_used": controls_used,
+                "measured": bool(np.isfinite(incremental)),
                 "observed": obs, "baseline": base,
                 "counterfactual": counterfactual,
                 "incremental": incremental,
@@ -272,16 +294,20 @@ def _cost_table(ev, detail):
     if key not in ev.columns or "net_tta_cost" not in ev.columns:
         return pd.DataFrame()
 
-    d0 = detail[(detail.metric == "new_customers") & (detail.offset == 0)]
+    d0 = detail[(detail.metric == "new_customers") & (detail.offset == 0)
+                & detail.measured]
     inc = (d0.groupby(key)
-             .agg(incremental_new=("incremental_share", "sum"),
+             .agg(incremental_new=("incremental_share",
+                                    lambda x: x.sum(min_count=1)),
                   observed_new=("observed", "sum"),
                   rows_measured=("event_id", "count"),
                   min_controls=("n_controls", "min"),
+                  min_controls_used=("controls_used", "min"),
                   coincident=("coincident", "max"))
              .reset_index())
 
-    net_d0 = detail[(detail.metric == "net") & (detail.offset == 0)]
+    net_d0 = detail[(detail.metric == "net") & (detail.offset == 0)
+                    & detail.measured]
     inc_net = (net_d0.groupby(key)["incremental_share"].sum()
                      .rename("incremental_net_sales").reset_index())
 

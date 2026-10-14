@@ -457,11 +457,33 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
             g["repeat_rate"] = g.repeaters / g.customers.replace(0, np.nan)
             g["cohort_month"] = pd.to_datetime(g.cohort_month)
 
+            # A cohort is only "observed" for 90 days if its NEWEST member
+            # has had 90 days, i.e. the end of the cohort month is at least
+            # 90 days before the end of the data. (The average days observed
+            # hides the newest customers and let young cohorts through.)
+            try:
+                data_end = pd.to_datetime(
+                    q("SELECT MAX(cov_end) AS d FROM dash_retention_meta")
+                    .d.iloc[0])
+            except Exception:
+                data_end = pd.NaT
+            if pd.isna(data_end):
+                data_end = (g.cohort_month.max() + pd.offsets.MonthEnd(0))
+            g["accruing"] = ((g.cohort_month + pd.offsets.MonthEnd(0)
+                              + pd.Timedelta(days=90)) > data_end)
+
             mature = st.checkbox(
-                "Only cohorts observed at least 90 days", value=True,
-                help="Excludes cohorts too recent to have had a fair chance "
-                     "to return.")
-            gg = g[g.days_observed >= 90] if mature else g
+                "Hide cohorts still accruing (under 90 days for every customer)",
+                value=True,
+                help="Excludes cohorts whose newest customers have not yet "
+                     "had 90 days to return.")
+            gg = g[~g.accruing] if mature else g
+            st.caption(
+                "Repeat rate here is 'ever ordered again', so it also rises "
+                "with how long a cohort has been observed. Compare cohorts of "
+                "similar age. Cohorts marked 'still accruing' have not yet "
+                "had 90 days for every customer and will read low."
+                + ("" if mature else " They are included below."))
 
             if not gg.empty:
                 fig = px.line(gg.sort_values("cohort_month"),
@@ -485,6 +507,8 @@ def render_retention(q, keys, stores, heading=None, table_exists=None,
                         "Repeat rate": t.repeat_rate,
                         "Revenue": t.revenue,
                         "Days observed": t.days_observed,
+                        "Status": np.where(t.accruing, "still accruing",
+                                           "90+ days"),
                     }), shading={"Repeat rate": "blue", "Revenue": "green"},
                         fmt={"Customers": "{:,.0f}", "Repeat rate": "{:.0%}",
                              "Revenue": "${:,.0f}",

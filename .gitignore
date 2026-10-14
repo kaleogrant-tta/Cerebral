@@ -9,6 +9,8 @@ secrets.toml
 
 secrets.toml
 *.json
+# promo goals are config, not data - keep them tracked
+!Cerebral/config/promo_goals.json
 
 # --- PII and working files ---
 *.duckdb

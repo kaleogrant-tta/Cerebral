@@ -102,22 +102,23 @@ GLOSSARY: dict[str, str] = {
 
     # --- basket relationships --------------------------------------------
     "co-purchase lift":
-        "Whether two categories get bought together more or less often than "
-        "chance would predict. Above 1.3 means genuine affinity — put them "
-        "near each other. Below 0.7 means customers pick one or the other. "
-        "Around 1.0 means no relationship.\n\n"
-        "Only baskets already containing two or more categories are counted. "
-        "Over half of all baskets hold a single item, and including those "
-        "makes every pair look like a substitute, which tells you nothing.",
+        "How often two categories land in the same basket, compared with how "
+        "often their sizes alone would suggest.\n\n"
+        "Only baskets already containing two or more categories are counted "
+        "(over half of all baskets hold a single item). In those baskets even "
+        "unrelated big categories score below 1.0, so 1.0 is NOT the neutral "
+        "point. Pairs are read against the median pair instead: well below it "
+        "(under 0.7x the median) is labelled substitutes, well above it (over "
+        "1.3x) is labelled affinity. It is a relative read, not proof.",
 
     "substitutes":
-        "Two categories customers choose between rather than buying together. "
-        "Worth knowing before you cut one — the demand may just move rather "
-        "than disappear.",
+        "A pair that shares baskets far less often than the typical pair. It "
+        "may be two categories customers choose between, so demand could move "
+        "rather than disappear if you cut one - worth checking before acting.",
 
     "affinity":
-        "Two categories customers tend to buy on the same visit. Candidates "
-        "for adjacent placement, bundles, or an upsell prompt.",
+        "A pair that shares baskets far more often than the typical pair. "
+        "Candidates for adjacent placement, bundles, or an upsell prompt.",
 
     # --- inventory --------------------------------------------------------
     "SSI":
@@ -259,6 +260,46 @@ GLOSSARY: dict[str, str] = {
 
     "% of matchable (+30d)":
         "Sign-ups who bought within 30 days, as a share of matchable sign-ups in the bucket.",
+
+    # --- promos (Promo Lab) -----------------------------------------------
+    "qualifying":
+        "A basket that looks like the offer — the right brand, enough units, or "
+        "enough spent — whether or not the discount was actually rung. There are "
+        "no promo codes in the sales data, so this is worked out from what was "
+        "in the basket. It counts the people the offer reached.",
+
+    "applied":
+        "A qualifying basket where the evidence says the deal was actually "
+        "given: either the prices show it (three gummies averaging $20 each on "
+        "a 3-for-$60 offer) or the till discount on the basket covers at least "
+        "half of what the offer would take off. It is an estimate — the sales "
+        "export carries each product's average price for the load period, not "
+        "the price on the receipt, and any other discount on the basket can "
+        "look like the offer. Applied divided by qualifying is the share of "
+        "eligible baskets that got the deal; well under 100% means the till is "
+        "not ringing it every time, or people are buying the brand without "
+        "asking for the offer.",
+
+    "near miss":
+        "A basket one step short of qualifying — two gummies on a 3-for offer, "
+        "three eighths on a 4-for offer, or a few dollars under a spend bar "
+        "with no add-on. These are the customers a word at the counter would "
+        "have tipped over, so a high count is an opportunity, not a failure.",
+
+    "est. discount":
+        "What the offer gave away: the brand's normal unit price (the clean "
+        "run-up days before the promo, with days under another offer on the "
+        "same brand left out) minus the price actually paid, times the units, "
+        "added up over applied baskets. Where the price does not show the deal, "
+        "the basket's till discount is used instead, capped at what the offer "
+        "implies. An estimate, not a figure from the till.",
+
+    "break-even volume lift":
+        "How much more of the brand must sell for the margin dollars to come "
+        "back to where they were before the discount: depth ÷ (margin − depth). "
+        "A 20% discount on a 50% margin needs +67% units just to stand still. "
+        "If the discount depth is as big as the margin, no amount of volume "
+        "rescues it.",
 }
 
 
@@ -304,7 +345,7 @@ SECTIONS: dict[str, str] = {
         "meaningful.",
 
     "lift":
-        "Which categories get bought together, and which get chosen between. "
+        "Which categories get bought together more or less than the typical pair. "
         "Useful for menu layout, bundles and deciding whether cutting a "
         "category would move demand elsewhere or simply lose it.",
 

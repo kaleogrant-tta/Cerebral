@@ -1,5 +1,7 @@
 
 *.json
+# promo goals are config, not data - keep them tracked (edit via the Live board download)
+!config/promo_goals.json
 .env
 *.duckdb
 history/

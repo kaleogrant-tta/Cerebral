@@ -1425,12 +1425,27 @@ def section_insights():
     @st.fragment
     def _frag_pair_drill():
         if not lift.empty:
-            lift["Read"] = lift.lift.apply(
+            # The published pairs only cover baskets holding 2+ categories, and
+            # lift is measured against category shares of THOSE baskets. In
+            # such baskets two big categories cannot both be "the" category
+            # chosen twice, so unrelated pairs sit well below 1.0 (the neutral
+            # value is not 1.0). Judge each pair against the median pair.
+            lift_med = float(lift.lift.median())
+            lift["rel"] = lift.lift / lift_med if lift_med > 0 else float("nan")
+            lift["Read"] = lift.rel.apply(
                 lambda v: "substitutes" if v < .7 else
                           ("affinity" if v > 1.3 else "independent"))
+            st.caption(
+                f"Lift here is measured only in baskets holding two or more "
+                f"categories, where even unrelated pairs land below 1.0. So "
+                f"pairs are read against the median pair ({lift_med:.2f}): "
+                f"'substitutes' means well below the median (under 0.7x), "
+                f"'affinity' well above it (over 1.3x). These are relative "
+                f"reads, not proof that customers choose between the two.")
             st.dataframe(pd.DataFrame({
                 "Pair": lift.cat_a + "  +  " + lift.cat_b,
                 "Lift": lift.lift.round(2),
+                "vs median pair": lift.rel.round(2),
                 "Baskets": lift.baskets,
                 "What it means": lift.Read,
             }), use_container_width=True, hide_index=True, column_config={
@@ -1442,9 +1457,14 @@ def section_insights():
                     help="How many transactions contained both. Bigger numbers "
                          "make the result more reliable.", format="%d"),
                 "What it means": st.column_config.TextColumn(
-                    help="Substitutes — customers pick one or the other. "
-                         "Affinity — often bought together. "
-                         "Independent — no real relationship."),
+                    help="Compared with the median pair, because lift is "
+                         "measured in multi-category baskets only. "
+                         "Substitutes — well below the median (under 0.7x). "
+                         "Affinity — well above it (over 1.3x). "
+                         "Independent — near the median."),
+                "vs median pair": st.column_config.NumberColumn(
+                    help="This pair's lift divided by the median lift across "
+                         "all pairs shown.", format="%.2f"),
             })
 
 
@@ -1455,11 +1475,12 @@ def section_insights():
                         'products sit behind the category-level read, and what it '
                         'suggests for buying.</p>', unsafe_allow_html=True)
 
-            labels = [f"{r.cat_a} + {r.cat_b}  ({r.lift:.2f} — {r.Read})"
+            labels = [f"{r.cat_a} + {r.cat_b}  ({r.lift:.2f}, {r.rel:.2f}x median — {r.Read})"
                       for _, r in lift.iterrows()]
             choice = st.selectbox("Category pair", labels, key="pairpick")
             row = lift.iloc[labels.index(choice)]
-            ca, cb, lv, read = row.cat_a, row.cat_b, float(row.lift), row.Read
+            ca, cb, lv, read = row.cat_a, row.cat_b, float(row.rel), row.Read
+            raw_lift = float(row.lift)
 
             bt = q(f"""
             SELECT category, brand,
@@ -1528,12 +1549,12 @@ def section_insights():
 
                 if read == "substitutes":
                     strength = ("strongly" if lv < 0.5 else
-                                "moderately" if lv < 0.62 else "mildly")
+                                "moderately" if lv < 0.6 else "mildly")
                     lines.append(
-                        f"Customers {strength} choose between **{ca}** and "
-                        f"**{cb}** rather than buying both (lift {lv:.2f}). Demand "
-                        f"is more likely to move between them than to disappear if "
-                        f"you cut one.")
+                        f"These two are {strength} less likely than the typical pair to share a basket, so **{ca}** and "
+                        f"**{cb}** may be alternatives rather than bought together (lift {raw_lift:.2f}, {lv:.2f}x the median pair). If so, demand "
+                        f"may move between them rather than disappear if "
+                        f"you cut one - worth checking before acting.")
 
                     if pd.notna(a_chg) and pd.notna(b_chg) and abs(a_chg - b_chg) > 15:
                         up_cat, dn_cat = (cb, ca) if b_chg > a_chg else (ca, cb)
@@ -1571,8 +1592,8 @@ def section_insights():
                 elif read == "affinity":
                     lines.append(
                         f"**{ca}** and **{cb}** get bought together "
-                        f"{'far ' if lv > 1.8 else ''}more than chance predicts "
-                        f"(lift {lv:.2f}).")
+                        f"{'far ' if lv > 1.8 else ''}more than the typical pair "
+                        f"(lift {raw_lift:.2f}, {lv:.2f}x the median pair).")
                     if len(bp_top):
                         r0 = bp_top.iloc[0]
                         lines.append(
@@ -1595,7 +1616,7 @@ def section_insights():
                 else:
                     lines.append(
                         f"**{ca}** and **{cb}** have no meaningful relationship "
-                        f"(lift {lv:.2f}). Buying, pricing and merchandising "
+                        f"(lift {raw_lift:.2f}, {lv:.2f}x the median pair). Buying, pricing and merchandising "
                         f"decisions on one carry no implication for the other.")
                     interesting = pd.concat([a_up.head(1), a_dn.head(1),
                                              b_up.head(1), b_dn.head(1)])
@@ -1846,6 +1867,25 @@ def section_brands():
                             .drop_duplicates("brand")
                             .set_index("brand")["category"])
             bs["category"] = bs.brand.map(topcat)
+            # First-basket / established counts: dash_brand_week holds them
+            # per week, so summing it counts a repeat shopper once for every
+            # week they bought (about 2x) and a two-category first basket
+            # twice. On the full window use the scorecard's own distinct
+            # counts instead. Brands the scorecard does not carry keep their
+            # weekly first-basket sum and get no established count (no ratio).
+            if WIN_FULL and table_exists("dash_brand_scorecard"):
+                sc_cnt = q(f"""
+                    SELECT brand,
+                           SUM(first_basket_customers) AS sc_first,
+                           SUM(established_customers)  AS sc_est
+                    FROM dash_brand_scorecard {sfilter(keys)} GROUP BY 1
+                """)
+                if not sc_cnt.empty:
+                    bs = bs.merge(sc_cnt, on="brand", how="left")
+                    has_sc = bs.sc_first.notna()
+                    bs["first_basket"] = bs.sc_first.where(has_sc, bs.first_basket)
+                    bs["established"] = bs.sc_est.where(has_sc, float("nan"))
+                    bs = bs.drop(columns=["sc_first", "sc_est"])
             if HAVE_BPW:
                 sk = q(f"""
                     SELECT brand, COUNT(DISTINCT product) AS skus
@@ -1907,9 +1947,9 @@ def section_brands():
             est_total = bs.established.sum()
             # Established-customer counts are per week in dash_brand_week, so
             # summing them across a multi-week window counts a repeat buyer
-            # once per week they shopped. That is fine as a denominator only
-            # when the window is the whole file, where it matches the
-            # scorecard's own definition.
+            # once per week they shopped. On the whole file the counts above
+            # come from dash_brand_scorecard (distinct customers); on a
+            # narrowed window there is no valid denominator, so it is hidden.
             has_tenure = est_total > 0 and (WIN_FULL or not HAVE_BW)
             if has_tenure:
                 bs["acq_ratio"] = (bs.first_basket /
@@ -2849,7 +2889,8 @@ def section_redemptions():
             st.markdown('<div class="howto"><b>How to read the scorecard.</b> '
                         '<b>Redemption Rate</b> is engagement. '
                         '<b>Redemption Cost %</b> is the true price of the program. '
-                        '<b>Sales / Redeem Bkt</b> is the ROI proxy.</div>',
+                        '<b>Sales / Redeem Bkt</b> is total store sales divided by the '
+                        'number of redeeming baskets.</div>',
                         unsafe_allow_html=True)
 
             red_store["redeem_rate"] = red_store.redeem_baskets / red_store.baskets.replace(0, float("nan"))
@@ -2857,7 +2898,6 @@ def section_redemptions():
             red_store["sales_per_redeem_basket"] = red_store.net / red_store.redeem_baskets.replace(0, float("nan"))
 
             by_rate = red_store.sort_values("redeem_rate", ascending=False)
-            by_roi = red_store.sort_values("sales_per_redeem_basket", ascending=False)
 
             h1, h2, h3, h4 = st.columns(4)
             with h1:
@@ -2873,17 +2913,22 @@ def section_redemptions():
                             f'{bot.redeem_rate*100:.1f}%</div>',
                             unsafe_allow_html=True)
             with h3:
-                top_roi = by_roi.iloc[0]
-                st.markdown(f'<div class="alert a-ok"><b>Best ROI</b><br>'
-                            f'{STORES.get(top_roi.store_key, top_roi.store_key)} — '
-                            f'${top_roi.sales_per_redeem_basket:.0f} / redeem bkt</div>',
+                top_c = red_store.sort_values("redeem_pct_of_net").iloc[0]
+                st.markdown(f'<div class="alert a-ok"><b>Lowest redemption cost</b><br>'
+                            f'{STORES.get(top_c.store_key, top_c.store_key)} — '
+                            f'{top_c.redeem_pct_of_net*100:.1f}% of net</div>',
                             unsafe_allow_html=True)
             with h4:
-                bot_roi = by_roi.iloc[-1]
-                st.markdown(f'<div class="alert a-bad"><b>Worst ROI</b><br>'
-                            f'{STORES.get(bot_roi.store_key, bot_roi.store_key)} — '
-                            f'${bot_roi.sales_per_redeem_basket:.0f} / redeem bkt</div>',
+                bot_c = red_store.sort_values("redeem_pct_of_net").iloc[-1]
+                st.markdown(f'<div class="alert a-warn"><b>Highest redemption cost</b><br>'
+                            f'{STORES.get(bot_c.store_key, bot_c.store_key)} — '
+                            f'{bot_c.redeem_pct_of_net*100:.1f}% of net</div>',
                             unsafe_allow_html=True)
+            st.caption("Cards show how often each store redeems (share of baskets with a "
+                       "redemption) and what the programme costs it (redemption dollars as a "
+                       "share of net sales). Sales / Redeem Bkt is not a return: it is just "
+                       "average basket divided by redemption rate, so it is lowest where "
+                       "redemption is highest.")
 
             st.dataframe(pd.DataFrame({
                 "Store": red_store.store_key.map(STORES),
@@ -2938,7 +2983,8 @@ def section_redemptions():
                SUM(redeemers)              AS redeemers,
                SUM(first_visit_redeemers)  AS first_visit,
                SUM(established_redeemers)  AS established,
-               AVG(avg_basket)             AS avg_basket
+               SUM(avg_basket * redemptions) AS basket_x_red,
+               SUM(CASE WHEN avg_basket IS NOT NULL THEN redemptions END) AS basket_w
         FROM dash_brand_redemption {wf}
         GROUP BY 1,2
     """)
@@ -2984,7 +3030,11 @@ def section_redemptions():
             spend=("spend", "sum"), redeemers=("redeemers", "sum"),
             first_visit=("first_visit", "sum"),
             established=("established", "sum"),
-            avg_basket=("avg_basket", "mean")).sort_values("spend", ascending=False)
+            basket_x_red=("basket_x_red", "sum"),
+            basket_w=("basket_w", "sum")).sort_values("spend", ascending=False)
+        # Weighted by redemptions (the table has no basket count), not an
+        # average of per-row averages.
+        a["avg_basket"] = a.basket_x_red / a.basket_w.replace(0, float("nan"))
         a["cost_per_redeemer"] = a.spend / a.redeemers.replace(0, float("nan"))
 
         st.dataframe(pd.DataFrame({
@@ -2996,7 +3046,7 @@ def section_redemptions():
             "First-visit": a.first_visit,
             "Established": a.established,
             "Cost per redeemer": a.cost_per_redeemer.round(2),
-            "Avg basket": a.avg_basket.round(2),
+            "Avg basket (weighted)": a.avg_basket.round(2),
         }), use_container_width=True, hide_index=True, column_config={
             "Redemptions": st.column_config.NumberColumn(format="%d"),
             "Spend $": st.column_config.NumberColumn(format="$%d"),
@@ -3004,8 +3054,11 @@ def section_redemptions():
             "First-visit": st.column_config.NumberColumn(format="%d"),
             "Established": st.column_config.NumberColumn(format="%d"),
             "Cost per redeemer": st.column_config.NumberColumn(format="$%.2f"),
-            "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
+            "Avg basket (weighted)": st.column_config.NumberColumn(format="$%.2f"),
         })
+        st.caption("Avg basket is weighted by redemptions across stores and categories. "
+                   "Redeemers, First-visit and Established are summed across stores, so a "
+                   "person who redeemed at two stores is counted twice.")
 
         if a.brand.astype(str).str.startswith(
                 ("Secret Drops", "Travel Club Substitution")).any():
@@ -3064,7 +3117,9 @@ def section_redemptions():
                        END AS category,
                        SUM(redemptions) AS redemptions,
                        SUM(redeem_value) AS spend,
-                       AVG(avg_basket)  AS avg_basket
+                       SUM(avg_basket * redemptions)
+                         / NULLIF(SUM(CASE WHEN avg_basket IS NOT NULL
+                                           THEN redemptions END), 0) AS avg_basket
                 FROM dash_offer_performance
                 WHERE brand = '{sel_brand.replace("'", "''")}' {af}
                 GROUP BY 1,2
@@ -3077,7 +3132,9 @@ def section_redemptions():
                 SELECT offer_name AS sku, category,
                        SUM(redemptions) AS redemptions,
                        SUM(redeem_value) AS spend,
-                       AVG(avg_basket)  AS avg_basket
+                       SUM(avg_basket * redemptions)
+                         / NULLIF(SUM(CASE WHEN avg_basket IS NOT NULL
+                                           THEN redemptions END), 0) AS avg_basket
                 FROM dash_offer_performance
                 WHERE brand = '{sel_brand.replace("'", "''")}' {af}
                 GROUP BY 1,2
@@ -3102,12 +3159,12 @@ def section_redemptions():
                     "Redemptions": sku.redemptions,
                     "Spend $": sku.spend.round(0),
                     "Cost each": sku.cost_per_redemption.round(2),
-                    "Avg basket": sku.avg_basket.round(2),
+                    "Avg basket (weighted)": sku.avg_basket.round(2),
                 }), use_container_width=True, hide_index=True, column_config={
                     "Redemptions": st.column_config.NumberColumn(format="%d"),
                     "Spend $": st.column_config.NumberColumn(format="$%d"),
                     "Cost each": st.column_config.NumberColumn(format="$%.2f"),
-                    "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
+                    "Avg basket (weighted)": st.column_config.NumberColumn(format="$%.2f"),
                 })
 
                 top = sku.head(15)
@@ -3235,7 +3292,9 @@ def section_redemptions():
             SELECT offer_name, brand, category,
                    SUM(redemptions) AS redemptions,
                    SUM(redeem_value) AS spend,
-                   AVG(avg_basket) AS avg_basket
+                   SUM(avg_basket * redemptions)
+                     / NULLIF(SUM(CASE WHEN avg_basket IS NOT NULL
+                                       THEN redemptions END), 0) AS avg_basket
             FROM dash_offer_performance {wf}
             GROUP BY 1,2,3 ORDER BY spend DESC
         """)
@@ -3250,11 +3309,11 @@ def section_redemptions():
                     "Redemptions": off.redemptions,
                     "Spend $": off.spend.round(0),
                     "Cost each": off.cost_per_redemption.round(2),
-                    "Avg basket": off.avg_basket.round(2),
+                    "Avg basket (weighted)": off.avg_basket.round(2),
                 }), use_container_width=True, hide_index=True, column_config={
                     "Spend $": st.column_config.NumberColumn(format="$%d"),
                     "Cost each": st.column_config.NumberColumn(format="$%.2f"),
-                    "Avg basket": st.column_config.NumberColumn(format="$%.2f"),
+                    "Avg basket (weighted)": st.column_config.NumberColumn(format="$%.2f"),
                 })
 
             st.markdown('<p class="note">These figures describe what redemptions '
@@ -3268,10 +3327,11 @@ def section_redemptions():
 # -------------------------------------------------------------- projections
 def section_projections():
     st.markdown("#### Next Quarter Projection")
-    st.markdown(f'<p class="note">Simple linear projections fitted to the '
-                f'<b>{len(WIN)} week{"s" if len(WIN) != 1 else ""}</b> you '
-                f'have selected in the sidebar, extended 13 weeks forward. '
-                f'Use as a baseline, not a forecast.</p>',
+    st.markdown(f'<p class="note">A straight-line fit over the last '
+                f'<b>{min(26, len(WIN))} complete weeks</b> of your selected '
+                f'window (at most 26, and a partial latest week is left out), '
+                f'extended 13 weeks forward. It has no seasonal term. Use as a '
+                f'baseline, not a forecast.</p>',
                 unsafe_allow_html=True)
     if len(WIN) < 12:
         st.markdown(
@@ -3292,12 +3352,24 @@ def section_projections():
             proj_bw.iso_year.astype(str) + "-W" + proj_bw.iso_week.astype(str).str.zfill(2) + "-1",
             format="%G-W%V-%u", errors="coerce")
         proj_bw = proj_bw.sort_values("wk_date").reset_index(drop=True)
-        trend_n = min(26, len(proj_bw))
-        trend_bw = proj_bw.tail(trend_n).copy().reset_index(drop=True)
+        # A partial latest week would pull the line down: fit on complete
+        # weeks only, and project forward from the last complete week.
+        _lw_date = pd.Timestamp.fromisocalendar(
+            int(weeks.iloc[-1].iso_year), int(weeks.iloc[-1].iso_week), 1)
+        fit_bw = (proj_bw[proj_bw.wk_date < _lw_date]
+                  if PARTIAL_WEEK and proj_bw.wk_date.iloc[-1] == _lw_date
+                  else proj_bw).reset_index(drop=True)
+        if len(fit_bw) < 8:
+            st.info("Not enough complete weeks to build a projection.")
+            return
+        trend_n = min(26, len(fit_bw))
+        trend_bw = fit_bw.tail(trend_n).copy().reset_index(drop=True)
         trend_bw["x"] = range(len(trend_bw))
         z_b = np.polyfit(trend_bw.x, trend_bw.baskets, 1)
         z_n = np.polyfit(trend_bw.x, trend_bw.net, 1)
-        last_date = proj_bw.wk_date.iloc[-1]
+        _res = trend_bw.net - np.polyval(z_n, trend_bw.x)
+        res_sd = float(np.std(_res, ddof=2)) if len(trend_bw) > 2 else 0.0
+        last_date = fit_bw.wk_date.iloc[-1]
         future_dates = pd.date_range(start=last_date + pd.Timedelta(weeks=1),
                                      periods=13, freq="W-MON")
         future_x = range(len(trend_bw), len(trend_bw) + 13)
@@ -3310,8 +3382,8 @@ def section_projections():
         })
         total_proj_net = proj_df.projected_net.sum()
         total_proj_baskets = proj_df.projected_baskets.sum()
-        cur_quarter = proj_bw.tail(13).net.sum()
-        cur_baskets = proj_bw.tail(13).baskets.sum()
+        cur_quarter = fit_bw.tail(13).net.sum()
+        cur_baskets = fit_bw.tail(13).baskets.sum()
         c = st.columns(4)
         c[0].metric("Projected Quarter Net", f"${total_proj_net:,.0f}",
                     f"{(total_proj_net/cur_quarter-1)*100:+.1f}% vs last 13 wks")
@@ -3322,6 +3394,21 @@ def section_projections():
         st.divider()
         heading("Projected net sales by week")
         fig = go.Figure()
+        # Quiet band: +/- 2 residual standard deviations of the weekly fit.
+        _band = 2 * res_sd
+        _hex = WARN.lstrip("#")
+        _fill = (f"rgba({int(_hex[0:2], 16)},{int(_hex[2:4], 16)},"
+                 f"{int(_hex[4:6], 16)},0.12)" if len(_hex) == 6
+                 else "rgba(150,150,150,0.12)")
+        fig.add_scatter(x=proj_df.wk_date,
+                        y=proj_df.projected_net + _band, mode="lines",
+                        line=dict(width=0), hoverinfo="skip",
+                        showlegend=False)
+        fig.add_scatter(x=proj_df.wk_date,
+                        y=np.maximum(proj_df.projected_net - _band, 0),
+                        mode="lines", line=dict(width=0), fill="tonexty",
+                        fillcolor=_fill, hoverinfo="skip",
+                        name="Typical weekly range")
         fig.add_scatter(x=proj_bw.wk_date, y=proj_bw.net, name="Historical",
                         mode="lines+markers", line=dict(color=ACCENT, width=2),
                         marker=dict(size=5))
@@ -3332,6 +3419,14 @@ def section_projections():
         fig.update_layout(yaxis=dict(title="Net $", tickformat="$~s"),
                           xaxis_title="", hovermode="x unified")
         charts.show(fig, key="pc15", kind="line")
+        st.caption(
+            f"Straight-line fit over the last {trend_n} complete weeks"
+            + (" (the partial latest week is shown but not fitted)"
+               if len(fit_bw) < len(proj_bw) else "")
+            + f". Shaded band: plus or minus 2 residual standard deviations "
+              f"(${_band:,.0f} a week), the usual week-to-week scatter around "
+              f"the line. It does not include seasonality or the chance that "
+              f"the trend itself changes, so real misses can be larger.")
         st.divider()
         heading("Category projections")
         proj_cat = q(f"""
@@ -3346,6 +3441,8 @@ def section_projections():
                 proj_cat.iso_week.astype(str).str.zfill(2) + "-1",
                 format="%G-W%V-%u", errors="coerce")
             proj_cat = proj_cat.sort_values(["category", "wk_date"])
+            if PARTIAL_WEEK:       # same rule as above: fit complete weeks
+                proj_cat = proj_cat[proj_cat.wk_date < _lw_date]
             cat_rows = []
             for cat, g in proj_cat.groupby("category"):
                 g = g.tail(min(26, len(g))).copy().reset_index(drop=True)
@@ -3414,6 +3511,9 @@ def section_terms():
          ["co-purchase lift", "substitutes", "affinity"]),
         ("Inventory",
          ["SSI", "days supply", "inventory at cost", "SKUs", "sellable stock"]),
+        ("Promos (Promo Lab)",
+         ["qualifying", "applied", "near miss", "est. discount",
+          "break-even volume lift"]),
     ]
 
     for title, terms in groups:
@@ -3440,17 +3540,18 @@ def section_terms():
         'know which one it was.</p>', unsafe_allow_html=True)
 
 
-def render_promo_lab():
-    """Promo Lab: churn by category/store/brand + ROI estimates.
+def render_winback_model():
+    """Win-back model (the original Promo Lab): churn by category/store/brand + ROI estimates.
+    Rendered as the "Win-back model" sub-tab of the Promo Lab tab (promo_lab_tab.py).
     Uses fact_line locally, or the privacy-safe dash_promo_* tables online."""
     import os
     import numpy as np
     import pandas as pd
 
-    st.subheader("Promo Lab - Discount Intelligence & ROI")
-    st.caption("Where churn concentrates, and the projected return on fixing it with discounts. "
-               "Uses your real margins from the data, not a guess.")
-    st.markdown('<p class="note"><b>How to read this.</b> This tab answers one question: where is it worth spending discount dollars? A customer counts as <b>churned</b> when they have not bought anything within the lapse window you set below. Every table is ranked by <b>Net gain</b> - the money a win-back promo is projected to make after paying for the discount itself - not by churn rate. That way small, noisy segments can never outrank big, reliable ones. Set the assumptions to your own guesses; nothing here is final until a real campaign measures a real response rate.</p>', unsafe_allow_html=True)
+    st.markdown("##### Win-back model - discount intelligence & break-even")
+    st.caption("Where lapsed buyers concentrate, and the break-even on a win-back discount. "
+               "Margins come from the data; the win-back rate is your assumption, not a prediction.")
+    st.markdown('<p class="note"><b>How to read this.</b> This tab answers one question: where is it worth spending discount dollars? Here <b>churn</b> means <b>customers who last bought this category at this store more than N days ago, across the whole history</b> (N is the lapse window below). It includes one-time buyers from years ago, and someone who stopped buying a category at one store but shops elsewhere still counts. That is why churn is above 90% almost everywhere. Every figure is a <b>break-even threshold, not a prediction</b>: it shows what a win-back promo would have to achieve to pay for its own discount, given the win-back rate you assume. Nothing here is a measured response rate until a real campaign measures one.</p>', unsafe_allow_html=True)
 
     # ---------- data: full detail locally, privacy-safe aggregates online ----------
     pub_cat, pub_brand = pd.DataFrame(), pd.DataFrame()
@@ -3536,8 +3637,6 @@ def render_promo_lab():
         g["promo_cost"] = (g["incr_revenue"] * DISCOUNT).round(0)
         g["incr_profit"] = (g["incr_revenue"] * g["real_margin"]).round(0)
         g["net_gain"] = (g["incr_profit"] - g["promo_cost"]).round(0)
-        g["roi_pct"] = np.where(g["promo_cost"] > 0,
-                                (g["net_gain"] / g["promo_cost"] * 100).round(0), np.nan)
         g = g[(g["customers"] >= MIN_CUST) & (g["reachable"] >= 5)]
         return g.sort_values("net_gain", ascending=False)
 
@@ -3545,32 +3644,17 @@ def render_promo_lab():
               "churn_rate": "Churn %", "repeat_rate": "Repeat %",
               "avg_lapsed_spend": "Avg lapsed spend $", "reachable": "Targetable",
               "expected_winbacks": "Expected win-backs", "incr_revenue": "Incr. revenue $",
-              "promo_cost": "Promo cost $", "net_gain": "Net gain $", "roi_pct": "ROI %",
+              "promo_cost": "Promo cost $", "net_gain": "Net gain $",
               "real_margin": "Real margin", "store_key": "Store", "brand": "Brand"}
     MONEY_FMT = {"Avg lapsed spend $": "${:,.0f}", "Incr. revenue $": "${:,.0f}",
                  "Promo cost $": "${:,.0f}", "Net gain $": "${:,.0f}",
-                 "ROI %": "{:,.0f}%", "Real margin": "{:.0%}"}
+                 "Real margin": "{:.0%}"}
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    # Channel & Day Promo and Promo Calendar used to be nested here; they are
+    # now top-level sub-tabs of the Promo Lab (promo_lab_tab.py).
+    tab1, tab2, tab3, tab4 = st.tabs(
         ["Churn Map (Categories)", "Store Opportunities", "Brand Promos",
-         "Brand Discount ROI", "Channel & Day Promo",
-         "Promo Calendar"])
-
-    # Declared here, rendered here. Tab ORDER comes from the list above, so
-    # this block sitting ahead of `with tab1:` costs nothing and leaves the
-    # existing blocks alone.
-    with tab6:
-        render_promo_calendar(q=q, keys=keys, stores=STORES,
-                              heading=None, table_exists=table_exists,
-                              accent=ACCENT, series=SERIES)
-
-    # Declared here, rendered here. Tab ORDER comes from the list above, so
-    # this block sitting ahead of `with tab1:` costs nothing and leaves the
-    # existing blocks alone.
-    with tab5:
-        render_channel_promo(q=q, keys=keys, stores=STORES,
-                             heading=None, table_exists=table_exists,
-                             accent=ACCENT, series=SERIES)
+         "Brand Discount ROI"])
 
     # Declared here, rendered here. Tab ORDER comes from the list above, so
     # this block sitting ahead of `with tab1:` costs nothing and keeps the
@@ -3585,8 +3669,8 @@ def render_promo_lab():
         seg = roi_table(pub_cat, ["category"])
         show = seg[["category", "customers", "churned", "churn_rate", "repeat_rate",
                     "real_margin", "avg_lapsed_spend", "expected_winbacks",
-                    "incr_revenue", "promo_cost", "net_gain", "roi_pct"]].rename(columns=RENAME)
-        st.markdown("**Segments ranked by net gain from a win-back promo**")
+                    "incr_revenue", "promo_cost", "net_gain"]].rename(columns=RENAME)
+        st.markdown("**Segments ranked by break-even net gain (at your assumed win-back rate)**")
         st.dataframe(show.style.format(MONEY_FMT)
                      .background_gradient(subset=["Net gain $"], cmap="Greens"),
                      use_container_width=True, hide_index=True)
@@ -3600,14 +3684,14 @@ def render_promo_lab():
             idx = store_seg.groupby("store_key")["net_gain"].idxmax()
             best = store_seg.loc[idx][["store_key", "category", "reachable", "churn_rate",
                                        "expected_winbacks", "incr_revenue",
-                                       "promo_cost", "net_gain", "roi_pct"]].rename(columns=RENAME)
+                                       "promo_cost", "net_gain"]].rename(columns=RENAME)
             st.dataframe(best.style.format(MONEY_FMT), use_container_width=True, hide_index=True)
 
         st.markdown("**Drill into a store**")
         pick = st.selectbox("Store", sorted(store_seg["store_key"].unique()), key="promo_store_pick")
         drill = store_seg[store_seg["store_key"] == pick][
             ["category", "customers", "churned", "churn_rate", "reachable",
-             "expected_winbacks", "incr_revenue", "promo_cost", "net_gain", "roi_pct"]
+             "expected_winbacks", "incr_revenue", "promo_cost", "net_gain"]
         ].rename(columns=RENAME)
         st.dataframe(drill.style.format(MONEY_FMT), use_container_width=True, hide_index=True)
 
@@ -3627,15 +3711,15 @@ def render_promo_lab():
                      use_container_width=True, hide_index=True)
 
     with tab3:
-        st.markdown('<p class="note"><b>What this means.</b> Brands ranked by the return on winning back their lapsed buyers. A <b>positive ROI</b> means the promo pays for itself under your assumptions. A negative one means the discount would cost more than it brings back - protect those brands and use them as traffic drivers in marketing instead of discounting them. High ROI with tiny dollar figures means interesting but not a priority.</p>', unsafe_allow_html=True)
-        st.markdown("**Brands ranked by win-back ROI**")
+        st.markdown('<p class="note"><b>What this means.</b> Brands ranked by the break-even gain from winning back their lapsed buyers (last bought the brand at this store more than N days ago). A <b>positive net gain</b> only means the promo pays for itself if your assumed win-back rate is reached - it is a threshold, not a forecast. A negative one means the discount would cost more than it brings back. Small dollar figures mean interesting but not a priority.</p>', unsafe_allow_html=True)
+        st.markdown("**Brands ranked by break-even net gain**")
         if pub_brand.empty:
             st.warning("No brand data in this build.")
         else:
             brand = roi_table(pub_brand, ["brand"])
             show = brand[["brand", "customers", "churn_rate", "repeat_rate", "real_margin",
                           "reachable", "expected_winbacks", "incr_revenue", "promo_cost",
-                          "net_gain", "roi_pct"]].rename(columns=RENAME)
+                          "net_gain"]].rename(columns=RENAME)
             st.dataframe(show.style.format(MONEY_FMT)
                          .background_gradient(subset=["Net gain $"], cmap="Greens"),
                          use_container_width=True, hide_index=True)
@@ -3643,10 +3727,9 @@ def render_promo_lab():
     positive = roi_table(pub_cat, ["store_key", "category"])
     positive = positive[positive["net_gain"] > 0]
     st.divider()
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Promos with positive ROI", f"{len(positive):,}")
-    m2.metric("Total customers to target", f"{int(positive['reachable'].sum()):,}")
-    m3.metric("Total projected net gain", f"${positive['net_gain'].sum():,.0f}")
+    st.metric("Store x category segments with positive net gain at your assumptions", f"{len(positive):,}")
+    st.caption("Customers are counted once per store x category, so segment totals "
+               "are not a head-count and are not added up here.")
 
     st.download_button("Download full ROI table (CSV)",
                        positive.rename(columns=RENAME).to_csv(index=False),
@@ -3812,16 +3895,37 @@ def takeover_stats(daily: pd.DataFrame, tk: dict, keys: list[int]) -> dict:
     prior = rates(b, start - pd.Timedelta(days=28),
                   start - pd.Timedelta(days=1), d)
 
-    # Rest-of-period baseline: every loaded day outside the takeover window.
-    n_all = (last_day - d.day.min()).days + 1
-    n_out = n_all - during["days"]
-    b_out = b[(b.day < start) | (b.day > eff_end)]
-    tot_out = d[(d.day < start) | (d.day > eff_end)].net.sum()
+    # Rest-of-period baseline: the brand's average day from its FIRST SALE
+    # (not from the first loaded day, when most of these brands did not exist
+    # on the menu), leaving out every takeover window for the same brand.
+    sold = b[b.net > 0]
+    first_sale = sold.day.min() if len(sold) else None
+    if first_sale is None or pd.isna(first_sale):
+        first_sale = last_day
+    own = [t for t in TAKEOVERS if set(t["patterns"]) & set(tk["patterns"])]
+    all_days = pd.date_range(first_sale, last_day, freq="D")
+    in_win = np.zeros(len(all_days), dtype=bool)
+    for t in own:
+        in_win |= ((all_days >= pd.Timestamp(t["start"]))
+                   & (all_days <= pd.Timestamp(t["end"])))
+    n_out = int((~in_win).sum())
+
+    def _outside(frame):
+        f = frame[frame.day >= first_sale]
+        for t in own:
+            f = f[(f.day < pd.Timestamp(t["start"]))
+                  | (f.day > pd.Timestamp(t["end"]))]
+        return f
+
+    b_out = _outside(b)
+    tot_out = _outside(d).net.sum()
     net_out = b_out.net.sum()
-    period = {"days": n_out, "net": net_out, "net_pd": net_out / n_out,
-              "baskets_pd": (b_out.baskets.sum() / n_out
+    nd = n_out if n_out > 0 else np.nan
+    period = {"days": n_out, "net": net_out, "net_pd": net_out / nd,
+              "since": first_sale,
+              "baskets_pd": (b_out.baskets.sum() / nd
                              if "baskets" in b_out.columns else np.nan),
-              "units_pd": (b_out.units.sum() / n_out
+              "units_pd": (b_out.units.sum() / nd
                            if "units" in b_out.columns else np.nan),
               "share": net_out / tot_out * 100 if tot_out > 0 else np.nan,
               "gm_pct": (b_out.gm.sum() / net_out * 100
@@ -3846,7 +3950,7 @@ def render_takeovers():
         '<div class="howto"><b>How to read this.</b> Each takeover window is '
         'measured <b>per day</b> and compared against two baselines, side by '
         'side: the <b>4 weeks before</b> the takeover, and the brand\'s '
-        'average across <b>the rest of the loaded data</b>. Per-day rates '
+        'average day <b>since its first sale</b>, leaving out its own takeover windows. Per-day rates '
         'keep a half-month takeover (Select, Dark Heart) comparable with a '
         'full-month one (Rythm), and they keep a takeover that is still '
         'running honest.<br><br>'
@@ -3855,6 +3959,12 @@ def render_takeovers():
         'whether the whole store simply had a good month. A takeover that '
         'lifts the brand\'s sales but not its share mostly rode the '
         'tide.</div>', unsafe_allow_html=True)
+
+    # ---- promos running now (any programme), from the dash_promo_* tables --
+    from takeover_promos import render_current_promos as _render_current_promos
+    _render_current_promos(q=q, keys=keys, stores=STORES, table_exists=table_exists,
+                           accent=ACCENT, warn=WARN, bad=BAD, series=SERIES)
+    st.divider()
 
     daily = takeover_daily()
     if daily.empty:
@@ -3883,6 +3993,7 @@ def render_takeovers():
                          "Status": "Upcoming", "Net/day": np.nan,
                          "vs prior 4 wks %": np.nan,
                          "vs period avg %": np.nan,
+                         "Baseline since": "",
                          "Share during %": np.nan,
                          "Share prior %": np.nan,
                          "Baskets/day": np.nan})
@@ -3897,6 +4008,7 @@ def render_takeovers():
             "vs prior 4 wks %": _lift(du["net_pd"],
                                       pr["net_pd"] if pr else np.nan),
             "vs period avg %": _lift(du["net_pd"], pe["net_pd"]),
+            "Baseline since": f"{pe['since']:%Y-%m-%d}",
             "Share during %": du["share"],
             "Share prior %": pr["share"] if pr else np.nan,
             "Baskets/day": du["baskets_pd"],
@@ -3906,7 +4018,9 @@ def render_takeovers():
     st.markdown("##### Takeover scorecard")
     st.markdown('<p class="note">Every window, ranked side by side. The two '
                 '<b>vs</b> columns are the lift in sales per day against each '
-                'baseline — green means the takeover beat it.</p>',
+                'baseline. <b>vs period avg</b> is the brand\'s average day '
+                'since its first sale (date in the <b>Baseline since</b> '
+                'column), excluding its takeover windows.</p>',
                 unsafe_allow_html=True)
     st.dataframe(
         score.style.format({
@@ -3968,7 +4082,7 @@ def render_takeovers():
         base_rows = []
         for label, r in (("During takeover", du),
                          ("Prior 4 weeks", pr),
-                         ("Rest of period (avg day)", pe)):
+                         (f"Since first sale, excl. takeovers ({pe['since']:%Y-%m-%d})", pe)):
             if not r:
                 continue
             base_rows.append({
@@ -3982,6 +4096,9 @@ def render_takeovers():
                 "Baskets/day": "{:,.1f}", "Share of store %": "{:.1f}%",
                 "Margin %": "{:.0f}%"}),
             use_container_width=True, hide_index=True)
+        st.caption(f"Baseline: the brand's average day since first sale on "
+                   f"{pe['since']:%Y-%m-%d} ({pe['days']} days), excluding its "
+                   f"takeover windows.")
 
         # --- per-store breakdown -------------------------------------------------
         st.markdown("##### Store by store")
@@ -4032,11 +4149,18 @@ def render_takeovers():
                           annotation_position="bottom right")
         if pe["net_pd"] > 0:
             fig.add_hline(y=pe["net_pd"], line_dash="dash", line_color=ACCENT,
-                          annotation_text="rest of period / day",
+                          annotation_text="since first sale / day",
                           annotation_position="top right")
         fig.update_layout(showlegend=False)
         fig.update_yaxes(tickformat="$~s")
         charts.show(fig, key="tk_chart", kind="bar", margin=dict(l=0, r=0, t=20, b=0))
+
+        # --- the offers that ran inside this takeover (promos.py + dash_promo_*) -
+        st.divider()
+        from takeover_promos import render_takeover_offers as _render_takeover_offers
+        _render_takeover_offers(q=q, keys=keys, stores=STORES, tk=tk,
+                                table_exists=table_exists, accent=ACCENT,
+                                warn=WARN, bad=BAD, series=SERIES)
 
         # --- top products during the window (local detail only) ------------------
         fl = _fact_line()
@@ -4308,7 +4432,11 @@ def render_takeovers():
 
 
 def section_promo_lab():
-    render_promo_lab()
+    from promo_lab_tab import render_promo_lab as _render_promo_lab_tab
+    _render_promo_lab_tab(q=q, keys=keys, stores=STORES, heading=heading,
+                          table_exists=table_exists, accent=ACCENT, series=SERIES,
+                          warn=WARN, bad=BAD, takeovers=TAKEOVERS,
+                          partial_week=PARTIAL_WEEK, legacy=render_winback_model)
 
 import numpy as np
 

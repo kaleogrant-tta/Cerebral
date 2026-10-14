@@ -180,6 +180,9 @@ def build_event_return(con, map_path: str | Path = MAP_FILE) -> None:
         ),
         seg AS (
             SELECT an.event_id, an.contact_id, an.anchor_day,
+                   -- window fully observed for THIS person (M4)
+                   (an.anchor_day + {WINDOW_DAYS} <= DATE '{max_day}')
+                       AS person_mature,
                    CASE WHEN an.first_day >= ev.event_date
                         THEN 'New' ELSE 'Regular' END AS segment,
                    EXISTS (
@@ -212,15 +215,18 @@ def build_event_return(con, map_path: str | Path = MAP_FILE) -> None:
                COALESCE(r.roster_members, 0) AS roster_members,
                COALESCE(ms.n, 0)             AS pos_matched,
                s.segment,
-               COUNT(*)                                   AS buyers,
-               COUNT(*) FILTER (WHERE s.returned)         AS returned,
-               ev.event_date + {WINDOW_DAYS} <= DATE '{max_day}' AS mature
+               COUNT(*) FILTER (WHERE s.person_mature)    AS buyers,
+               COUNT(*) FILTER (WHERE s.person_mature AND s.returned)
+                                                          AS returned,
+               COUNT(*) FILTER (WHERE NOT s.person_mature) AS accruing,
+               COUNT(*)                                   AS buyers_all,
+               BOOL_AND(s.person_mature)                  AS mature
         FROM ev
         LEFT JOIN roster     r  USING (event_id)
         LEFT JOIN measurable ms USING (event_id)
         LEFT JOIN seg        s  USING (event_id)
         WHERE s.segment IS NOT NULL
-        GROUP BY 1,2,3,4,5,6,7,8,9,12
+        GROUP BY 1,2,3,4,5,6,7,8,9
     """)
 
     con.execute(f"""

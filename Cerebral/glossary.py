@@ -260,6 +260,46 @@ GLOSSARY: dict[str, str] = {
 
     "% of matchable (+30d)":
         "Sign-ups who bought within 30 days, as a share of matchable sign-ups in the bucket.",
+
+    # --- promos (Promo Lab) -----------------------------------------------
+    "qualifying":
+        "A basket that looks like the offer — the right brand, enough units, or "
+        "enough spent — whether or not the discount was actually rung. There are "
+        "no promo codes in the sales data, so this is worked out from what was "
+        "in the basket. It counts the people the offer reached.",
+
+    "applied":
+        "A qualifying basket where the evidence says the deal was actually "
+        "given: either the prices show it (three gummies averaging $20 each on "
+        "a 3-for-$60 offer) or the till discount on the basket covers at least "
+        "half of what the offer would take off. It is an estimate — the sales "
+        "export carries each product's average price for the load period, not "
+        "the price on the receipt, and any other discount on the basket can "
+        "look like the offer. Applied divided by qualifying is the share of "
+        "eligible baskets that got the deal; well under 100% means the till is "
+        "not ringing it every time, or people are buying the brand without "
+        "asking for the offer.",
+
+    "near miss":
+        "A basket one step short of qualifying — two gummies on a 3-for offer, "
+        "three eighths on a 4-for offer, or a few dollars under a spend bar "
+        "with no add-on. These are the customers a word at the counter would "
+        "have tipped over, so a high count is an opportunity, not a failure.",
+
+    "est. discount":
+        "What the offer gave away: the brand's normal unit price (the clean "
+        "run-up days before the promo, with days under another offer on the "
+        "same brand left out) minus the price actually paid, times the units, "
+        "added up over applied baskets. Where the price does not show the deal, "
+        "the basket's till discount is used instead, capped at what the offer "
+        "implies. An estimate, not a figure from the till.",
+
+    "break-even volume lift":
+        "How much more of the brand must sell for the margin dollars to come "
+        "back to where they were before the discount: depth ÷ (margin − depth). "
+        "A 20% discount on a 50% margin needs +67% units just to stand still. "
+        "If the discount depth is as big as the margin, no amount of volume "
+        "rescues it.",
 }
 
 

@@ -380,6 +380,74 @@ def check_control_buffer(dash, db):
     report("events: control days clear of own-store events", SKIP,
            "not implemented (needs a re-run of events_onsite control selection)")
 
+# ------------------------------------------------------------ promo lab (2026-10)
+PROMO_SKIP = "dash file predates the promo tables - run publish_promo.py after publish_vm.py"
+
+def _takeover_names():
+    """TAKEOVERS names from cerebral_public.py without importing it (that would start Streamlit)."""
+    import ast
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent / "cerebral_public.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "TAKEOVERS" for t in node.targets):
+            return [t["name"] for t in ast.literal_eval(node.value)]
+    return None
+
+def check_promo_defs(dash):
+    """promos.py validates (unique ids, dates, mechanics, params, takeover names) and
+    every promo in PROMOS has its row in dash_promo_def."""
+    import promos
+    try:
+        promos.validate_promos(_takeover_names())
+        report("promos.py validates", PASS, f"{len(promos.PROMOS)} promos")
+    except Exception as e:
+        report("promos.py validates", FAIL, str(e).replace("\n", " "))
+    if "dash_promo_def" not in tables(dash): report("promo defs published", SKIP, PROMO_SKIP); return
+    have = {r[0] for r in dash.execute("select promo_id from dash_promo_def").fetchall()}
+    missing = [p["id"] for p in promos.PROMOS if p["id"] not in have]
+    report("every promo has a dash_promo_def row", PASS if not missing else FAIL,
+           f"{len(have)} rows" + (f"; missing {missing}" if missing else ""))
+
+def check_promo_day(dash):
+    """Day rows run through last_day for every active/done promo, counts nest
+    (applied <= qualifying <= store baskets), est_discount >= 0, no duplicate
+    (promo_id, store_key, day). WARN when an active promo has no qualifying basket
+    chain-wide on its last 3 days (a wrong brand pattern or category looks like this)."""
+    t = "dash_promo_day"
+    if t not in tables(dash) or "dash_promo_def" not in tables(dash): report("promo day rows", SKIP, PROMO_SKIP); return
+    check_no_dupes(dash, t, ["promo_id", "store_key", "day"])
+    z = q1(dash, f"select count(*) from {t} where applied_baskets > qualifying_baskets or qualifying_baskets > store_baskets")
+    report("promo day: applied <= qualifying <= store baskets", PASS if z == 0 else FAIL, f"{z} rows")
+    z = q1(dash, f"select count(*) from {t} where est_discount < 0 or est_discount is null")
+    report("promo day: est_discount >= 0", PASS if z == 0 else FAIL, f"{z} rows")
+    defs = dash.execute("""select promo_id, status, start, "end", last_day, mechanic from dash_promo_def
+                           where status in ('active', 'done') order by start""").fetchall()
+    for pid, status, start, end, last, mech in defs:
+        start, end, last = as_date(start), as_date(end), as_date(last)
+        expected = min(end, last)
+        mx = as_date(q1(dash, f"select max(day) from {t} where promo_id = ?", [pid]))
+        if mx is None:
+            report(f"promo day rows: {pid}", WARN if start > last else FAIL, "no day rows")
+            continue
+        report(f"promo day rows: {pid} through {expected}", PASS if mx >= expected else FAIL,
+               f"last day row {mx} ({status})")
+        if status == "active":
+            lo = last - dt.timedelta(days=2)
+            q = q1(dash, f"select coalesce(sum(qualifying_baskets), 0) from {t} where promo_id = ? and in_window and day between ? and ?",
+                   [pid, lo, last])
+            report(f"promo activity: {pid} last 3 days", PASS if q > 0 else WARN,
+                   f"{q:,} qualifying baskets chain-wide" + ("" if q else " - wrong brand pattern or category in promos.py?"))
+
+def check_promo_leak(dash):
+    """No dash_promo_* column may carry an identifier (customer / name / phone / email).
+    Same rule as publish_promo.leak_check, so the two cannot drift apart."""
+    have = sorted(x for x in tables(dash) if x.startswith("dash_promo_"))
+    if not have: report("promo tables: no identifier columns", SKIP, PROMO_SKIP); return
+    from publish_promo import leak_check
+    bad = leak_check(dash)
+    report("promo tables: no identifier columns", PASS if not bad else FAIL,
+           f"{len(have)} tables scanned" + (f"; {bad}" if bad else ""))
+
 # ------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
@@ -419,6 +487,9 @@ def main():
     run("redemption drop", check_redemption_drop, dash); run("zero-redemption stores", check_store_zero_redemptions, dash); run("loyalty ties", check_loyalty_store_ties, dash)
     run("newret swing", check_newret_swing, dash); run("brand collisions", check_brand_name_collisions, dash)
     run("control buffer", check_control_buffer, dash, db)
+    print("-- promo lab")
+    run("promo defs", check_promo_defs, dash); run("promo day", check_promo_day, dash)
+    run("promo leak", check_promo_leak, dash)
 
     counts = {s: sum(1 for _, st, _ in RESULTS if st == s) for s in (PASS, FAIL, WARN, SKIP)}
     print(f"== {counts[PASS]} pass, {counts[FAIL]} fail, {counts[WARN]} warn, {counts[SKIP]} skip")

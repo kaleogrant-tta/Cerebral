@@ -166,6 +166,49 @@ def breakeven(m_p: float, m_a: float, ratio: float, sigma: float,
             + ratio * sigma * (m_a - k * (m_p - d)) / (m_p - d))
 
 
+def trough_scan(dow: pd.DataFrame, stores: dict,
+                store_keys=None) -> pd.DataFrame:
+    """Every store x weekday indexed to the store's own average net per day.
+
+    One row per store x weekday with Net per day, Index (100 = the store's
+    average day), the dollar gap to that average and the gap annualised
+    (52 of each weekday a year). Shared with the Promo Lab Ideas sub-tab so
+    both read the same troughs. Empty frame when `dow` is empty.
+    """
+    if dow is None or dow.empty:
+        return pd.DataFrame(columns=["store_key", "Store", "Day", "dow", "Net per day",
+                                     "Index", "Gap to store average", "Hole per year"])
+    if store_keys is None:
+        store_keys = sorted(k for k in dow["store_key"].unique() if k != 0)
+    rows = []
+    for sk in store_keys:
+        s = dow[dow["store_key"] == sk]
+        if s.empty:
+            continue
+        daily = (s.groupby("dow")
+                  .apply(lambda g: g["net"].sum() / max(g["days"].max(), 1)))
+        avg = daily.mean()
+        if not avg:
+            continue
+        for d in DOW_ORDER:
+            if d not in daily.index:
+                continue
+            gap = avg - daily[d]
+            rows.append({
+                "store_key": sk,
+                "Store": stores.get(sk, str(sk)),
+                "Day": DOW_NAME[d],
+                "dow": d,
+                "Net per day": daily[d],
+                "Index": daily[d] / avg * 100,
+                "Gap to store average": gap,
+                # 52 of each weekday a year. Recovering the entire gap is
+                # not on the table -- this sizes the hole, not the prize.
+                "Hole per year": gap * 52,
+            })
+    return pd.DataFrame(rows)
+
+
 # ------------------------------------------------------------- rendering
 
 def render_promo_calendar(q, keys, stores, heading=None, table_exists=None,
@@ -196,29 +239,7 @@ def render_promo_calendar(q, keys, stores, heading=None, table_exists=None,
     # =================================================== 1. trough scanner
     st.markdown("### 1. Where the holes are")
 
-    rows = []
-    for sk in real:
-        s = dow[dow["store_key"] == sk]
-        daily = (s.groupby("dow")
-                  .apply(lambda g: g["net"].sum() / max(g["days"].max(), 1)))
-        avg = daily.mean()
-        for d in DOW_ORDER:
-            if d not in daily.index:
-                continue
-            gap = avg - daily[d]
-            rows.append({
-                "store_key": sk,
-                "Store": stores.get(sk, str(sk)),
-                "Day": DOW_NAME[d],
-                "dow": d,
-                "Net per day": daily[d],
-                "Index": daily[d] / avg * 100,
-                "Gap to store average": gap,
-                # 52 of each weekday a year. Recovering the entire gap is
-                # not on the table -- this sizes the hole, not the prize.
-                "Hole per year": gap * 52,
-            })
-    scan = pd.DataFrame(rows)
+    scan = trough_scan(dow, stores, real)
     troughs = scan[scan["Index"] < 100].sort_values(
         "Hole per year", ascending=False)
 

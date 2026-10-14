@@ -8,11 +8,27 @@ uses made-up numbers, so nothing private is involved. Run all commands from the
 
     python dev/make_fixture.py
 
-Writes `dev/fixture/cerebral_dash.duckdb` (about 20 MB, ~77 `dash_*` tables:
+Writes `dev/fixture/cerebral_dash.duckdb` (about 25 MB, ~88 `dash_*` tables:
 4 stores, 32 ISO weeks of 2026, every tab's tables). It is the same every run.
-It reuses the real `publish_events.py` and `publish_vm.py` code for the Events and
-Visual Merch tables. The other tables follow the column lists in `publish.py` and
-the `publish_*.py` files. The file is git-ignored (`*.duckdb`).
+It reuses the real `publish_events.py`, `publish_vm.py` and `publish_promo.py` code
+for the Events, Visual Merch and Promo Lab tables. The other tables follow the column
+lists in `publish.py` and the `publish_*.py` files. The file is git-ignored (`*.duckdb`).
+
+For the Promo Lab tables it first fakes a source DB (`fact_line` / `fact_basket`,
+W23-W42, 1 Jun - 18 Oct 2026) with the promo behaviour from
+`dev/PROMO_LAB_SPEC.md` injected (3 Wyld gummies at $20, $10 gummies on $65+
+baskets, buy-2-get-1 with a $0 line, 4 eighths at 25% off, spotlight items at
+shelf price, Boarding Pass lines), then runs the real `publish_promo.build_promo`
+on it. A slice of the promo baskets is written the way the real export looks
+(line prices at the period average, the deal visible only in `discount_amt`) so
+the publisher's till-discount route to "applied" is exercised; the rest carry
+true per-basket prices, which real data never does (see the caveat at the top of
+`publish_promo.py`). The fixture ends on Sunday 18 Oct, so "Fall Finds Under $40"
+(from 19 Oct) is an upcoming promo with baseline rows only, and the designer
+tables' 13 complete weeks run through W42, one ISO week past `dash_brand_week`
+(checks.py reports that as a WARN). The baseline rows show the clean run-up at
+work: the Wyld offers follow each other, so `wyld_spend65` and `wyld_b2g1` use
+14 clean days (see `base_note`).
 
 ## 2. Run the app on it
 

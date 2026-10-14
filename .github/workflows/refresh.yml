@@ -63,13 +63,20 @@ jobs:
       - name: Publish VM tables
         run: python publish_vm.py --src /tmp/tta_work/tta.duckdb
 
+      # Promo Lab tables (dash_promo_*): promo detection from basket composition
+      # per promos.py. Prints one line per promo (qualifying baskets, applied
+      # share) - a zero here means a brand pattern or category is wrong.
+      - name: Publish promo tables
+        run: python publish_promo.py --src /tmp/tta_work/tta.duckdb --dash cerebral_dash.duckdb
+
       # Validation gate: structural / reconciliation / invariant checks on the
       # finished dash file. Any FAIL stops the run before Drive is touched.
       - name: Validate dashboard file
         run: python checks.py --dash cerebral_dash.duckdb --db /tmp/tta_work/tta.duckdb
 
       # Upload. publish.py --upload would rebuild without the VM tables, so the
-      # upload lives here (publish_vm.py re-adds the same tables, then pushes).
+      # upload lives here (publish_vm.py re-adds the same tables, then pushes the
+      # file as it stands - the dash_promo_* tables ride along untouched).
       - name: Upload dashboard file
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}

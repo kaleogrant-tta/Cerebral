@@ -73,3 +73,17 @@ forty files a week for no analytical gain.
 `agg_category_week` and `load_log` land in the Cerebral sheet. The database
 goes back to `TTA/state`. Processed files move to `TTA/archive` — never
 deleted, so a bad load can always be re-run from the originals.
+
+## Building the dashboard file by hand
+
+The workflow (`.github/workflows/refresh.yml`) runs these in order after the
+load; the same recipe works locally from the `Cerebral/` folder:
+
+    python publish.py --db ..\tta.duckdb                         # rebuilds cerebral_dash.duckdb
+    python publish_vm.py --src ..\tta.duckdb                     # adds the Visual Merch tables
+    python publish_promo.py --src ..\tta.duckdb --dash cerebral_dash.duckdb   # adds the Promo Lab tables
+    python checks.py --dash cerebral_dash.duckdb --db ..\tta.duckdb           # validation gate (FAIL blocks upload)
+    python publish_vm.py --src ..\tta.duckdb --upload            # pushes the finished file to Drive
+
+Do not use `publish.py --upload`: it rebuilds first and drops the VM and promo
+tables. The promo calendar itself lives in `promos.py`.

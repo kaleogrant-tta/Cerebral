@@ -3511,6 +3511,9 @@ def section_terms():
          ["co-purchase lift", "substitutes", "affinity"]),
         ("Inventory",
          ["SSI", "days supply", "inventory at cost", "SKUs", "sellable stock"]),
+        ("Promos (Promo Lab)",
+         ["qualifying", "applied", "near miss", "est. discount",
+          "break-even volume lift"]),
     ]
 
     for title, terms in groups:
@@ -3537,14 +3540,15 @@ def section_terms():
         'know which one it was.</p>', unsafe_allow_html=True)
 
 
-def render_promo_lab():
-    """Promo Lab: churn by category/store/brand + ROI estimates.
+def render_winback_model():
+    """Win-back model (the original Promo Lab): churn by category/store/brand + ROI estimates.
+    Rendered as the "Win-back model" sub-tab of the Promo Lab tab (promo_lab_tab.py).
     Uses fact_line locally, or the privacy-safe dash_promo_* tables online."""
     import os
     import numpy as np
     import pandas as pd
 
-    st.subheader("Promo Lab - Discount Intelligence & Break-even")
+    st.markdown("##### Win-back model - discount intelligence & break-even")
     st.caption("Where lapsed buyers concentrate, and the break-even on a win-back discount. "
                "Margins come from the data; the win-back rate is your assumption, not a prediction.")
     st.markdown('<p class="note"><b>How to read this.</b> This tab answers one question: where is it worth spending discount dollars? Here <b>churn</b> means <b>customers who last bought this category at this store more than N days ago, across the whole history</b> (N is the lapse window below). It includes one-time buyers from years ago, and someone who stopped buying a category at one store but shops elsewhere still counts. That is why churn is above 90% almost everywhere. Every figure is a <b>break-even threshold, not a prediction</b>: it shows what a win-back promo would have to achieve to pay for its own discount, given the win-back rate you assume. Nothing here is a measured response rate until a real campaign measures one.</p>', unsafe_allow_html=True)
@@ -3646,26 +3650,11 @@ def render_promo_lab():
                  "Promo cost $": "${:,.0f}", "Net gain $": "${:,.0f}",
                  "Real margin": "{:.0%}"}
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    # Channel & Day Promo and Promo Calendar used to be nested here; they are
+    # now top-level sub-tabs of the Promo Lab (promo_lab_tab.py).
+    tab1, tab2, tab3, tab4 = st.tabs(
         ["Churn Map (Categories)", "Store Opportunities", "Brand Promos",
-         "Brand Discount ROI", "Channel & Day Promo",
-         "Promo Calendar"])
-
-    # Declared here, rendered here. Tab ORDER comes from the list above, so
-    # this block sitting ahead of `with tab1:` costs nothing and leaves the
-    # existing blocks alone.
-    with tab6:
-        render_promo_calendar(q=q, keys=keys, stores=STORES,
-                              heading=None, table_exists=table_exists,
-                              accent=ACCENT, series=SERIES)
-
-    # Declared here, rendered here. Tab ORDER comes from the list above, so
-    # this block sitting ahead of `with tab1:` costs nothing and leaves the
-    # existing blocks alone.
-    with tab5:
-        render_channel_promo(q=q, keys=keys, stores=STORES,
-                             heading=None, table_exists=table_exists,
-                             accent=ACCENT, series=SERIES)
+         "Brand Discount ROI"])
 
     # Declared here, rendered here. Tab ORDER comes from the list above, so
     # this block sitting ahead of `with tab1:` costs nothing and keeps the
@@ -3971,6 +3960,12 @@ def render_takeovers():
         'lifts the brand\'s sales but not its share mostly rode the '
         'tide.</div>', unsafe_allow_html=True)
 
+    # ---- promos running now (any programme), from the dash_promo_* tables --
+    from takeover_promos import render_current_promos as _render_current_promos
+    _render_current_promos(q=q, keys=keys, stores=STORES, table_exists=table_exists,
+                           accent=ACCENT, warn=WARN, bad=BAD, series=SERIES)
+    st.divider()
+
     daily = takeover_daily()
     if daily.empty:
         st.info(
@@ -4159,6 +4154,13 @@ def render_takeovers():
         fig.update_layout(showlegend=False)
         fig.update_yaxes(tickformat="$~s")
         charts.show(fig, key="tk_chart", kind="bar", margin=dict(l=0, r=0, t=20, b=0))
+
+        # --- the offers that ran inside this takeover (promos.py + dash_promo_*) -
+        st.divider()
+        from takeover_promos import render_takeover_offers as _render_takeover_offers
+        _render_takeover_offers(q=q, keys=keys, stores=STORES, tk=tk,
+                                table_exists=table_exists, accent=ACCENT,
+                                warn=WARN, bad=BAD, series=SERIES)
 
         # --- top products during the window (local detail only) ------------------
         fl = _fact_line()
@@ -4430,7 +4432,11 @@ def render_takeovers():
 
 
 def section_promo_lab():
-    render_promo_lab()
+    from promo_lab_tab import render_promo_lab as _render_promo_lab_tab
+    _render_promo_lab_tab(q=q, keys=keys, stores=STORES, heading=heading,
+                          table_exists=table_exists, accent=ACCENT, series=SERIES,
+                          warn=WARN, bad=BAD, takeovers=TAKEOVERS,
+                          partial_week=PARTIAL_WEEK, legacy=render_winback_model)
 
 import numpy as np
 

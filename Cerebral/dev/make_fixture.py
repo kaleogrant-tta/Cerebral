@@ -19,6 +19,9 @@ Shape of the fake world
   * loyalty / retention / events / audiences / VM / discounting tables are
     produced by the same maths the real publish_* modules use where practical
     (publish_events and publish_vm are imported and run for real).
+  * Promo Lab: a fake fact_line / fact_basket source (W23-W42) with the promo
+    behaviour from dev/PROMO_LAB_SPEC.md injected, then publish_promo.build_promo
+    runs on it for real (section 8).
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ import math
 import shutil
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 import duckdb
@@ -952,7 +956,10 @@ def build_events(con, core):
                                 series=e.series, brand_partners=e.brand_partners,
                                 store_name=pe.STORE_NAME[sk], store_key=sk, is_offsite=bool(e.is_offsite),
                                 has_control=bool(e.has_control), offset=off, own_lift=own, control_drift=drift,
-                                did=did, n_controls=int(RNG.integers(4, 7)), observed=obs, baseline=base,
+                                did=did, n_controls=int(RNG.integers(4, 7)),
+                                controls_used=int(RNG.integers(3, 7)) if e.has_control else 0,
+                                measured=bool(np.isfinite(obs - cf)),
+                                observed=obs, baseline=base,
                                 counterfactual=cf, incremental=obs - cf))
     detail = pd.DataFrame(det)
     detail["coincident"] = detail.groupby(["metric", "store_key", "event_date", "offset"])["event_id"].transform("nunique")
@@ -1169,6 +1176,235 @@ def build_vm(dash_path: Path):
 
 
 # ====================================================================
+# 8. promo lab -- fake fact_line / fact_basket, then the real publish_promo
+# ====================================================================
+# Its own generator so the sections above stay byte-identical run to run.
+PROMO_RNG = np.random.default_rng(4242)
+P_FIRST = dt.date(2026, 6, 1)      # 2026-W23 Monday
+P_LAST = dt.date(2026, 10, 18)     # 2026-W42 Sunday (Wyld B2G1 ends this day)
+P_DAILY_BASKETS = {1: 300, 2: 420, 3: 190, 4: 350}   # before the weekday curve
+WYLD_GUMMY_PRICE = 25.0            # regular shelf price in the fake world
+EIGHTH_PRICE = 40.0
+# Spotlight items ("Fall Finds Under $40") -- brand, product, category, regular price.
+# They sell at the regular price here: the fixture ends before that window opens.
+SPOTLIGHT_ITEMS = [
+    ("Clea", "Clea Midlife Beverage Booster", "Edible", 36.0),
+    ("Good Green", "Good Green Runtz 3.5g", "Flower", EIGHTH_PRICE),
+    ("MFNY", "MFNY Blue Dream 0.5g Cartridge", "Vape", 45.0),
+    ("Papa & Barkley", "Papa & Barkley Releaf Gummies", "Edible", 34.0),
+    ("Deep Black", "Deep Black Ashtray", "Accessory", 24.0),
+    ("Stone Road", "Stone Road Hash 1g", "Concentrate", 42.0),
+]
+HOUR_W = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 7, 8, 8, 8, 9, 10, 11, 10, 7, 4, 0, 0], dtype=float)
+HOUR_W = HOUR_W / HOUR_W.sum()
+
+
+class _PromoWorld:
+    """Collects fake fact_line / fact_basket rows."""
+
+    def __init__(self, rng):
+        self.rng = rng
+        self.lines, self.baskets = [], []
+        self.bid = 5_000_000
+        self.lid = 0
+        self.cat_p = np.array([CATS[c]["pen"] for c in CATS]); self.cat_p /= self.cat_p.sum()
+        self.cats = list(CATS)
+
+    def ordinary_lines(self, n=None):
+        rng = self.rng
+        n = n or min(5, int(rng.geometric(.55)))
+        out = []
+        for _ in range(n):
+            if rng.random() < .012:                                  # a spotlight item at shelf price
+                brand, prod, cat, price = SPOTLIGHT_ITEMS[int(rng.integers(len(SPOTLIGHT_ITEMS)))]
+                out.append((cat, brand, prod, 1.0, price * rng.uniform(.97, 1.03)))
+                continue
+            cat = self.cats[int(rng.choice(len(self.cats), p=self.cat_p))]
+            brand = BRANDS[cat][int(rng.integers(len(BRANDS[cat])))]
+            if cat == "Accessory":
+                prod = f"{brand} {ACC_ITEMS[int(rng.integers(len(ACC_ITEMS)))]}"
+            else:
+                size = SIZES[cat][int(rng.integers(3))]
+                prod = f"{brand} {STRAINS[int(rng.integers(len(STRAINS)))]} {size}"
+            price = CATS[cat]["price"] * rng.uniform(.8, 1.3)
+            if cat == "Edible" and brand == "Wyld":
+                prod = f"Wyld {STRAINS[int(rng.integers(len(STRAINS)))]} 10pk Gummies"
+                price = WYLD_GUMMY_PRICE * rng.uniform(.96, 1.04)
+            elif cat == "Flower" and "3.5g" in prod:
+                price = EIGHTH_PRICE * rng.uniform(.97, 1.03)
+            units = 2.0 if rng.random() < .12 else 1.0
+            out.append((cat, brand, prod, units, price))
+        return out
+
+    def add_basket(self, store, day, specs, discount=0.0, cust=None, known_p=.65, is_return=False):
+        """specs: list of (category, brand, product, units, unit_price[, gm_pct])."""
+        rng = self.rng
+        self.bid += 1
+        hour = int(rng.choice(24, p=HOUR_W))
+        ts = dt.datetime(day.year, day.month, day.day, hour, int(rng.integers(60)), int(rng.integers(60)))
+        chans = list(CHAN_SHARE[store]); probs = np.array([CHAN_SHARE[store][c] for c in chans])
+        channel = chans[int(rng.choice(len(chans), p=probs / probs.sum()))]
+        if cust is None and rng.random() < known_p:
+            pool = 5000 + 45 * (day - P_FIRST).days          # the pool grows, so first visits keep happening
+            cust = f"F{store}-{int(rng.integers(pool)):06d}"
+        iso = day.isocalendar()
+        sign = -1.0 if is_return else 1.0
+        net_sum = gm_sum = units_sum = 0.0
+        cats = set()
+        for spec in specs:
+            cat, brand, prod, units, price = spec[:5]
+            gm_pct = spec[5] if len(spec) > 5 else CATS.get(cat, {"gm": .5})["gm"]
+            net = sign * units * price
+            cogs = sign * units * price * (1 - gm_pct) if price > 0 else sign * units * 4.0
+            self.lid += 1
+            self.lines.append((f"L{self.lid}", self.bid, store, ts, int(day.strftime("%Y%m%d")), iso[0], iso[1],
+                               day.weekday() + 1, channel, cust, "dutchie" if cust else None, prod,
+                               f"SKU{zlib.crc32(prod.encode()) % 900000 + 100000}", cat, cat, brand, sign * units,
+                               net, cogs / units if units else 0.0, cogs, net - cogs, is_return))
+            net_sum += net; gm_sum += net - cogs; units_sum += sign * units; cats.add(cat)
+        self.baskets.append((self.bid, store, ts, int(day.strftime("%Y%m%d")), iso[0], iso[1], day.weekday() + 1,
+                             channel, cust, cust is not None, net_sum, gm_sum, units_sum, len(specs), len(cats),
+                             0.0, -abs(discount), False, is_return))
+
+    def frames(self):
+        lcols = ["line_id", "basket_id", "store_key", "txn_ts", "date_key", "iso_year", "iso_week", "day_of_week",
+                 "channel", "customer_key", "customer_source", "product", "sku", "raw_category", "category", "brand",
+                 "units", "net_sales", "unit_cost", "cogs", "gross_margin", "is_return"]
+        bcols = ["basket_id", "store_key", "txn_ts", "date_key", "iso_year", "iso_week", "day_of_week", "channel",
+                 "customer_key", "customer_known", "basket_net", "basket_margin", "basket_units", "basket_lines",
+                 "distinct_cats", "loyalty_redeem", "discount_amt", "used_redemption", "is_return"]
+        return pd.DataFrame(self.lines, columns=lcols), pd.DataFrame(self.baskets, columns=bcols)
+
+
+def _wyld(rng, price, n=1):
+    return ("Edible", "Wyld", f"Wyld {STRAINS[int(rng.integers(len(STRAINS)))]} 10pk Gummies", float(n), price)
+
+
+def _eighth(rng, brand, price):
+    return ("Flower", brand, f"{brand} {STRAINS[int(rng.integers(len(STRAINS)))]} 3.5g", 1.0, price)
+
+
+def build_promo_src(src_path: Path):
+    """Fake sales for W23-W42 with the promo behaviour from PROMO_LAB_SPEC injected."""
+    rng = PROMO_RNG
+    w = _PromoWorld(rng)
+    d = dt.date
+    windows = dict(wyld_3for60=(d(2026, 9, 15), d(2026, 9, 28)), wyld_spend65=(d(2026, 9, 29), d(2026, 10, 12)),
+                   wyld_b2g1=(d(2026, 10, 13), d(2026, 10, 18)), gg_rythm=(d(2026, 10, 1), d(2026, 10, 31)),
+                   ruby=(d(2026, 7, 16), d(2026, 8, 17)))
+    inwin = lambda k, day: windows[k][0] <= day <= windows[k][1]
+    day = P_FIRST
+    while day <= P_LAST:
+        for s in STORE_NAMES:
+            scale = P_DAILY_BASKETS[s] / 300
+            n = int(rng.poisson(P_DAILY_BASKETS[s] * DOW_W[day.weekday()]))
+            for _ in range(n):
+                disc = 0.0
+                specs = w.ordinary_lines()
+                if rng.random() < .08:
+                    disc = .1 * sum(u * p for *_, u, p in specs)
+                w.add_basket(s, day, specs, discount=disc)
+            # -- 3 for $60: three gummies at $20 (plus a few at shelf price = qualifying, not applied)
+            if inwin("wyld_3for60", day):
+                for _ in range(int(rng.poisson(11 * scale))):
+                    extra = w.ordinary_lines(1) if rng.random() < .5 else []
+                    if rng.random() < .5:
+                        specs = [_wyld(rng, 20.0, 3)] + extra
+                    else:
+                        specs = [_wyld(rng, 20.0) for _ in range(3)] + extra
+                    w.add_basket(s, day, specs, discount=3 * (WYLD_GUMMY_PRICE - 20.0))
+                for _ in range(int(rng.poisson(1.0 * scale))):            # rung without the deal
+                    w.add_basket(s, day, [_wyld(rng, WYLD_GUMMY_PRICE) for _ in range(3)])
+                # as the real export shows it: line prices are the period average (the
+                # deal is NOT visible in the unit price), only discount_amt carries it
+                for _ in range(int(rng.poisson(3 * scale))):
+                    w.add_basket(s, day, [_wyld(rng, 22.5) for _ in range(3)], discount=3 * (WYLD_GUMMY_PRICE - 20.0))
+                for _ in range(int(rng.poisson(4 * scale))):              # one gummy short
+                    w.add_basket(s, day, [_wyld(rng, WYLD_GUMMY_PRICE) for _ in range(2)] + w.ordinary_lines(1))
+            # -- spend $65, gummy for $10
+            if inwin("wyld_spend65", day):
+                for _ in range(int(rng.poisson(10 * scale))):
+                    big = w.ordinary_lines(2)
+                    while sum(u * p for *_, u, p in big) < 65:
+                        big += w.ordinary_lines(1)
+                    w.add_basket(s, day, big + [_wyld(rng, 10.0)], discount=WYLD_GUMMY_PRICE - 10.0)
+                for _ in range(int(rng.poisson(3 * scale))):              # period-average priced add-on line
+                    big = w.ordinary_lines(2)
+                    while sum(u * p for *_, u, p in big) < 65:
+                        big += w.ordinary_lines(1)
+                    w.add_basket(s, day, big + [_wyld(rng, 21.0)], discount=WYLD_GUMMY_PRICE - 10.0)
+            # -- buy 2 get 1: three gummies, one at $0
+            if inwin("wyld_b2g1", day):
+                for _ in range(int(rng.poisson(12 * scale))):
+                    specs = [_wyld(rng, WYLD_GUMMY_PRICE), _wyld(rng, WYLD_GUMMY_PRICE), _wyld(rng, 0.0)]
+                    if rng.random() < .4:
+                        specs += w.ordinary_lines(1)
+                    w.add_basket(s, day, specs, discount=WYLD_GUMMY_PRICE)
+                for _ in range(int(rng.poisson(4 * scale))):              # bought two, no third
+                    w.add_basket(s, day, [_wyld(rng, WYLD_GUMMY_PRICE) for _ in range(2)])
+            # -- 4 eighths 25% off, Good Green or Rythm (one brand)
+            if inwin("gg_rythm", day):
+                for _ in range(int(rng.poisson(8 * scale))):
+                    brand = "Good Green" if rng.random() < .55 else "Rythm"
+                    specs = [_eighth(rng, brand, EIGHTH_PRICE * .75) for _ in range(4)]
+                    w.add_basket(s, day, specs, discount=4 * EIGHTH_PRICE * .25)
+                for _ in range(int(rng.poisson(2 * scale))):              # period-average priced, deal in discount_amt
+                    brand = "Good Green" if rng.random() < .55 else "Rythm"
+                    w.add_basket(s, day, [_eighth(rng, brand, EIGHTH_PRICE * .93) for _ in range(4)],
+                                 discount=4 * EIGHTH_PRICE * .25)
+                for _ in range(int(rng.poisson(3 * scale))):              # three eighths
+                    brand = "Good Green" if rng.random() < .5 else "Rythm"
+                    w.add_basket(s, day, [_eighth(rng, brand, EIGHTH_PRICE) for _ in range(3)])
+            # -- Ruby takeover: two eighths plus the free doobie
+            if inwin("ruby", day):
+                for _ in range(int(rng.poisson(6 * scale))):
+                    specs = [_eighth(rng, "Ruby", EIGHTH_PRICE), _eighth(rng, "Ruby", EIGHTH_PRICE),
+                             ("Pre-Roll", "Ruby", "Ruby Doobies Pre-Roll 1g (GWP)", 1.0, 0.01)]
+                    w.add_basket(s, day, specs)
+            # -- Boarding Pass redemptions (ghost SKU at $0) and a few returns
+            for _ in range(int(rng.poisson(1.5 * scale))):
+                specs = w.ordinary_lines(1) + [("Pre-Roll", "The Travel Agency", "Boarding Pass - Free Pre-Roll", 1.0, 0.0)]
+                w.add_basket(s, day, specs, known_p=.9)
+            if rng.random() < .3:
+                w.add_basket(s, day, w.ordinary_lines(1), is_return=True)
+        day += dt.timedelta(days=1)
+    fl, fb = w.frames()
+    con = duckdb.connect(str(src_path))
+    con.register("_fl", fl); con.register("_fb", fb)
+    con.execute("CREATE TABLE fact_line AS SELECT * FROM _fl")
+    con.execute("CREATE TABLE fact_basket AS SELECT * FROM _fb")
+    # a tier table so the tier:<tier> segment rows get exercised
+    con.execute("""CREATE TABLE dim_customer_tier AS
+                   SELECT customer_key,
+                          CASE WHEN hash(customer_key) % 10 < 2 THEN 'Frequent Flyer'
+                               WHEN hash(customer_key) % 10 < 6 THEN 'Travel Club' ELSE 'Non-Loyalty' END AS tier
+                   FROM (SELECT DISTINCT customer_key FROM fact_basket WHERE customer_key IS NOT NULL)""")
+    con.close()
+    return len(fl), len(fb)
+
+
+def build_promo(dash_path: Path):
+    import publish_promo as pp
+    tmp = Path(tempfile.mkdtemp(prefix="cerebral_promo_"))
+    src = tmp / "src.duckdb"
+    nl, nb = build_promo_src(src)
+    print(f"  [promo] fake src: {nl:,} lines, {nb:,} baskets, {P_FIRST} -> {P_LAST}")
+    con = duckdb.connect(str(dash_path))
+    con.execute(f"ATTACH '{src}' AS src (READ_ONLY)")
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        counts = pp.build_promo(con, src_attached=True)
+    con.execute("DETACH src")
+    con.close()
+    for ln in buf.getvalue().splitlines():
+        print("  [promo]", ln)
+    for t, n in counts.items():
+        print(f"  {t:<32}{n:>9,} rows")
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ====================================================================
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -1192,6 +1428,7 @@ def main():
     build_event_tables(con, ev)
     con.close()
     build_vm(a.out)
+    build_promo(a.out)
     con = duckdb.connect(str(a.out))
     n = con.execute("SELECT COUNT(*) FROM duckdb_tables() WHERE table_name LIKE 'dash_%'").fetchone()[0]
     con.close()

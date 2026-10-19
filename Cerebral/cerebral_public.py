@@ -2220,6 +2220,95 @@ def section_brands():
                             f'acquisition value on top of the sales line.</p>',
                             unsafe_allow_html=True)
 
+            # ---- year-to-date weekly sales ------------------------------------
+            # Deliberately NOT scoped to the slider: the ask is "how has this
+            # brand done this year", and an 8-week window answers a different
+            # question. Stores still follow the sidebar. The year is the newest
+            # ISO year in the brand table rather than the wall clock, so an old
+            # file (or the test fixture) still draws something sensible.
+            if HAVE_BW:
+                st.markdown("##### Net sales by week, year to date")
+                _yr = q(f"SELECT MAX(iso_year) AS y FROM dash_brand_week"
+                        f"{sfilter(keys)}")
+                ytd_year = (int(_yr.y.iloc[0]) if not _yr.empty
+                            and pd.notna(_yr.y.iloc[0]) else None)
+                ytd = pd.DataFrame()
+                if ytd_year is not None:
+                    ytd = q(f"""
+                    SELECT iso_year, iso_week, SUM(net) AS net
+                    FROM dash_brand_week
+                    WHERE brand = '{psql}' AND iso_year = {ytd_year}
+                          {and_filter(keys)}
+                    GROUP BY 1,2
+                    ORDER BY 1,2
+                """)
+                if len(ytd) < 2:
+                    st.info(f"Not enough {ytd_year or ''} weeks for {pick} to "
+                            f"draw a year-to-date line yet.")
+                else:
+                    ytd["net"] = pd.to_numeric(ytd.net, errors="coerce").fillna(0)
+                    ytd["wk_date"] = pd.to_datetime(
+                        ytd.iso_year.astype(str) + "-W"
+                        + ytd.iso_week.astype(str).str.zfill(2) + "-1",
+                        format="%G-W%V-%u", errors="coerce")
+                    ytd = ytd.dropna(subset=["wk_date"]).sort_values("wk_date")
+                    _stores_txt = ("all stores" if len(keys) == len(STORES)
+                                   else ", ".join(STORES.get(k, str(k))
+                                                  for k in keys))
+                    st.markdown(
+                        f'<p class="note">Weekly net sales for <b>{pick}</b> '
+                        f'across every ISO week of {ytd_year} in the file, '
+                        f'for {_stores_txt}. This chart ignores the week '
+                        f'slider on purpose — the rest of this page follows '
+                        f'it.</p>', unsafe_allow_html=True)
+
+                    fig = charts.fig_base(kind="line")
+                    fig.add_scatter(x=ytd.wk_date, y=ytd.net, name=pick,
+                                    mode="lines+markers",
+                                    line=dict(color=ACCENT, width=2),
+                                    marker=dict(size=5),
+                                    hovertemplate="week of %{x|%b %d}<br>"
+                                                  "$%{y:,.0f}<extra></extra>")
+                    # Same shading as the Takeovers tab, for the same brand
+                    # match (case-insensitive substring on the takeover
+                    # patterns), so a bump has its explanation drawn on it.
+                    _x_lo = ytd.wk_date.min()
+                    _x_hi = ytd.wk_date.max() + pd.Timedelta(days=6)
+                    for tk in TAKEOVERS:
+                        if not any(p in pick.lower() for p in tk["patterns"]):
+                            continue
+                        _s = max(pd.Timestamp(tk["start"]), _x_lo)
+                        _e = min(pd.Timestamp(tk["end"]), _x_hi)
+                        if _s > _e:
+                            continue
+                        fig.add_vrect(x0=_s, x1=_e, fillcolor=ACCENT,
+                                      opacity=0.15, line_width=0,
+                                      annotation_text="takeover",
+                                      annotation_position="top left")
+                    # The trailing week is flagged the way the rest of the app
+                    # does: kept, but marked so a short week does not read as
+                    # a collapse.
+                    _lw = int(weeks.iloc[-1].iso_year) * 100 \
+                        + int(weeks.iloc[-1].iso_week)
+                    _last_pt = ytd.iloc[-1]
+                    if PARTIAL_WEEK and int(_last_pt.iso_year) * 100 \
+                            + int(_last_pt.iso_week) == _lw:
+                        fig.add_scatter(x=[_last_pt.wk_date], y=[_last_pt.net],
+                                        mode="markers", name="week in progress",
+                                        marker=dict(size=9, color=WARN),
+                                        hovertemplate=f"week in progress — "
+                                                      f"{PARTIAL_DAYS} of 7 days"
+                                                      "<br>$%{y:,.0f}"
+                                                      "<extra></extra>")
+                    fig.update_layout(showlegend=False, xaxis_title="",
+                                      yaxis=dict(title="Net $",
+                                                 tickformat=charts.fmt_money()))
+                    charts.show(fig, key="brand_ytd", kind="line")
+                    if PARTIAL_WEEK and int(_last_pt.iso_year) * 100 \
+                            + int(_last_pt.iso_week) == _lw:
+                        st.caption(f"The last point (orange) is the week in "
+                                   f"progress — {PARTIAL_DAYS} of 7 days.")
+
             # ---- category mix + co-purchases ---------------------------------
             if HAVE_BW and not bwd.empty:
                 cm = (bwd.groupby("category", as_index=False).net.sum()

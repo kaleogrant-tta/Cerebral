@@ -882,13 +882,19 @@ button[data-variant="pills"][aria-checked="true"] p { font-weight: 600; }
 
 [data-testid="stMultiSelect"] [data-tag]:hover { background: var(--signal-glow); }
 
-/* Open menus and tooltips: elevated, rounded, quick to appear. */
+/* Open menus and tooltips: elevated, rounded, quick to appear.
+   Opacity only, never transform. Streamlit places the open menu with
+   floating-ui: the popover is position:fixed at top:0/left:0 and an inline
+   transform: translate(x, y) moves it under the input. A keyframe that
+   animates transform overrides that inline value while it runs, and with
+   fill-mode "both" the final frame (transform: none) sticks for good, so
+   the menu sat in the top-left corner of the viewport, half under the
+   header, and clicks on it missed. Tooltips are placed the same way. */
 [data-testid$="VirtualDropdown"],
-[data-testid="stSelectboxVirtualDropdown"] [role="listbox"],
 [data-testid="stTooltipContent"] {
   border-radius: var(--radius);
   box-shadow: var(--lift-4);
-  animation: rise 140ms var(--ease-out) both;
+  animation: fade 140ms var(--ease-out);
 }
 
 [role="listbox"] [role="option"] {

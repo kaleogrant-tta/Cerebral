@@ -2136,7 +2136,7 @@ def section_brands():
             ORDER BY net DESC
         """)
         pick_help = ("Brands with at least $250 net sales in the selected "
-                     "window, largest first. Type to search.")
+                     "window, A–Z. Type to search.")
     else:
         bl = q(f"""
             SELECT brand, SUM(net) AS net
@@ -2145,14 +2145,19 @@ def section_brands():
             ORDER BY net DESC
         """)
         pick_help = ("Brands with at least $1,000 net sales in the loaded "
-                     "period, largest first. Type to search.")
+                     "period, A–Z. Type to search.")
 
     if bl.empty:
         st.info("No brand data for the selected stores and window.")
     else:
+        # The query keeps the biggest brand on top so it can be the default,
+        # but the list itself reads A-Z: people look brands up by name.
+        brand_opts = sorted(bl.brand.tolist(), key=str.casefold)
+        top_brand = brand_opts.index(bl.brand.iloc[0])
+
         @st.fragment
         def _frag_brand_deep():
-            pick = st.selectbox("Pick a brand", bl.brand.tolist(),
+            pick = st.selectbox("Pick a brand", brand_opts, index=top_brand,
                                 key="deep_brand", help=pick_help)
             psql = pick.replace("'", "''")            # safe inside SQL literals
 
@@ -2369,10 +2374,15 @@ def section_brands():
                     st.info(f"No product-level sales for {pick} in this window.")
                 else:
                     cl, cr = st.columns([2, 1])
+                    # Same idea as the brand picker: A-Z list, biggest
+                    # category selected by default.
+                    cat_opts = sorted(cats.category.tolist(), key=str.casefold)
                     cat_pick = cl.selectbox(
-                        "Category", cats.category.tolist(), key="deep_cat",
+                        "Category", cat_opts,
+                        index=cat_opts.index(cats.category.iloc[0]),
+                        key="deep_cat",
                         help="Categories this brand sold in during the selected "
-                             "window, largest first.")
+                             "window, A–Z.")
                     rank_by = cr.selectbox("Rank by", ["Net $", "Units",
                                                        "Baskets", "Margin %"],
                                            key="deep_rank")

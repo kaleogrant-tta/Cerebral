@@ -2242,16 +2242,17 @@ def section_brands():
                     GROUP BY 1,2
                     ORDER BY 1,2
                 """)
-                if len(ytd) < 2:
-                    st.info(f"Not enough {ytd_year or ''} weeks for {pick} to "
-                            f"draw a year-to-date line yet.")
-                else:
+                if not ytd.empty:
                     ytd["net"] = pd.to_numeric(ytd.net, errors="coerce").fillna(0)
                     ytd["wk_date"] = pd.to_datetime(
                         ytd.iso_year.astype(str) + "-W"
                         + ytd.iso_week.astype(str).str.zfill(2) + "-1",
                         format="%G-W%V-%u", errors="coerce")
                     ytd = ytd.dropna(subset=["wk_date"]).sort_values("wk_date")
+                if len(ytd) < 2:
+                    st.info(f"Not enough weeks of {pick} sales this year to "
+                            f"draw a year-to-date line yet.")
+                else:
                     _stores_txt = ("all stores" if len(keys) == len(STORES)
                                    else ", ".join(STORES.get(k, str(k))
                                                   for k in keys))

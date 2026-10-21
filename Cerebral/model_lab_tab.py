@@ -145,7 +145,8 @@ def model_note(*, q, table_exists, store_key: int, category: str,
         return ""
     r = f.iloc[0]
     if pd.isna(r.stock_vs_norm):
-        return " Model: no stock history for this category yet, so supply vs demand can't be told apart."
+        return (" Model: no shelf data for this week (inventory ledger not loaded that far), "
+                "so supply vs demand can't be told apart yet.")
     if r.residual < 0 and r.explained_by_stock < 0 and abs(r.explained_by_stock) >= 0.5 * abs(r.residual):
         return (f" Model: the shelf held {abs(int(r.stock_vs_norm))} fewer SKUs than its recent norm, "
                 f"which explains most of the shortfall — supply-driven.")
@@ -295,6 +296,9 @@ def render_model_lab(*, q, keys, stores, heading, table_exists, accent="#2F6F4F"
                     return f"A holiday week (4/20, Green Wednesday, Christmas…) ≈ {r.coef:+.0f} units."
                 if r.term == "days_open":
                     return f"Each trading day ≈ {r.coef:+.0f} units."
+                if r.term == "lag1":
+                    return (f"Momentum: each unit sold last week carries {r.coef:+.2f} units into this week. "
+                            "Every other driver reads 'beyond what last week already told us'.")
                 if r.term == "trend":
                     return f"Underlying drift of {r.coef:+.1f} units per week, ≈ {r.coef * 52:+.0f} a year."
                 return "Part of the yearly cycle (read the two season terms together)."
@@ -341,6 +345,11 @@ def render_model_lab(*, q, keys, stores, heading, table_exists, accent="#2F6F4F"
                                       marker_color="rgba(120,120,120,.45)",
                                       marker_pattern_shape="/",
                                       hovertemplate="%{x|%d %b}<br>shelf part %{y:.0f} units<extra></extra>"))
+            if "stock_imputed" in show.columns and show.stock_imputed.any():
+                first_imp = show[show.stock_imputed].d.min()
+                fig2.add_vrect(x0=first_imp - pd.Timedelta(days=3), x1=show.d.max() + pd.Timedelta(days=4),
+                               fillcolor="rgba(120,120,120,.08)", line_width=0,
+                               annotation_text="shelf assumed", annotation_position="top left")
             band = float(s.sigma) * 1.5
             fig2.add_hline(y=band, line_dash="dot", line_color="rgba(120,120,120,.5)")
             fig2.add_hline(y=-band, line_dash="dot", line_color="rgba(120,120,120,.5)")
@@ -348,6 +357,12 @@ def render_model_lab(*, q, keys, stores, heading, table_exists, accent="#2F6F4F"
             fig2.update_yaxes(title_text="units vs expected")
             charts.show(fig2, key=f"ml_gap_{sk}_{cat}", kind="bar")
 
+            if "stock_imputed" in fit.columns and fit.stock_imputed.any():
+                last_known = fit[~fit.stock_imputed].iloc[-1]
+                st.markdown(f'<div class="alert a-warn">Shelf data ends {int(last_known.iso_year)}-W{int(last_known.iso_week):02d} '
+                            f'(the inventory ledger is exported monthly). The {int(fit.stock_imputed.sum())} week(s) after '
+                            f'it assume the shelf stayed at its last known level, so their gap cannot be split '
+                            f'into supply and demand until the next ledger is loaded.</div>', unsafe_allow_html=True)
             last = fit.iloc[-1]
             wk = f"{int(last.iso_year)}-W{int(last.iso_week):02d}"
             if abs(last.resid_z) >= 1.5:
@@ -373,6 +388,7 @@ def render_model_lab(*, q, keys, stores, heading, table_exists, accent="#2F6F4F"
                     "Units": fit.units.round(0), "Expected": fit.predicted.round(0),
                     "Gap": fit.residual.round(0), "Gap (sd)": fit.resid_z.round(2),
                     "SKUs in stock": fit.skus_in_stock, "vs norm": fit.stock_vs_norm.round(0),
+                    "Shelf assumed": fit.stock_imputed if "stock_imputed" in fit.columns else False,
                     "Promo days": fit.promo_days, "Takeover days": fit.takeover_days,
                     "Holiday": fit.holiday_name,
                 }).iloc[::-1], hide_index=True, use_container_width=True)

@@ -158,6 +158,7 @@ def ols(X: np.ndarray, y: np.ndarray):
 TERM_LABEL = {
     "const":    "Baseline",
     "stock":    "SKUs in stock (each)",
+    "lag1":     "Last week's units (momentum, per unit)",
     "promo":    "Promo week (full week)",
     "takeover": "Takeover week (full week)",
     "holiday":  "Holiday week",
@@ -177,11 +178,11 @@ def _design(d: pd.DataFrame, use_stock: bool) -> tuple[np.ndarray, list[str]]:
     # extrapolating half a sine wave is how a short history produces a wild
     # forecast - the season terms only enter once the history spans 52 weeks
     span = (d.week_start.max() - d.week_start.min()).days / 7.0 + 1
-    terms = ["promo", "takeover", "holiday", "days_open", "trend"]
+    terms = ["lag1", "promo", "takeover", "holiday", "days_open", "trend"]
     if span >= 52:
         terms += ["sin", "cos"]
     for c in terms:
-        v = d[c].to_numpy(float)
+        v = d["units_lag1" if c == "lag1" else c].to_numpy(float)
         if np.nanstd(v) > 1e-9:            # a constant column adds nothing
             cols.append(c); mats.append(v)
     return np.column_stack(mats), cols
@@ -260,23 +261,75 @@ def build_model_week(con) -> pd.DataFrame:
     mw["trend"] = [(ws - first).days / 7.0 for ws in mw.week_start]
     mw["days_open"] = pd.to_numeric(mw.days_open, errors="coerce").fillna(7).clip(1, 7)
     mw = mw.sort_values(["store_key", "category", "week_start"]).reset_index(drop=True)
+    # last week's units: the momentum term. Weekly sales carry over - a store
+    # that sold 2,000 last week will sell near 2,000 this week whatever else is
+    # going on - and a model without this loses to "same as last week" every
+    # time. With it in, every other coefficient reads "beyond what last week
+    # already told us".
+    mw["units_lag1"] = mw.groupby(["store_key", "category"]).units.shift(1)
+    _ws = pd.to_datetime(mw.week_start)
+    gap = (_ws - _ws.groupby([mw.store_key, mw.category]).shift(1)).dt.days
+    mw.loc[gap != 7, "units_lag1"] = np.nan          # a missing week breaks the chain
     return mw, last_txn, hol
 
 
 # ------------------------------------------------------- 2-5. the fits
+def _predict(bmap: dict, row) -> float:
+    """One week's expected units from a coefficient map and a row that carries
+    the driver columns (skus_in_stock for 'stock', units_lag1 for 'lag1')."""
+    v = bmap.get("const", 0.0)
+    for c, b in bmap.items():
+        if c == "const":
+            continue
+        x = row["skus_in_stock"] if c == "stock" else row["units_lag1"] if c == "lag1" else row[c]
+        v += b * float(x)
+    return float(v)
+
+
+def _walk(bmap: dict, frame: pd.DataFrame, lag_seed: float) -> np.ndarray:
+    """Forecast a run of weeks in order, feeding each forecast in as the next
+    week's 'last week's units'. That is the honest multi-week forecast: at the
+    cutoff you do not know the actuals of the weeks you are forecasting."""
+    out, lag = [], lag_seed
+    for _, r in frame.iterrows():
+        r = r.copy(); r["units_lag1"] = lag
+        v = _predict(bmap, r)
+        out.append(v); lag = v
+    return np.array(out)
+
+
 def _fit_unit(d: pd.DataFrame, forecast_x: pd.DataFrame | None):
     """Fit one store x category. Returns dicts/frames for coef, fit, backtest,
     forecast, plus a summary dict. d is complete weeks only, sorted."""
     n_all = len(d)
-    stock_ok = d.skus_in_stock.notna().sum() >= MIN_WEEKS and \
-        d.skus_in_stock.dropna().std() > 1e-9
-    fit_d = d[d.skus_in_stock.notna()] if stock_ok else d
+    d = d[d.units_lag1.notna()].reset_index(drop=True)      # first week has no "last week"
+    for c in ("skus_in_stock", "skus_out", "floor_units_end", "units", "net"):
+        d[c] = pd.to_numeric(d[c], errors="coerce").astype(float)   # nullable ints -> float
+    have_stock = d.skus_in_stock.notna()
+    stock_ok = have_stock.sum() >= MIN_WEEKS and d.skus_in_stock.dropna().std() > 1e-9
+    stock_imputed = None
+    if stock_ok:
+        # the inventory ledger can lag sales by a few weeks (it is exported
+        # monthly). Weeks AFTER the last stock week are kept in the fit with the
+        # shelf assumed at its last known 4-week mean, and flagged, so the fit
+        # still reaches the last complete week; weeks BEFORE the first stock
+        # week are dropped.
+        last_known = d.index[have_stock].max()
+        first_known = d.index[have_stock].min()
+        fill = float(d.loc[have_stock, "skus_in_stock"].tail(4).mean())
+        d = d.loc[first_known:].copy()
+        stock_imputed = d.skus_in_stock.isna()
+        d.loc[stock_imputed, "skus_in_stock"] = fill
+        fit_d = d
+    else:
+        fit_d = d
     if len(fit_d) < MIN_WEEKS:
         return None
     y = fit_d.units.to_numpy(float)
     X, cols = _design(fit_d, stock_ok)
     coef, se, r2, sigma, resid, n = ols(X, y)
     kind = "stock" if stock_ok else "no_stock"
+    bmap = dict(zip(cols, coef))
 
     coef_rows = [dict(term=c, label=TERM_LABEL.get(c, c), coef=float(b), se=float(s),
                       lo=float(b - 2 * s), hi=float(b + 2 * s),
@@ -291,41 +344,36 @@ def _fit_unit(d: pd.DataFrame, forecast_x: pd.DataFrame | None):
     fit["predicted"] = pred
     fit["residual"] = y - pred
     fit["resid_z"] = fit.residual / sigma if sigma > 0 else 0.0
+    fit["stock_imputed"] = stock_imputed.to_numpy() if stock_imputed is not None else False
     if stock_ok:
         b_stock = coef[cols.index("stock")]
         # the part of this week's gap to a normal shelf that stock explains
         norm = fit_d.skus_in_stock.rolling(8, min_periods=3).median().shift(1)
         fit["stock_vs_norm"] = fit_d.skus_in_stock - norm
         fit["explained_by_stock"] = b_stock * fit.stock_vs_norm
+        # an assumed shelf explains nothing: blank those weeks
+        fit.loc[fit.stock_imputed, ["stock_vs_norm", "explained_by_stock"]] = np.nan
+        fit.loc[fit.stock_imputed, "skus_in_stock"] = np.nan
     else:
         fit["stock_vs_norm"] = np.nan
         fit["explained_by_stock"] = np.nan
 
-    # ---- backtest: fit through cutoff, forecast the held-out weeks
+    # ---- backtest: fit through cutoff, walk forward over the held-out weeks
     bt_rows, bt_sum = [], None
     if len(fit_d) >= MIN_WEEKS + BACKTEST_WEEKS:
         tr, ho = fit_d.iloc[:-BACKTEST_WEEKS], fit_d.iloc[-BACKTEST_WEEKS:]
         Xtr, ctr = _design(tr, stock_ok)
         ctr_coef, *_ = ols(Xtr, tr.units.to_numpy(float))
-        Xho, cho = _design(ho, stock_ok)
-        # the held-out design may drop a constant column the training set kept
-        # (or vice versa); align by name
-        bmap = dict(zip(ctr, ctr_coef))
-        f_model = np.column_stack([ho[c].to_numpy(float) if c not in ("const", "stock")
-                                   else (np.ones(len(ho)) if c == "const"
-                                         else ho.skus_in_stock.to_numpy(float))
-                                   for c in ctr]) @ np.array([bmap[c] for c in ctr])
+        seed = float(tr.units.iloc[-1])
+        f_model = _walk(dict(zip(ctr, ctr_coef)), ho, seed)
         # "no model" rivals: same as the last training week; mean of last 4
-        naive_last = float(tr.units.iloc[-1])
+        naive_last = seed
         naive_4 = float(tr.units.tail(4).mean())
         # no-stock rival: same terms minus stock (only differs when stock is in)
         if stock_ok:
             Xtr2, ctr2 = _design(tr, False)
             c2, *_ = ols(Xtr2, tr.units.to_numpy(float))
-            Xho2, _ = _design(ho, False)
-            bmap2 = dict(zip(ctr2, c2))
-            f_nostock = np.column_stack([np.ones(len(ho)) if c == "const" else ho[c].to_numpy(float)
-                                         for c in ctr2]) @ np.array([bmap2[c] for c in ctr2])
+            f_nostock = _walk(dict(zip(ctr2, c2)), ho, seed)
         else:
             f_nostock = f_model
         act = ho.units.to_numpy(float)
@@ -338,38 +386,34 @@ def _fit_unit(d: pd.DataFrame, forecast_x: pd.DataFrame | None):
         mae = lambda f: float(np.mean(np.abs(act - f)))
         m_model, m_ns, m_last, m_4 = mae(f_model), mae(f_nostock), mae(naive_last), mae(naive_4)
         best_naive = min(m_last, m_4)
-        if best_naive > 0:
-            gain = 1 - m_model / best_naive
-        else:
-            gain = 0.0
+        gain = (1 - m_model / best_naive) if best_naive > 0 else 0.0
         verdict = ("beats" if gain > 0.10 else "ties" if gain > -0.10 else "loses")
         bt_sum = dict(mae_model=m_model, mae_nostock=m_ns, mae_last=m_last,
                       mae_last4=m_4, gain_vs_naive=gain, verdict=verdict,
                       cutoff_week=f"{int(tr.iloc[-1].iso_year)}-W{int(tr.iloc[-1].iso_week):02d}")
 
-    # ---- forecast the next weeks from the full fit
+    # ---- forecast the next weeks from the full fit, walking forward
     fc_rows = []
     if forecast_x is not None and not forecast_x.empty:
         fx = forecast_x.copy()
         if stock_ok:
             fx["skus_in_stock"] = float(fit_d.skus_in_stock.tail(4).mean())
-        bmap = dict(zip(cols, coef))
-        for r in fx.itertuples(index=False):
-            v = bmap["const"]
-            for c in cols:
-                if c == "const":
-                    continue
-                v += bmap[c] * (r.skus_in_stock if c == "stock" else getattr(r, c))
+        f = _walk(bmap, fx, float(fit_d.units.iloc[-1]))
+        for i, r in enumerate(fx.itertuples(index=False)):
+            v = f[i]
+            # the band widens with the horizon: errors compound week on week
+            band = 1.645 * sigma * math.sqrt(i + 1) if "lag1" in bmap else 1.645 * sigma
             fc_rows.append(dict(store_key=r.store_key, category=r.category,
                                 iso_year=r.iso_year, iso_week=r.iso_week,
                                 week_start=r.week_start, forecast=float(v),
-                                lo=float(v - 1.645 * sigma), hi=float(v + 1.645 * sigma),
+                                lo=float(v - band), hi=float(v + band),
                                 promo_days=int(r.promo_days), takeover_days=int(r.takeover_days),
                                 holiday_name=r.holiday_name,
                                 stock_assumed=(float(fx.skus_in_stock.iloc[0]) if stock_ok else None)))
 
     summary = dict(model_kind=kind, n_weeks=int(n), n_weeks_all=int(n_all), r2=float(r2),
                    sigma=float(sigma), thin=bool(n < GOOD_WEEKS),
+                   stock_imputed_weeks=int(stock_imputed.sum()) if stock_imputed is not None else 0,
                    mean_units=float(y.mean()),
                    unit_price=float(fit_d.net.sum() / max(1.0, fit_d.units.sum())))
     return dict(coef=coef_rows, fit=fit, backtest=bt_rows, backtest_summary=bt_sum,
@@ -406,7 +450,8 @@ def _future_weeks(mw: pd.DataFrame, last_txn: dt.date, hol: dict) -> pd.DataFram
                              promo=pdays / 7.0, takeover=tdays / 7.0, holiday=float(bool(names)),
                              days_open=7.0, sin=math.sin(2 * math.pi * w / 52.18),
                              cos=math.cos(2 * math.pi * w / 52.18),
-                             trend=(ws - first).days / 7.0, skus_in_stock=np.nan))
+                             trend=(ws - first).days / 7.0, skus_in_stock=np.nan,
+                             units_lag1=np.nan))
     return pd.DataFrame(rows)
 
 
@@ -483,6 +528,8 @@ def build_brand(con, mw: pd.DataFrame, last_txn: dt.date, cat_coef: dict) -> pd.
     bw["takeover"] = own
     bw["promo"] = 0.0; bw["holiday"] = 0.0; bw["days_open"] = 7.0
     bw = bw.sort_values(["store_key", "brand", "week_start"])
+    bw["units_lag1"] = bw.groupby(["store_key", "brand"]).units.shift(1)
+    bw = bw[bw.units_lag1.notna()]
 
     out = []
     for (sk, brand), g in bw.groupby(["store_key", "brand"]):
@@ -575,9 +622,15 @@ def build_insights(con, mw, results: dict, brand: pd.DataFrame, last_txn: dt.dat
                         f"which accounts for roughly {_fmt_units(abs(stock_part))} of the missing units. "
                         f"Supply, not demand: check receiving and the floor set before changing the pitch.",
                         mag=abs(r.resid_z), category=cat)
+                elif gap < 0 and pd.isna(r.stock_vs_norm):
+                    add(sk, "finding", "warn", "model-lab",
+                        base + " — shelf unknown for this week.",
+                        "The inventory ledger has not been loaded this far, so this cannot yet be "
+                        "split into supply and demand. Load the latest monthly ledger to find out.",
+                        mag=abs(r.resid_z) * 0.9, category=cat)
                 elif gap < 0:
                     add(sk, "finding", "bad", "model-lab",
-                        base + (" with a normal shelf." if pd.notna(r.stock_vs_norm) else "."),
+                        base + " with a normal shelf.",
                         "Stock, season, promos and days open are all accounted for, so this reads as "
                         "a demand dip. Worth asking the floor what changed.",
                         mag=abs(r.resid_z), category=cat)

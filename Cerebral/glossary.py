@@ -45,6 +45,42 @@ GLOSSARY: dict[str, str] = {
         "traffic. If footfall drops 20% and Flower revenue drops 20%, Flower "
         "is fine — this metric would be flat. Raw revenue would look alarming.",
 
+    "regression":
+        "A best-fit line through the weekly numbers. It picks the coefficients "
+        "that make the week-to-week misses as small as possible, so each "
+        "coefficient reads: holding the other drivers in the model fixed, one "
+        "more of this is worth so many units a week. It finds patterns, not "
+        "causes.",
+
+    "coefficient":
+        "The number a regression attaches to a driver: units per extra SKU in "
+        "stock, units for a full promo week, and so on. Read it with its likely "
+        "range (±2 standard errors). If that range crosses zero, the data cannot "
+        "tell the effect from nothing yet.",
+
+    "residual":
+        "Actual minus what the model expected, for one week. The part of the "
+        "week the model cannot explain - usually the interesting part. A big "
+        "negative residual with a normal shelf is a demand dip; with a thin "
+        "shelf it is a supply gap.",
+
+    "r²":
+        "R-squared: the share of the week-to-week ups and downs the model "
+        "explains, from 0 to 1. Low is not wrong; it means most of the movement "
+        "comes from things we do not measure.",
+
+    "backtest":
+        "The honest test. Refit the model on data up to eight weeks ago, "
+        "forecast those eight weeks, and compare with what happened and with "
+        "'same as last week'. A model that cannot beat that simple rival only "
+        "describes the past.",
+
+    "stock as a control":
+        "Putting SKUs-in-stock into the regression so that the leftover is "
+        "comparable week to week. It is not that the stock number is interesting "
+        "in itself: it cleans the sales number, so a drop can be read as supply "
+        "(the shelf was thin) or demand (the shelf was fine).",
+
     "penetration":
         "Out of every 100 transactions, how many contained this category. "
         "Reach, not revenue. A category can hold its revenue while its "
@@ -337,6 +373,15 @@ SECTIONS: dict[str, str] = {
         "together: revenue tells you what the category sells, penetration "
         "tells you how many customers it reaches. A category holding revenue "
         "while penetration slides is more fragile than it looks.",
+
+    "tldr":
+        "The short version. Each line is written by the refresh from the Model Lab "
+        "fits and a few checks on the other tables: a finding (something sold "
+        "more or less than its stock, season and promo calendar predicted), a "
+        "suggestion (a reorder, a promo worth repeating) or a question the "
+        "numbers raised. Bad before warning before good; the chain first, then "
+        "each selected store. Nothing here is a conclusion - it is where to look "
+        "first this week.",
 
     "alerts":
         "Generated automatically by comparing this week against the last 13. "

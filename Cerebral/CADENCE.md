@@ -82,8 +82,13 @@ load; the same recipe works locally from the `Cerebral/` folder:
     python publish.py --db ..\tta.duckdb                         # rebuilds cerebral_dash.duckdb
     python publish_vm.py --src ..\tta.duckdb                     # adds the Visual Merch tables
     python publish_promo.py --src ..\tta.duckdb --dash cerebral_dash.duckdb   # adds the Promo Lab tables
+    python publish_model.py --dash cerebral_dash.duckdb                       # adds the Model Lab tables + TL;DR
     python checks.py --dash cerebral_dash.duckdb --db ..\tta.duckdb           # validation gate (FAIL blocks upload)
     python publish_vm.py --src ..\tta.duckdb --upload            # pushes the finished file to Drive
 
-Do not use `publish.py --upload`: it rebuilds first and drops the VM and promo
-tables. The promo calendar itself lives in `promos.py`.
+Do not use `publish.py --upload`: it rebuilds first and drops the VM, promo and
+model tables. The promo calendar itself lives in `promos.py`.
+
+`publish_model.py` reads nothing but the dash file, so it also runs on a copy
+pulled from Drive. `python publish_model.py --explain Flower 4` prints one fit
+as a Stata-style table (store keys: 1 DTBK, 2 5th Ave, 3 Soho, 4 USQ, 0 chain).

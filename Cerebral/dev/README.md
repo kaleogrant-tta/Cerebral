@@ -10,7 +10,7 @@ uses made-up numbers, so nothing private is involved. Run all commands from the
 
 Writes `dev/fixture/cerebral_dash.duckdb` (about 25 MB, ~88 `dash_*` tables:
 4 stores, 32 ISO weeks of 2026, every tab's tables). It is the same every run.
-It reuses the real `publish_events.py`, `publish_vm.py` and `publish_promo.py` code
+It reuses the real `publish_events.py`, `publish_vm.py`, `publish_promo.py` and `publish_model.py` code
 for the Events, Visual Merch and Promo Lab tables. The other tables follow the column
 lists in `publish.py` and the `publish_*.py` files. The file is git-ignored (`*.duckdb`).
 

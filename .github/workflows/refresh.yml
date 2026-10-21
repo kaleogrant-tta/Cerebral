@@ -69,6 +69,12 @@ jobs:
       - name: Publish promo tables
         run: python publish_promo.py --src /tmp/tta_work/tta.duckdb --dash cerebral_dash.duckdb
 
+      # Model Lab tables (dash_model_*) and the TL;DR feed (dash_insights):
+      # per store x category regressions on the finished dash file (reads
+      # nothing but the dash file). Prints a row count per table.
+      - name: Publish model tables
+        run: python publish_model.py --dash cerebral_dash.duckdb
+
       # Validation gate: structural / reconciliation / invariant checks on the
       # finished dash file. Any FAIL stops the run before Drive is touched.
       - name: Validate dashboard file

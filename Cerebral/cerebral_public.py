@@ -1296,6 +1296,11 @@ def section_charts():
 
 # -------------------------------------------------------------- insights
 def section_insights():
+    from model_lab_tab import render_tldr as _render_tldr, model_note as _model_note
+    _render_tldr(q=q, keys=keys, stores=STORES, table_exists=table_exists, howto=howto)
+    st.divider()
+    _model_key = int(keys[0]) if len(keys) == 1 else 0
+
     st.markdown("#### Alerts")
     howto("alerts")
 
@@ -1331,7 +1336,10 @@ def section_insights():
                 if r.penetration < lcl:
                     alerts.append(("bad", r.category,
                         f"penetration {r.penetration*100:.1f}% is below the lower "
-                        f"alert limit {lcl*100:.1f}% (baseline {base*100:.1f}%)"))
+                        f"alert limit {lcl*100:.1f}% (baseline {base*100:.1f}%)"
+                        + _model_note(q=q, table_exists=table_exists,
+                                      store_key=_model_key, category=r.category,
+                                      iso_year=int(cy), iso_week=int(cwk))))
                 elif r.penetration > ucl:
                     alerts.append(("ok", r.category,
                         f"penetration {r.penetration*100:.1f}% is above the upper "
@@ -3614,6 +3622,9 @@ def section_terms():
         ("Promos (Promo Lab)",
          ["qualifying", "applied", "near miss", "est. discount",
           "break-even volume lift"]),
+        ("Models (Model Lab, TL;DR)",
+         ["regression", "coefficient", "residual", "R²", "backtest",
+          "stock as a control"]),
     ]
 
     for title, terms in groups:
@@ -5040,6 +5051,16 @@ def section_brand_efficiency():
     render_bei(q=q, keys=keys, stores=STORES,
                heading=heading, table_exists=table_exists,
                accent=ACCENT, series=SERIES)
+    from model_lab_tab import render_brand_block as _render_brand_block
+    _render_brand_block(q=q, keys=keys, stores=STORES, heading=heading,
+                        table_exists=table_exists, accent=ACCENT)
+
+
+def section_model_lab():
+    from model_lab_tab import render_model_lab as _render_model_lab
+    _render_model_lab(q=q, keys=keys, stores=STORES, heading=heading,
+                      table_exists=table_exists, accent=ACCENT, warn=WARN,
+                      bad=BAD, series=SERIES)
 
 
 # ------------------------------------------------------------ GM scorecard
@@ -5120,6 +5141,7 @@ NAV = [
     ("Takeovers",           "takeovers",      section_takeovers),
     ("Visual Merch",        "visual-merch",   section_visual_merch),
     ("Projections",         "projections",    section_projections),
+    ("Model Lab",           "model-lab",      section_model_lab),
     ("Promo Lab",           "promo-lab",      section_promo_lab),
     ("GM Scorecard",        "gm-scorecard",   section_gm_scorecard),
     ("What the terms mean", "terms",          section_terms),

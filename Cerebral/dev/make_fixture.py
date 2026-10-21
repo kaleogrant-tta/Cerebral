@@ -1405,6 +1405,19 @@ def build_promo(dash_path: Path):
 
 
 # ====================================================================
+# ---------------------------------------------------------------------------
+# 9. model lab -- the real publish_model on the finished fixture (it reads only
+#    dash_* tables, so nothing to fake). The fixture's numbers are random, so
+#    expect low R-squared and a backtest that loses to "same as last week";
+#    the point is that every table exists and the tab renders.
+def build_model(dash_path: Path):
+    import publish_model as pm
+    con = duckdb.connect(str(dash_path))
+    counts = pm.build_model(con)
+    con.close()
+    print("  [model] " + ", ".join(f"{k.replace('dash_', '')}: {v:,}" for k, v in counts.items()))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -1429,6 +1442,7 @@ def main():
     con.close()
     build_vm(a.out)
     build_promo(a.out)
+    build_model(a.out)
     con = duckdb.connect(str(a.out))
     n = con.execute("SELECT COUNT(*) FROM duckdb_tables() WHERE table_name LIKE 'dash_%'").fetchone()[0]
     con.close()

@@ -60,6 +60,8 @@ def check_weeks_aligned(dash):
     print(f"  (reference latest week from dash_brand_week = {ry}-W{rw:02d})")
     for t in sorted(have):
         if not t.startswith("dash_") or t == "dash_brand_week": continue
+        if t == "dash_model_forecast":      # the forecast is MEANT to be ahead of sales
+            continue
         cs = cols(dash, t)
         if "iso_year" not in cs or "iso_week" not in cs: continue
         y, w = latest_yw(dash, t)
@@ -449,6 +451,52 @@ def check_promo_leak(dash):
            f"{len(have)} tables scanned" + (f"; {bad}" if bad else ""))
 
 # ------------------------------------------------------------------- main
+# ------------------------------------------------------------------ model lab
+MODEL_SKIP = "publish_model.py has not run on this file"
+MODEL_TABLES = ["dash_model_week", "dash_model_summary", "dash_model_coef", "dash_model_fit",
+                "dash_model_backtest", "dash_model_backtest_summary", "dash_model_forecast",
+                "dash_model_brand", "dash_insights", "dash_model_meta"]
+
+def check_model_tables(dash):
+    """publish_model.py wrote every table, the fits cover the last complete week,
+    every store x category with enough history got a fit, no coefficient is NaN,
+    and R-squared stays in [0, 1]. Not a check that the model is any good - the
+    backtest in the tab does that - only that the build ran all the way through."""
+    have = tables(dash)
+    missing = [t for t in MODEL_TABLES if t not in have]
+    if missing:
+        report("model tables present", SKIP if len(missing) == len(MODEL_TABLES) else FAIL,
+               MODEL_SKIP if len(missing) == len(MODEL_TABLES) else f"missing {missing}")
+        return
+    if "_empty" in cols(dash, "dash_model_fit"):
+        report("model fits exist", FAIL, "dash_model_fit is empty"); return
+    y, w = dash.execute("select iso_year, iso_week from dash_model_fit order by week_start desc limit 1").fetchone()
+    cy, cw = dash.execute("select iso_year, iso_week from dash_category_week order by 1 desc, 2 desc limit 1").fetchone()
+    lag = yw_ord(cy, cw) - yw_ord(y, w)
+    report("model fits reach the last complete week", PASS if lag <= 1 else FAIL,
+           f"fit {y}-W{w:02d}, sales {cy}-W{cw:02d}")
+    none = q1(dash, "select count(*) from dash_model_summary where model_kind = 'none' and n_weeks >= ?",
+              [q1(dash, "select min_weeks from dash_model_meta")])
+    report("every eligible store x category fitted", PASS if none == 0 else FAIL, f"{none} skipped with enough weeks")
+    nan = q1(dash, "select count(*) from dash_model_coef where coef is null or isnan(coef) or isnan(se)")
+    report("no NaN coefficients", PASS if nan == 0 else FAIL, f"{nan} rows")
+    bad_r2 = q1(dash, "select count(*) from dash_model_summary where r2 is not null and (r2 < -0.001 or r2 > 1.001)")
+    report("R-squared in range", PASS if bad_r2 == 0 else FAIL, f"{bad_r2} rows")
+    nfit = q1(dash, "select count(*) from dash_model_summary where model_kind != 'none'")
+    nstock = q1(dash, "select count(*) from dash_model_summary where model_kind = 'stock'")
+    report("stock control in use", PASS if nstock > 0 else WARN,
+           f"{nstock} of {nfit} fits carry SKUs-in-stock" + ("" if nstock else " (no inventory history reached dash_category_week)"))
+    n_ins = 0 if "_empty" in cols(dash, "dash_insights") else q1(dash, "select count(*) from dash_insights")
+    report("TL;DR lines written", PASS if n_ins > 0 else WARN, f"{n_ins} lines" + ("" if n_ins else " (nothing stood out, or the insight rules found no data)"))
+    if n_ins:
+        blank = q1(dash, "select count(*) from dash_insights where headline is null or length(headline) < 20")
+        report("TL;DR lines readable", PASS if blank == 0 else FAIL, f"{blank} blank/short headlines")
+        loses = q1(dash, "select count(*) from dash_model_backtest_summary where store_key = 0 and verdict = 'loses'")
+        tot = q1(dash, "select count(*) from dash_model_backtest_summary where store_key = 0")
+        report("chain forecasts beat or tie 'same as last week'", PASS if tot == 0 or loses <= tot / 2 else WARN,
+               f"{loses} of {tot} chain categories lose (the tab says so; a majority losing usually means a data problem upstream)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dash", default="cerebral_dash.duckdb")
@@ -490,6 +538,8 @@ def main():
     print("-- promo lab")
     run("promo defs", check_promo_defs, dash); run("promo day", check_promo_day, dash)
     run("promo leak", check_promo_leak, dash)
+    print("-- model lab")
+    run("model tables", check_model_tables, dash)
 
     counts = {s: sum(1 for _, st, _ in RESULTS if st == s) for s in (PASS, FAIL, WARN, SKIP)}
     print(f"== {counts[PASS]} pass, {counts[FAIL]} fail, {counts[WARN]} warn, {counts[SKIP]} skip")

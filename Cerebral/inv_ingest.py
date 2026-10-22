@@ -114,6 +114,17 @@ def room_class(room: str) -> str:
 SELLABLE = {"floor", "backstock"}
 
 
+def _etl_sellable(room: str) -> bool:
+    """fact_inventory.sellable must mean what the Monday ETL means (SALES FLOOR,
+    VAULT, DAY VAULT), not the roll-up's wider floor+backstock class, or Holding
+    and Receiving rooms show up as dead stock on Brand Efficiency."""
+    try:
+        from tta_config import SELLABLE_ROOMS
+    except Exception:
+        SELLABLE_ROOMS = ["SALES FLOOR", "VAULT", "DAY VAULT"]
+    return (room or "").strip().upper() in {x.upper() for x in SELLABLE_ROOMS}
+
+
 # ---------------------------------------------------------------- readers
 def _header_block(ws):
     """Dutchie exports: 3 meta rows (Export/From/To Date), then the header."""
@@ -582,7 +593,7 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
         for r in (anchor_rows if anchor_file.suffix == ".xlsx" else []):
             fi_rows.append((anchor_ts.date(), r["store_key"], r["package_id"], r["product"],
                             r["category"], cat_map.get(r["category"], r["category"]), r["room"],
-                            r["room_class"] in SELLABLE, r["qty"], r["unit_cost"], r["unit_price"],
+                            _etl_sellable(r["room"]), r["qty"], r["unit_cost"], r["unit_price"],
                             r["qty"] * r["unit_cost"], r["qty"] * r["unit_price"], "dutchie_export"))
         # reconstructed week-ends, two synthetic rooms per product
         for (sk, iy, iw, ws_, product, brand, cat, st_, et, sf, ef, *_rest) in out:

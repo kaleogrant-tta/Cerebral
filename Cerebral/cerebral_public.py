@@ -865,6 +865,19 @@ st.caption(f"Category analytics · The Travel Agency · {label}")
 
 # ---------------------------------------------------------------- charts
 def section_charts():
+    # Week-over-week: one week against the one before it, for the Monday
+    # call. Ignores the "Weeks shown" slider on purpose; follows the store
+    # filter. Everything below the toggle is the usual windowed view.
+    wow = st.toggle(
+        "Week over week", value=False, key="wow_view",
+        help="Compare one week with the week immediately before it and "
+             "nothing else. The window slider does not apply here.")
+    if wow:
+        import wow_board
+        wow_board.render(q, keys, STORES, weeks, PARTIAL_WEEK, charts,
+                         ACCENT, BAD, MUTED, cat_color, tip)
+        return
+
     wk = (dfv.groupby(["iso_year", "iso_week", "wk_date"])
              .agg(net=("net", "sum"), baskets=("baskets", "first"),
                   days=("days_open", "max"))

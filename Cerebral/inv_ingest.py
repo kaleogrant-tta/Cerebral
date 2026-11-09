@@ -271,6 +271,21 @@ def build(folder: Path, db: Path, since: dt.date) -> None:
             log.append(dict(file=f.name, kind="skipped", rows=0, note="unrecognised header"))
 
     _lap("parse exports")
+    # A Current Inventory export left in the folder (it rides along when a monthly
+    # ledger is pushed) must not anchor the roll-back behind the Monday snapshots
+    # already in fact_inventory. Anchor on whichever real snapshot is newest.
+    if snapshots:
+        try:
+            _ca = duckdb.connect(str(db), read_only=True)
+            _hs = _ca.execute("SELECT count(*) FROM information_schema.columns WHERE table_name='fact_inventory' AND column_name='source'").fetchone()[0]
+            _d_real = _ca.execute("SELECT max(snapshot_date) FROM fact_inventory" + (" WHERE source IS NULL" if _hs else "")).fetchone()[0]
+            _ca.close()
+        except Exception:
+            _d_real = None
+        _d_file = max(s[0] for s in snapshots).date()
+        if _d_real is not None and _d_real > _d_file:
+            print(f"newest Current Inventory file is {_d_file} but fact_inventory has a real snapshot from {_d_real}; anchoring on the database", flush=True)
+            snapshots = []
     if snapshots:
         anchor_ts, anchor_file, anchor_rows = max(snapshots, key=lambda s: s[0])
         print(f"\nanchor: {anchor_file.name} @ {anchor_ts}")

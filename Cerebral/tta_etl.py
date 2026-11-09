@@ -990,6 +990,8 @@ class Pipeline:
         agg["ambiguous"] = agg["n_ids"] > 1
         agg = agg.drop(columns=["n_ids"])
 
+        try: self.con.fetchall()   # drain a result left unread by an earlier execute(); DuckDB refuses register() otherwise
+        except Exception: pass
         self.con.register("xw_new", agg)
         self.con.execute("""
             INSERT INTO customer_xwalk

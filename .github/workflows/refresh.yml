@@ -55,6 +55,19 @@ jobs:
           TTA_DRIVE_STATE:   ${{ secrets.TTA_DRIVE_STATE }}
         run: python push_db.py /tmp/tta_work/tta.duckdb
 
+      # Weekly add-on menu shortlist for the GM: ranks what customers already
+      # add to baskets, filtered to what is in stock, and replaces
+      # "Add-On Shortlist (latest).xlsx" on Drive. Runs after the inventory
+      # ingest so the stock filter is current. continue-on-error: a problem
+      # here never blocks the dashboard.
+      - name: Add-on shortlist
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TTA_DRIVE_STATE:   ${{ secrets.TTA_DRIVE_STATE }}
+          TTA_DRIVE_REPORTS: ${{ secrets.TTA_DRIVE_REPORTS }}
+        run: python addon_shortlist.py --db /tmp/tta_work/tta.duckdb --out /tmp/tta_work/addon_shortlist.xlsx --upload
+
       # Build the dashboard file (no upload here - publish_vm.py ships it)
       - name: Publish dashboard file
         run: python publish.py --db /tmp/tta_work/tta.duckdb
